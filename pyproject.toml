@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "graph-mcp"
+version = "0.1.0"
+description = "MCP server for Microsoft Teams, Outlook Calendar, and Mail via Microsoft Graph API"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0",
+    "httpx>=0.27",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "cryptography>=42.0",
+]
+
+[project.scripts]
+graph-mcp = "graph_mcp:main"
