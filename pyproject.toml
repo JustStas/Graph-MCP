@@ -7,8 +7,15 @@ name = "graph-mcp"
 version = "0.1.0"
 description = "MCP server for Microsoft Teams, Outlook Calendar, and Mail via Microsoft Graph API"
 readme = "README.md"
+authors = [
+    { name = "JustStas" }
+]
 license = "MIT"
 requires-python = ">=3.10"
+
+[project.urls]
+Homepage = "https://github.com/JustStas/teams-mcp"
+Repository = "https://github.com/JustStas/teams-mcp.git"
 dependencies = [
     "fastmcp>=2.0",
     "httpx>=0.27",
