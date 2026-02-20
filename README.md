@@ -100,6 +100,14 @@ The endpoint needs a permission that's not in your Azure app registration, or re
 **Login works but tools say "not authenticated"**
 Restart the MCP server (`claude mcp restart graph`) — it may be running an old version.
 
+## Disclaimer
+
+This project is an independent open-source effort and is **not affiliated with, endorsed by, or sponsored by Microsoft Corporation**. Microsoft, Microsoft Teams, Outlook, Microsoft 365, Microsoft Graph, and Azure are trademarks of the Microsoft group of companies.
+
+This software is provided "as is", without warranty of any kind. Use it at your own risk. The authors accept no liability for any damages, data loss, or security issues arising from the use of this software. You are responsible for complying with your organization's policies and Microsoft's [API Terms of Use](https://learn.microsoft.com/en-us/legal/microsoft-apis/terms-of-use) when using this tool.
+
+This software accesses Microsoft services on your behalf using your own credentials and Azure app registration. Data retrieved from Microsoft Graph (emails, messages, calendar events, etc.) is passed to the LLM that invoked the tool. Be mindful of your organization's data handling policies when using this with cloud-hosted AI models.
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
