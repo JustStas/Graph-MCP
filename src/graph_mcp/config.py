@@ -51,6 +51,7 @@ class Settings(BaseSettings):
             "ChannelMessage.Send",
             "Team.ReadBasic.All",
             "Channel.ReadBasic.All",
+            "ChannelMember.Read.All",
             "Calendars.Read",
             "Mail.Read",
             "Mail.Send",

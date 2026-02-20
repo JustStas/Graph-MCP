@@ -31,7 +31,7 @@ You need an Azure App Registration:
    - `User.ReadBasic.All`
    - `Chat.Read`, `Chat.ReadWrite`, `ChatMessage.Send`
    - `ChannelMessage.Read.All`, `ChannelMessage.Send`
-   - `Team.ReadBasic.All`, `Channel.ReadBasic.All`
+   - `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMember.Read.All`
    - `Calendars.Read`
    - `Mail.Read`, `Mail.Send`
    - `Presence.Read`, `Presence.Read.All`, `Presence.ReadWrite`

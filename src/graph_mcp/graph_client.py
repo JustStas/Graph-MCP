@@ -80,9 +80,12 @@ class GraphClient:
 
         limiter.reset_backoff()
 
-        if resp.status_code == 204:
+        if resp.status_code == 204 or not resp.content:
             return None
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError:
+            return resp.text
 
     async def get(
         self,
