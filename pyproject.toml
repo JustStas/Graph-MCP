@@ -13,9 +13,6 @@ authors = [
 license = "MIT"
 requires-python = ">=3.10"
 
-[project.urls]
-Homepage = "https://github.com/JustStas/Graph-MCP"
-Repository = "https://github.com/JustStas/Graph-MCP.git"
 dependencies = [
     "fastmcp>=2.0",
     "httpx>=0.27",
@@ -26,3 +23,7 @@ dependencies = [
 
 [project.scripts]
 graph-mcp = "graph_mcp:main"
+
+[project.urls]
+Homepage = "https://github.com/JustStas/Graph-MCP"
+Repository = "https://github.com/JustStas/Graph-MCP.git"
