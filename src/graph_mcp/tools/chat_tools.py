@@ -36,14 +36,18 @@ def register_chat_tools(mcp):
 
     @mcp.tool()
     @require_auth
-    async def graph_send_chat_message(chat_id: str, message: str) -> str:
+    async def graph_send_chat_message(
+        chat_id: str, message: str, is_html: bool = False
+    ) -> str:
         """Send a message to a chat.
 
         Args:
             chat_id: The chat ID to send the message to.
             message: The message text to send.
+            is_html: Whether the message is HTML (default: plain text).
         """
-        body = {"body": {"contentType": "text", "content": message}}
+        content_type = "html" if is_html else "text"
+        body = {"body": {"contentType": content_type, "content": message}}
         result = await graph_client.post(
             f"/chats/{chat_id}/messages", json_body=body
         )

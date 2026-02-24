@@ -47,7 +47,10 @@ def register_teams_tools(mcp):
     @mcp.tool()
     @require_auth
     async def graph_send_channel_message(
-        team_id: str, channel_id: str, message: str
+        team_id: str,
+        channel_id: str,
+        message: str,
+        is_html: bool = False,
     ) -> str:
         """Send a message to a channel.
 
@@ -55,8 +58,10 @@ def register_teams_tools(mcp):
             team_id: The team ID.
             channel_id: The channel ID.
             message: The message text to send.
+            is_html: Whether the message is HTML (default: plain text).
         """
-        body = {"body": {"contentType": "text", "content": message}}
+        content_type = "html" if is_html else "text"
+        body = {"body": {"contentType": content_type, "content": message}}
         result = await graph_client.post(
             f"/teams/{team_id}/channels/{channel_id}/messages", json_body=body
         )
@@ -101,7 +106,11 @@ def register_teams_tools(mcp):
     @mcp.tool()
     @require_auth
     async def graph_reply_to_channel_message(
-        team_id: str, channel_id: str, message_id: str, message: str
+        team_id: str,
+        channel_id: str,
+        message_id: str,
+        message: str,
+        is_html: bool = False,
     ) -> str:
         """Reply to a channel message.
 
@@ -110,8 +119,10 @@ def register_teams_tools(mcp):
             channel_id: The channel ID.
             message_id: The message ID to reply to.
             message: The reply text.
+            is_html: Whether the message is HTML (default: plain text).
         """
-        body = {"body": {"contentType": "text", "content": message}}
+        content_type = "html" if is_html else "text"
+        body = {"body": {"contentType": content_type, "content": message}}
         result = await graph_client.post(
             f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies",
             json_body=body,
