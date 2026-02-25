@@ -12,9 +12,7 @@ def register_meeting_tools(mcp):
             join_url: Teams meeting join URL to look up a specific meeting.
                       If empty, returns recent meetings.
         """
-        params: dict[str, str] = {
-            "$select": "id,subject,startDateTime,endDateTime,joinWebUrl",
-        }
+        params: dict[str, str] = {}
         if join_url:
             params["$filter"] = f"JoinWebUrl eq '{join_url}'"
 
