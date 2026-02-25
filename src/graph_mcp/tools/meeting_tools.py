@@ -1,3 +1,5 @@
+import urllib.parse
+
 from graph_mcp.graph_client import graph_client
 from graph_mcp.responses import require_auth, success_response
 
@@ -14,7 +16,8 @@ def register_meeting_tools(mcp):
         """
         params: dict[str, str] = {}
         if join_url:
-            params["$filter"] = f"JoinWebUrl eq '{join_url}'"
+            encoded_url = urllib.parse.quote(join_url, safe="")
+            params["$filter"] = f"JoinWebUrl eq '{encoded_url}'"
 
         result = await graph_client.get("/me/onlineMeetings", params=params)
         return success_response(result.get("value", []))
