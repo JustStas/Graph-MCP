@@ -6,7 +6,7 @@ def register_meeting_tools(mcp):
     @mcp.tool()
     @require_auth
     async def graph_list_online_meetings(join_url: str = "") -> str:
-        """List online meetings. Optionally filter by join URL to find a specific meeting.
+        """List online meetings. Filter by join URL to find a specific meeting.
 
         Args:
             join_url: Teams meeting join URL to look up a specific meeting.
@@ -14,13 +14,9 @@ def register_meeting_tools(mcp):
         """
         params: dict[str, str] = {
             "$select": "id,subject,startDateTime,endDateTime,joinWebUrl",
-            "$top": "25",
-            "$orderby": "startDateTime desc",
         }
         if join_url:
             params["$filter"] = f"JoinWebUrl eq '{join_url}'"
-            # Remove orderby when filtering — Graph API restriction
-            params.pop("$orderby", None)
 
         result = await graph_client.get("/me/onlineMeetings", params=params)
         return success_response(result.get("value", []))
