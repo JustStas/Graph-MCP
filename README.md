@@ -4,15 +4,17 @@ An MCP server that connects Claude to Microsoft Teams, Outlook Calendar, and Mai
 
 ## What it does
 
-Gives Claude access to 29 tools:
+Gives Claude access to 41 tools:
 
 | Category | Tools |
 |---|---|
 | **Auth** | Check status, login (browser OAuth), logout |
 | **Chats** | List chats, read/send messages, create chats, list members |
 | **Teams & Channels** | List teams, list channels, read/send messages, list members, read/send replies |
-| **Calendar** | List calendars, list events (with date range), get event details |
-| **Mail** | List emails, read email, search emails, send email, reply to email |
+| **Calendar** | List calendars, list/get events, create/update/delete events |
+| **Mail** | List emails, read email, search emails, send email, reply, list/get attachments |
+| **Meetings** | Find meeting by Join URL, list/get transcripts, list recordings, get recording URL |
+| **Files** | Browse OneDrive folders, search files, get content, upload files, create sharing links |
 | **Users** | Search organization directory |
 | **Presence** | Get/set your presence, get another user's presence |
 | **Search** | Search messages across all chats and channels |
@@ -32,9 +34,11 @@ You need an Azure App Registration:
    - `Chat.Read`, `Chat.ReadWrite`, `ChatMessage.Send`
    - `ChannelMessage.Read.All`, `ChannelMessage.Send`
    - `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMember.Read.All`
-   - `Calendars.Read`
+   - `Calendars.ReadWrite`
    - `Mail.Read`, `Mail.Send`
    - `Presence.Read`, `Presence.Read.All`, `Presence.ReadWrite`
+   - `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All`, `OnlineMeetingRecording.Read.All`
+   - `Files.ReadWrite.All`
 
 ## Install
 

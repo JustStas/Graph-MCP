@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graph-mcp"
-version = "0.2.0"
+version = "0.4.0"
 description = "MCP server for Microsoft Teams, Outlook Calendar, and Mail via Microsoft Graph API"
 readme = "README.md"
 authors = [

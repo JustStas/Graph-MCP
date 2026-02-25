@@ -52,12 +52,16 @@ class Settings(BaseSettings):
             "Team.ReadBasic.All",
             "Channel.ReadBasic.All",
             "ChannelMember.Read.All",
-            "Calendars.Read",
+            "Calendars.ReadWrite",
             "Mail.Read",
             "Mail.Send",
             "Presence.Read",
             "Presence.Read.All",
             "Presence.ReadWrite",
+            "OnlineMeetings.Read",
+            "OnlineMeetingTranscript.Read.All",
+            "OnlineMeetingRecording.Read.All",
+            "Files.ReadWrite.All",
         ]
 
 

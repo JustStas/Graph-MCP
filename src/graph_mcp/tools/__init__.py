@@ -7,6 +7,8 @@ from graph_mcp.tools.mail_tools import register_mail_tools
 from graph_mcp.tools.user_tools import register_user_tools
 from graph_mcp.tools.presence_tools import register_presence_tools
 from graph_mcp.tools.search_tools import register_search_tools
+from graph_mcp.tools.meeting_tools import register_meeting_tools
+from graph_mcp.tools.files_tools import register_files_tools
 
 
 def register_all_tools(mcp):
@@ -19,3 +21,5 @@ def register_all_tools(mcp):
     register_user_tools(mcp)
     register_presence_tools(mcp)
     register_search_tools(mcp)
+    register_meeting_tools(mcp)
+    register_files_tools(mcp)

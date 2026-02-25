@@ -115,3 +115,38 @@ def register_mail_tools(mcp):
         return success_response(
             {"status": f"{'Reply all' if reply_all else 'Reply'} sent"}
         )
+
+    @mcp.tool()
+    @require_auth
+    async def graph_list_mail_attachments(message_id: str) -> str:
+        """List attachments on an email message.
+
+        Args:
+            message_id: The email message ID.
+        """
+        result = await graph_client.get(
+            f"/me/messages/{message_id}/attachments",
+            params={
+                "$select": "id,name,contentType,size,isInline",
+            },
+        )
+        return success_response(result.get("value", []))
+
+    @mcp.tool()
+    @require_auth
+    async def graph_get_mail_attachment(
+        message_id: str, attachment_id: str
+    ) -> str:
+        """Get a specific email attachment including its content.
+
+        The attachment content is returned as base64-encoded data in the
+        'contentBytes' field. For large attachments, only metadata is practical.
+
+        Args:
+            message_id: The email message ID.
+            attachment_id: The attachment ID (from graph_list_mail_attachments).
+        """
+        result = await graph_client.get(
+            f"/me/messages/{message_id}/attachments/{attachment_id}"
+        )
+        return success_response(result)

@@ -23,6 +23,7 @@ class GraphClient:
         params: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        data: bytes | None = None,
     ) -> Any:
         limiter = get_rate_limiter()
         await limiter.acquire()
@@ -36,7 +37,10 @@ class GraphClient:
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.request(
-                method, url, params=params, json=json_body, headers=req_headers
+                method, url, params=params,
+                json=json_body if data is None else None,
+                content=data,
+                headers=req_headers,
             )
 
         # Handle 429 rate limiting
@@ -50,7 +54,10 @@ class GraphClient:
             req_headers["Authorization"] = f"Bearer {token}"
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.request(
-                    method, url, params=params, json=json_body, headers=req_headers
+                    method, url, params=params,
+                    json=json_body if data is None else None,
+                    content=data,
+                    headers=req_headers,
                 )
             if resp.status_code == 429:
                 raise GraphAPIError("Rate limit exceeded after retry", 429)
@@ -65,7 +72,10 @@ class GraphClient:
             req_headers["Authorization"] = f"Bearer {token}"
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.request(
-                    method, url, params=params, json=json_body, headers=req_headers
+                    method, url, params=params,
+                    json=json_body if data is None else None,
+                    content=data,
+                    headers=req_headers,
                 )
             if resp.status_code == 401:
                 raise AuthenticationError("Session expired. Please log in again.")
@@ -120,6 +130,17 @@ class GraphClient:
         headers: dict[str, str] | None = None,
     ) -> Any:
         return await self._request("DELETE", path, headers=headers)
+
+    async def put(
+        self,
+        path: str,
+        data: bytes | None = None,
+        json_body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        return await self._request(
+            "PUT", path, json_body=json_body, data=data, headers=headers
+        )
 
 
 graph_client = GraphClient()
