@@ -66,6 +66,31 @@ claude mcp add graph -e AZURE_CLIENT_ID=your-id -e AZURE_TENANT_ID=your-tenant -
 
 Paste it, start Claude Code, and ask Claude to log in. It opens your browser for OAuth sign-in — that's it.
 
+## Teams message formatting and @mentions
+
+The Teams message tools (`graph_send_chat_message`, `graph_send_channel_message`, and `graph_reply_to_channel_message`) now default to **HTML mode** and will convert common markdown-like LLM output into Teams-friendly HTML automatically.
+
+Examples:
+
+- `**bold**` → `<strong>bold</strong>`
+- `- item` lists → `<ul><li>...</li></ul>`
+- `` `code` `` → `<code>...</code>`
+
+If you already have raw HTML, pass it directly and it will be sent as-is.
+
+These tools also support optional top-level Graph API `mentions`, either in raw Graph format or a simplified shape such as:
+
+```json
+[
+  {
+    "name": "Jane Smith",
+    "user_id": "ef1c916a-3135-4417-ba27-8eb7bd084193"
+  }
+]
+```
+
+Use the corresponding `<at id="0">Jane Smith</at>` tag in the HTML body to trigger a real Teams mention.
+
 ## How it works
 
 ```
