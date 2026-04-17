@@ -68,7 +68,7 @@ Paste it, start Claude Code, and ask Claude to log in. It opens your browser for
 
 ## Teams message formatting and @mentions
 
-The Teams message tools (`graph_send_chat_message`, `graph_send_channel_message`, and `graph_reply_to_channel_message`) now default to **HTML mode** and will convert common markdown-like LLM output into Teams-friendly HTML automatically.
+The Teams message tools (`graph_send_chat_message`, `graph_send_channel_message`, and `graph_reply_to_channel_message`) now default to **HTML mode** and convert markdown to Teams-friendly HTML automatically using Python-Markdown.
 
 Examples:
 
