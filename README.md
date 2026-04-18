@@ -66,9 +66,9 @@ claude mcp add graph -e AZURE_CLIENT_ID=your-id -e AZURE_TENANT_ID=your-tenant -
 
 Paste it, start Claude Code, and ask Claude to log in. It opens your browser for OAuth sign-in — that's it.
 
-## Teams message formatting and @mentions
+## Message and email formatting
 
-The Teams message tools (`graph_send_chat_message`, `graph_send_channel_message`, and `graph_reply_to_channel_message`) now default to **HTML mode** and convert markdown to Teams-friendly HTML automatically using Python-Markdown.
+The Teams message tools (`graph_send_chat_message`, `graph_send_channel_message`, and `graph_reply_to_channel_message`) and outbound mail tools (`graph_send_mail`, `graph_reply_mail`) now default to **HTML mode** and convert markdown to HTML automatically using Python-Markdown.
 
 Examples:
 
@@ -77,6 +77,8 @@ Examples:
 - `` `code` `` → `<code>...</code>`
 
 If you already have raw HTML, pass it directly and it will be sent as-is.
+
+For email, this means normal LLM-written markdown like `**bold**`, bullet lists, or inline code renders properly instead of showing raw markdown characters.
 
 These tools also support optional top-level Graph API `mentions`, either in raw Graph format or a simplified shape such as:
 

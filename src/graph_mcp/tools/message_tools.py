@@ -79,20 +79,30 @@ def normalize_mentions(mentions: list[dict[str, Any]] | None) -> list[dict[str, 
     return normalized
 
 
+def build_rich_text_body(
+    message: str,
+    is_html: bool = True,
+    *,
+    html_content_type: str = "html",
+    text_content_type: str = "text",
+) -> dict[str, Any]:
+    if is_html:
+        content = message if _looks_like_html(message) else markdown_to_html(message)
+        content_type = html_content_type
+    else:
+        content = message
+        content_type = text_content_type
+
+    return {"contentType": content_type, "content": content}
+
+
 def build_chat_message_payload(
     message: str,
     is_html: bool = True,
     mentions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if is_html:
-        content = message if _looks_like_html(message) else markdown_to_html(message)
-        content_type = "html"
-    else:
-        content = message
-        content_type = "text"
-
     payload: dict[str, Any] = {
-        "body": {"contentType": content_type, "content": content}
+        "body": build_rich_text_body(message, is_html)
     }
 
     normalized_mentions = normalize_mentions(mentions)
