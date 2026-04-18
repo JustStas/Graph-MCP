@@ -19,6 +19,7 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "cryptography>=42.0",
+    "Markdown>=3.7",
 ]
 
 [project.scripts]

@@ -1,6 +1,7 @@
 from graph_mcp._select_fields import MAIL_LIST_FIELDS
 from graph_mcp.graph_client import graph_client
 from graph_mcp.responses import require_auth, success_response
+from graph_mcp.tools.message_tools import build_rich_text_body
 
 
 def register_mail_tools(mcp):
@@ -65,26 +66,31 @@ def register_mail_tools(mcp):
         subject: str,
         body: str,
         cc: list[str] | None = None,
-        is_html: bool = False,
+        is_html: bool = True,
     ) -> str:
         """Send an email.
 
         Args:
             to: List of recipient email addresses.
             subject: Email subject.
-            body: Email body text.
+            body: Email body text. By default, markdown-like text is converted
+                to HTML automatically for better rendering in mail clients.
             cc: Optional list of CC email addresses.
-            is_html: Whether the body is HTML (default: plain text).
+            is_html: Whether to send HTML content (default: True). If True and
+                the body is not already HTML, markdown is converted to HTML
+                before sending.
         """
         to_recipients = [
             {"emailAddress": {"address": addr}} for addr in to
         ]
         message: dict = {
             "subject": subject,
-            "body": {
-                "contentType": "HTML" if is_html else "Text",
-                "content": body,
-            },
+            "body": build_rich_text_body(
+                body,
+                is_html,
+                html_content_type="HTML",
+                text_content_type="Text",
+            ),
             "toRecipients": to_recipients,
         }
         if cc:
@@ -98,20 +104,39 @@ def register_mail_tools(mcp):
     @mcp.tool()
     @require_auth
     async def graph_reply_mail(
-        message_id: str, body: str, reply_all: bool = False
+        message_id: str,
+        body: str,
+        reply_all: bool = False,
+        is_html: bool = True,
     ) -> str:
         """Reply to an email.
 
         Args:
             message_id: The email message ID to reply to.
-            body: The reply body text.
+            body: The reply body text. By default, markdown-like text is
+                converted to HTML automatically for better rendering.
             reply_all: Whether to reply to all recipients (default: reply to sender only).
+            is_html: Whether to send HTML content (default: True). If True and
+                the body is not already HTML, markdown is converted to HTML
+                before sending.
         """
-        action = "replyAll" if reply_all else "reply"
-        payload = {"comment": body}
-        await graph_client.post(
-            f"/me/messages/{message_id}/{action}", json_body=payload
+        create_action = "createReplyAll" if reply_all else "createReply"
+        draft = await graph_client.post(
+            f"/me/messages/{message_id}/{create_action}"
         )
+        draft_id = draft["id"]
+        await graph_client.patch(
+            f"/me/messages/{draft_id}",
+            json_body={
+                "body": build_rich_text_body(
+                    body,
+                    is_html,
+                    html_content_type="HTML",
+                    text_content_type="Text",
+                )
+            },
+        )
+        await graph_client.post(f"/me/messages/{draft_id}/send")
         return success_response(
             {"status": f"{'Reply all' if reply_all else 'Reply'} sent"}
         )

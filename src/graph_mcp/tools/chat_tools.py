@@ -1,6 +1,11 @@
+from __future__ import annotations
+
+from typing import Any
+
 from graph_mcp._select_fields import CHAT_FIELDS
 from graph_mcp.graph_client import graph_client
 from graph_mcp.responses import require_auth, success_response
+from graph_mcp.tools.message_tools import build_chat_message_payload
 
 
 def register_chat_tools(mcp):
@@ -37,17 +42,29 @@ def register_chat_tools(mcp):
     @mcp.tool()
     @require_auth
     async def graph_send_chat_message(
-        chat_id: str, message: str, is_html: bool = False
+        chat_id: str,
+        message: str,
+        is_html: bool = True,
+        mentions: list[dict[str, Any]] | None = None,
     ) -> str:
         """Send a message to a chat.
 
         Args:
             chat_id: The chat ID to send the message to.
-            message: The message text to send.
-            is_html: Whether the message is HTML (default: plain text).
+            message: The message text to send. By default, markdown-like text is
+                converted to Teams-compatible HTML automatically.
+            is_html: Whether to send HTML content (default: True). If True and
+                the message is not already HTML, markdown-like text is converted
+                to HTML before sending.
+            mentions: Optional mentions to include. Accepts either raw Microsoft
+                Graph `mentions` objects or simplified items like
+                `{"name": "Jane Smith", "user_id": "..."}`.
         """
-        content_type = "html" if is_html else "text"
-        body = {"body": {"contentType": content_type, "content": message}}
+        body = build_chat_message_payload(
+            message=message,
+            is_html=is_html,
+            mentions=mentions,
+        )
         result = await graph_client.post(
             f"/chats/{chat_id}/messages", json_body=body
         )

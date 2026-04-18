@@ -1,6 +1,11 @@
+from __future__ import annotations
+
+from typing import Any
+
 from graph_mcp._select_fields import CHANNEL_FIELDS, TEAM_FIELDS
 from graph_mcp.graph_client import graph_client
 from graph_mcp.responses import require_auth, success_response
+from graph_mcp.tools.message_tools import build_chat_message_payload
 
 
 def register_teams_tools(mcp):
@@ -50,18 +55,28 @@ def register_teams_tools(mcp):
         team_id: str,
         channel_id: str,
         message: str,
-        is_html: bool = False,
+        is_html: bool = True,
+        mentions: list[dict[str, Any]] | None = None,
     ) -> str:
         """Send a message to a channel.
 
         Args:
             team_id: The team ID.
             channel_id: The channel ID.
-            message: The message text to send.
-            is_html: Whether the message is HTML (default: plain text).
+            message: The message text to send. By default, markdown-like text is
+                converted to Teams-compatible HTML automatically.
+            is_html: Whether to send HTML content (default: True). If True and
+                the message is not already HTML, markdown-like text is converted
+                to HTML before sending.
+            mentions: Optional mentions to include. Accepts either raw Microsoft
+                Graph `mentions` objects or simplified items like
+                `{"name": "Jane Smith", "user_id": "..."}`.
         """
-        content_type = "html" if is_html else "text"
-        body = {"body": {"contentType": content_type, "content": message}}
+        body = build_chat_message_payload(
+            message=message,
+            is_html=is_html,
+            mentions=mentions,
+        )
         result = await graph_client.post(
             f"/teams/{team_id}/channels/{channel_id}/messages", json_body=body
         )
@@ -110,7 +125,8 @@ def register_teams_tools(mcp):
         channel_id: str,
         message_id: str,
         message: str,
-        is_html: bool = False,
+        is_html: bool = True,
+        mentions: list[dict[str, Any]] | None = None,
     ) -> str:
         """Reply to a channel message.
 
@@ -118,11 +134,20 @@ def register_teams_tools(mcp):
             team_id: The team ID.
             channel_id: The channel ID.
             message_id: The message ID to reply to.
-            message: The reply text.
-            is_html: Whether the message is HTML (default: plain text).
+            message: The reply text. By default, markdown-like text is converted
+                to Teams-compatible HTML automatically.
+            is_html: Whether to send HTML content (default: True). If True and
+                the message is not already HTML, markdown-like text is converted
+                to HTML before sending.
+            mentions: Optional mentions to include. Accepts either raw Microsoft
+                Graph `mentions` objects or simplified items like
+                `{"name": "Jane Smith", "user_id": "..."}`.
         """
-        content_type = "html" if is_html else "text"
-        body = {"body": {"contentType": content_type, "content": message}}
+        body = build_chat_message_payload(
+            message=message,
+            is_html=is_html,
+            mentions=mentions,
+        )
         result = await graph_client.post(
             f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies",
             json_body=body,
