@@ -13,7 +13,7 @@ const DEFAULTS = {
   graphDebug: false,
 } as const;
 
-const SCOPES = [
+const SCOPES: readonly string[] = Object.freeze([
   "offline_access",
   "openid",
   "profile",
@@ -37,7 +37,7 @@ const SCOPES = [
   "OnlineMeetingTranscript.Read.All",
   "OnlineMeetingRecording.Read.All",
   "Files.ReadWrite.All",
-] as const;
+]);
 
 interface PersistedConfig {
   azureClientId?: string;
@@ -45,22 +45,22 @@ interface PersistedConfig {
 }
 
 export interface Settings {
-  azureClientId: string;
-  azureTenantId: string;
-  graphRedirectUri: string;
-  graphTokenEncryptionKey: string;
-  graphTokenRefreshBuffer: number;
-  graphRateLimitMaxRequests: number;
-  graphRateLimitWindow: number;
-  graphDebug: boolean;
-  configDir: string;
-  configFile: string;
-  tokenFile: string;
-  keyFile: string;
-  authority: string;
-  authorizeEndpoint: string;
-  tokenEndpoint: string;
-  scopes: readonly string[];
+  readonly azureClientId: string;
+  readonly azureTenantId: string;
+  readonly graphRedirectUri: string;
+  readonly graphTokenEncryptionKey: string;
+  readonly graphTokenRefreshBuffer: number;
+  readonly graphRateLimitMaxRequests: number;
+  readonly graphRateLimitWindow: number;
+  readonly graphDebug: boolean;
+  readonly configDir: string;
+  readonly configFile: string;
+  readonly tokenFile: string;
+  readonly keyFile: string;
+  readonly authority: string;
+  readonly authorizeEndpoint: string;
+  readonly tokenEndpoint: string;
+  readonly scopes: readonly string[];
 }
 
 export interface LoadSettingsOptions {
@@ -199,7 +199,7 @@ export async function loadSettings(options: LoadSettingsOptions = {}): Promise<S
       : DEFAULTS.graphDebug;
   const authority = `https://login.microsoftonline.com/${azureTenantId}`;
 
-  return {
+  const settings: Settings = {
     azureClientId,
     azureTenantId,
     graphRedirectUri,
@@ -214,6 +214,7 @@ export async function loadSettings(options: LoadSettingsOptions = {}): Promise<S
     tokenEndpoint: `${authority}/oauth2/v2.0/token`,
     scopes: SCOPES,
   };
+  return Object.freeze(settings);
 }
 
 export async function persistSetupConfig(

@@ -68,6 +68,45 @@ describe("loadSettings", () => {
     expect(settings.scopes).toHaveLength(23);
   });
 
+  test("freezes returned settings and scopes at runtime", async () => {
+    const settings = await loadSettings({ homeDir, env: {} });
+
+    expect(Object.isFrozen(settings)).toBe(true);
+    expect(Object.isFrozen(settings.scopes)).toBe(true);
+  });
+
+  test("rejects unsafe scalar mutation and preserves the original value", async () => {
+    const settings = await loadSettings({ homeDir, env: {} });
+    const mutableSettings = settings as unknown as { azureTenantId: string };
+
+    expect(() => {
+      mutableSettings.azureTenantId = "mutated-tenant";
+    }).toThrow(TypeError);
+    expect(settings.azureTenantId).toBe("common");
+  });
+
+  test("rejects scope mutation without contaminating other loads", async () => {
+    const first = await loadSettings({ homeDir, env: {} });
+    const second = await loadSettings({ homeDir, env: {} });
+    const mutableScopes = first.scopes as unknown as string[];
+    let mutationError: unknown;
+
+    try {
+      mutableScopes.push("Directory.ReadWrite.All");
+    } catch (error: unknown) {
+      mutationError = error;
+    }
+
+    const subsequent = await loadSettings({ homeDir, env: {} });
+
+    expect(first).not.toBe(second);
+    expect(second.scopes).toEqual(expectedScopes);
+    expect(subsequent.scopes).toEqual(expectedScopes);
+    expect(subsequent.scopes).toHaveLength(23);
+    expect(subsequent.scopes).not.toContain("Directory.ReadWrite.All");
+    expect(mutationError).toBeInstanceOf(TypeError);
+  });
+
   test("loads client and tenant values from persisted config", async () => {
     await persistSetupConfig(
       { azureClientId: "file-client", azureTenantId: "file-tenant" },
