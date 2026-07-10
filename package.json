@@ -1,0 +1,48 @@
+{
+  "name": "graph-mcp",
+  "version": "0.6.0",
+  "description": "MCP server for Microsoft Teams, Outlook Calendar, Mail, and OneDrive via Microsoft Graph",
+  "type": "module",
+  "bin": {
+    "graph-mcp": "./dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "build": "npm run clean && npm run typecheck && node scripts/build.mjs",
+    "validate:versions": "node scripts/verify-plugin-versions.mjs",
+    "validate:package": "node scripts/verify-package.mjs",
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build && npm run validate:versions && npm run validate:package",
+    "prepublishOnly": "npm run verify"
+  },
+  "repository": "git+https://github.com/JustStas/Graph-MCP.git",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "open": "11.0.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@types/node": "22.20.0",
+    "esbuild": "0.28.1",
+    "eslint": "9.39.4",
+    "prettier": "3.9.5",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.55.0",
+    "vitest": "4.1.10"
+  }
+}
