@@ -81,6 +81,31 @@ describe("loadSettings", () => {
     expect(settings.authority).toBe("https://login.microsoftonline.com/file-tenant");
   });
 
+  test("ignores unknown persisted config keys", async () => {
+    await persistSetupConfig(
+      { azureClientId: "initial-client", azureTenantId: "initial-tenant" },
+      { homeDir },
+    );
+    const configFile = join(homeDir, ".graph-mcp", "config.json");
+    await writeFile(
+      configFile,
+      JSON.stringify({
+        azureClientId: "file-client",
+        azureTenantId: "file-tenant",
+        graphDebug: true,
+        unexpectedKey: "ignored",
+      }),
+      "utf8",
+    );
+
+    const settings = await loadSettings({ homeDir, env: {} });
+
+    expect(settings.azureClientId).toBe("file-client");
+    expect(settings.azureTenantId).toBe("file-tenant");
+    expect(settings.graphDebug).toBe(false);
+    expect(settings).not.toHaveProperty("unexpectedKey");
+  });
+
   test("environment values override persisted config, including an empty client ID", async () => {
     await persistSetupConfig(
       { azureClientId: "file-client", azureTenantId: "file-tenant" },
@@ -195,6 +220,8 @@ describe("persistSetupConfig", () => {
 
     const configDir = join(homeDir, ".graph-mcp");
     const configFile = join(configDir, "config.json");
+    const tokenFile = join(configDir, "tokens-v2.enc");
+    const keyFile = join(configDir, ".key-v2");
     const parsed: unknown = JSON.parse(await readFile(configFile, "utf8"));
 
     expect(parsed).toEqual({
@@ -206,6 +233,8 @@ describe("persistSetupConfig", () => {
       expect((await stat(configDir)).mode & 0o777).toBe(0o700);
       expect((await stat(configFile)).mode & 0o777).toBe(0o600);
     }
+    await expect(stat(tokenFile)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(keyFile)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("preserves an empty client ID and normalizes a blank tenant to common", async () => {
