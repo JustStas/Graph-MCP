@@ -3,7 +3,8 @@ import { describe, expect, test } from "vitest";
 
 describe("package metadata", () => {
   test("publishes an ESM Node 22 CLI as graph-mcp", async () => {
-    const pkg = JSON.parse(await readFile("package.json", "utf8"));
+    const packageJsonUrl = new URL("../package.json", import.meta.url);
+    const pkg: unknown = JSON.parse(await readFile(packageJsonUrl, "utf8"));
     expect(pkg).toMatchObject({
       name: "graph-mcp",
       version: "0.6.0",
