@@ -148,7 +148,7 @@ Use this package shape:
     "eslint": "9.39.4",
     "prettier": "3.9.5",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.63.0",
+    "typescript-eslint": "8.55.0",
     "vitest": "4.1.10"
   },
   "repository": {
