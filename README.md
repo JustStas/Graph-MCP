@@ -68,17 +68,25 @@ Paste it, start Claude Code, and ask Claude to log in. It opens your browser for
 
 ## Message and email formatting
 
-The Teams message tools (`graph_send_chat_message`, `graph_send_channel_message`, and `graph_reply_to_channel_message`) and outbound mail tools (`graph_send_mail`, `graph_reply_mail`) now default to **HTML mode** and convert markdown to HTML automatically using Python-Markdown.
+The Teams message tools (`graph_send_chat_message`, `graph_send_channel_message`,
+and `graph_reply_to_channel_message`) and outbound mail tools (`graph_send_mail`,
+`graph_reply_mail`) default to **HTML mode**. When `is_html=true`, pass explicit
+HTML and it will be sent as-is. Markdown is not converted automatically.
 
-Examples:
+Use Teams/Graph-compatible HTML for formatted messages:
 
-- `**bold**` → `<strong>bold</strong>`
-- `- item` lists → `<ul><li>...</li></ul>`
-- `` `code` `` → `<code>...</code>`
+```html
+<p><strong>Status update</strong></p>
+<ul>
+  <li>Use <code>&lt;strong&gt;</code> for bold text.</li>
+  <li>Use <code>&lt;pre&gt;&lt;code&gt;</code> for multi-line code blocks.</li>
+  <li>Use placeholder text like <code>YOUR_NAME</code>, not <code>&lt;your-name&gt;</code>.</li>
+</ul>
+```
 
-If you already have raw HTML, pass it directly and it will be sent as-is.
+Use `is_html=false` for plain text bodies. Plain text is sent as exact text and is not formatted.
 
-For email, this means normal LLM-written markdown like `**bold**`, bullet lists, or inline code renders properly instead of showing raw markdown characters.
+For email, the same rule applies: use explicit HTML when `is_html=true`, or plain text when `is_html=false`.
 
 These tools also support optional top-level Graph API `mentions`, either in raw Graph format or a simplified shape such as:
 
