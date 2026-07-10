@@ -73,12 +73,11 @@ def register_mail_tools(mcp):
         Args:
             to: List of recipient email addresses.
             subject: Email subject.
-            body: Email body text. By default, markdown-like text is converted
-                to HTML automatically for better rendering in mail clients.
+            body: Email body content. When `is_html` is true, send explicit
+                HTML; markdown is not converted.
             cc: Optional list of CC email addresses.
-            is_html: Whether to send HTML content (default: True). If True and
-                the body is not already HTML, markdown is converted to HTML
-                before sending.
+            is_html: Whether to send the email body as HTML content (default:
+                True). Use false for plain text.
         """
         to_recipients = [
             {"emailAddress": {"address": addr}} for addr in to
@@ -113,12 +112,11 @@ def register_mail_tools(mcp):
 
         Args:
             message_id: The email message ID to reply to.
-            body: The reply body text. By default, markdown-like text is
-                converted to HTML automatically for better rendering.
+            body: The reply body content. When `is_html` is true, send explicit
+                HTML; markdown is not converted.
             reply_all: Whether to reply to all recipients (default: reply to sender only).
-            is_html: Whether to send HTML content (default: True). If True and
-                the body is not already HTML, markdown is converted to HTML
-                before sending.
+            is_html: Whether to send the reply body as HTML content (default:
+                True). Use false for plain text.
         """
         create_action = "createReplyAll" if reply_all else "createReply"
         draft = await graph_client.post(

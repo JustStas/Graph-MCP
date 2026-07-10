@@ -51,11 +51,10 @@ def register_chat_tools(mcp):
 
         Args:
             chat_id: The chat ID to send the message to.
-            message: The message text to send. By default, markdown-like text is
-                converted to Teams-compatible HTML automatically.
-            is_html: Whether to send HTML content (default: True). If True and
-                the message is not already HTML, markdown-like text is converted
-                to HTML before sending.
+            message: The message content to send. When `is_html` is true, send
+                explicit Teams-compatible HTML; markdown is not converted.
+            is_html: Whether to send the message as HTML content (default:
+                True). Use false for plain text.
             mentions: Optional mentions to include. Accepts either raw Microsoft
                 Graph `mentions` objects or simplified items like
                 `{"name": "Jane Smith", "user_id": "..."}`.

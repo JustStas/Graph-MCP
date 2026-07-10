@@ -1,24 +1,6 @@
 from __future__ import annotations
 
-import re
 from typing import Any
-
-from markdown import markdown
-
-_HTML_TAG_RE = re.compile(r"<\s*[a-zA-Z][^>]*>")
-_MARKDOWN_EXTENSIONS = ["extra", "sane_lists", "nl2br"]
-
-
-def _looks_like_html(text: str) -> bool:
-    return bool(_HTML_TAG_RE.search(text))
-
-
-def markdown_to_html(message: str) -> str:
-    """Convert markdown into Teams-friendly HTML via Python-Markdown."""
-    if not message.strip():
-        return ""
-
-    return markdown(message, extensions=_MARKDOWN_EXTENSIONS)
 
 
 def normalize_mentions(mentions: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -86,8 +68,9 @@ def build_rich_text_body(
     html_content_type: str = "html",
     text_content_type: str = "text",
 ) -> dict[str, Any]:
+    """Build a Graph message body without changing caller-provided content."""
     if is_html:
-        content = message if _looks_like_html(message) else markdown_to_html(message)
+        content = message
         content_type = html_content_type
     else:
         content = message

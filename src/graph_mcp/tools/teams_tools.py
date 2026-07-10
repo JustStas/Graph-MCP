@@ -63,11 +63,10 @@ def register_teams_tools(mcp):
         Args:
             team_id: The team ID.
             channel_id: The channel ID.
-            message: The message text to send. By default, markdown-like text is
-                converted to Teams-compatible HTML automatically.
-            is_html: Whether to send HTML content (default: True). If True and
-                the message is not already HTML, markdown-like text is converted
-                to HTML before sending.
+            message: The message content to send. When `is_html` is true, send
+                explicit Teams-compatible HTML; markdown is not converted.
+            is_html: Whether to send the message as HTML content (default:
+                True). Use false for plain text.
             mentions: Optional mentions to include. Accepts either raw Microsoft
                 Graph `mentions` objects or simplified items like
                 `{"name": "Jane Smith", "user_id": "..."}`.
@@ -134,11 +133,10 @@ def register_teams_tools(mcp):
             team_id: The team ID.
             channel_id: The channel ID.
             message_id: The message ID to reply to.
-            message: The reply text. By default, markdown-like text is converted
-                to Teams-compatible HTML automatically.
-            is_html: Whether to send HTML content (default: True). If True and
-                the message is not already HTML, markdown-like text is converted
-                to HTML before sending.
+            message: The reply content to send. When `is_html` is true, send
+                explicit Teams-compatible HTML; markdown is not converted.
+            is_html: Whether to send the reply as HTML content (default: True).
+                Use false for plain text.
             mentions: Optional mentions to include. Accepts either raw Microsoft
                 Graph `mentions` objects or simplified items like
                 `{"name": "Jane Smith", "user_id": "..."}`.
