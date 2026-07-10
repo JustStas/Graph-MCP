@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import type { Settings } from "./config.js";
 
@@ -44,6 +44,13 @@ const PRIVATE_FILE_MODE = 0o600;
 const BASE64_PATTERN = /^(?:[A-Za-z\d+/]{4})*(?:[A-Za-z\d+/]{2}==|[A-Za-z\d+/]{3}=)?$/;
 
 let temporaryFileSequence = 0;
+
+interface TokenFileWriteQueue {
+  tail: Promise<void>;
+  pending: number;
+}
+
+const tokenFileWriteQueues = new Map<string, TokenFileWriteQueue>();
 
 function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
@@ -159,6 +166,33 @@ function waitForKeyWriter(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 5));
 }
 
+function enqueueTokenFileWrite(tokenFile: string, operation: () => Promise<void>): Promise<void> {
+  const queueKey = resolve(tokenFile);
+  let queue = tokenFileWriteQueues.get(queueKey);
+  if (queue === undefined) {
+    queue = { tail: Promise.resolve(), pending: 0 };
+    tokenFileWriteQueues.set(queueKey, queue);
+  }
+
+  queue.pending += 1;
+  const pendingWrite = queue.tail.then(operation);
+  const settledTail = pendingWrite.catch(() => undefined);
+  queue.tail = settledTail;
+
+  void settledTail.then(() => {
+    queue.pending -= 1;
+    if (
+      queue.pending === 0 &&
+      queue.tail === settledTail &&
+      tokenFileWriteQueues.get(queueKey) === queue
+    ) {
+      tokenFileWriteQueues.delete(queueKey);
+    }
+  });
+
+  return pendingWrite;
+}
+
 export class TokenStore {
   readonly #settings: TokenStoreSettings;
   readonly #now: () => number;
@@ -167,7 +201,6 @@ export class TokenStore {
   #key: Buffer | undefined;
   #initialized = false;
   #initializationPromise: Promise<void> | undefined;
-  #writeChain: Promise<void> = Promise.resolve();
 
   constructor(settings: TokenStoreSettings, dependencies: TokenStoreDependencies = {}) {
     this.#settings = settings;
@@ -202,7 +235,7 @@ export class TokenStore {
       scope: tokenResponse.scope ?? "",
     };
 
-    await this.#enqueueWrite(async () => {
+    await enqueueTokenFileWrite(this.#settings.tokenFile, async () => {
       await this.initialize();
       await this.#save(storedTokens);
       this.#tokens = storedTokens;
@@ -233,7 +266,7 @@ export class TokenStore {
   }
 
   clear(): Promise<void> {
-    return this.#enqueueWrite(async () => {
+    return enqueueTokenFileWrite(this.#settings.tokenFile, async () => {
       this.#tokens = undefined;
       await rm(this.#settings.tokenFile, { force: true });
     });
@@ -336,12 +369,6 @@ export class TokenStore {
     } catch {
       return undefined;
     }
-  }
-
-  #enqueueWrite(operation: () => Promise<void>): Promise<void> {
-    const pending = this.#writeChain.then(operation);
-    this.#writeChain = pending.catch(() => undefined);
-    return pending;
   }
 
   async #save(tokens: StoredTokens): Promise<void> {

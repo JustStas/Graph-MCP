@@ -293,6 +293,43 @@ describe("TokenStore", () => {
     expect(error).not.toHaveBeenCalled();
   });
 
+  test("rejects noncanonical base64 that Node would otherwise decode permissively", async () => {
+    const explicitKey = "strict-base64-test-key";
+    settings = settingsFor(configDir, explicitKey);
+    const validEnvelope = encryptPlaintext(
+      JSON.stringify({
+        accessToken: "noncanonical-never-log-access",
+        refreshToken: "noncanonical-never-log-refresh",
+        expiresAt: Date.now() + 60_000,
+        scope: "User.Read",
+      }),
+      encryptionKeyFor(explicitKey),
+    );
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    for (const field of ["iv", "authTag", "ciphertext"] as const) {
+      const canonical = validEnvelope[field];
+      const noncanonical = `${canonical.slice(0, 4)}!!!!${canonical.slice(4)}`;
+      expect(Buffer.from(noncanonical, "base64")).toEqual(Buffer.from(canonical, "base64"));
+      await writeFile(
+        settings.tokenFile,
+        JSON.stringify({ ...validEnvelope, [field]: noncanonical }),
+      );
+
+      const store = new TokenStore(settings);
+      await expect(store.initialize()).resolves.toBeUndefined();
+      expect(store.getAccessToken()).toBeUndefined();
+      expect(store.getRefreshToken()).toBeUndefined();
+      expect(store.isAuthenticated()).toBe(false);
+    }
+
+    expect(log).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  });
+
   test("invalid token responses reject without replacing the prior persisted token", async () => {
     const store = new TokenStore(settings);
     await store.store({
@@ -337,6 +374,36 @@ describe("TokenStore", () => {
     expect(await readdir(configDir)).toEqual(
       expect.arrayContaining([basename(settings.keyFile), basename(settings.tokenFile)]),
     );
+    expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+  });
+
+  test("stores targeting the same file serialize across instances in invocation order", async () => {
+    const earlier = new TokenStore(settings);
+    const later = new TokenStore(settings);
+    await earlier.initialize();
+    await later.initialize();
+
+    const slowLargeWrite = earlier.store({
+      access_token: "earlier-large-access",
+      refresh_token: "earlier-large-refresh",
+      scope: "x".repeat(16 * 1024 * 1024),
+    });
+    const fastSmallWrite = later.store({
+      access_token: "later-small-access",
+      refresh_token: "later-small-refresh",
+      scope: "User.Read",
+    });
+    await Promise.all([slowLargeWrite, fastSmallWrite]);
+
+    const finalTokens = await decryptStoredTokens(
+      settings.tokenFile,
+      await readGeneratedKey(settings.keyFile),
+    );
+    expect(finalTokens.accessToken).toBe("later-small-access");
+    const reloaded = new TokenStore(settings);
+    await reloaded.initialize();
+    expect(reloaded.getAccessToken()).toBe("later-small-access");
+    expect(reloaded.getRefreshToken()).toBe("later-small-refresh");
     expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
   });
 
@@ -392,6 +459,15 @@ describe("TokenStore", () => {
       expect(reloaded.getAccessToken()).toBe("atomic-original");
       expect(reloaded.getRefreshToken()).toBe("atomic-refresh");
       expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+
+      await new TokenStore(settings).store({
+        access_token: "recovered-after-failure",
+        refresh_token: "recovered-refresh",
+      });
+      const recovered = new TokenStore(settings);
+      await recovered.initialize();
+      expect(recovered.getAccessToken()).toBe("recovered-after-failure");
+      expect(recovered.getRefreshToken()).toBe("recovered-refresh");
     },
   );
 
