@@ -1,5 +1,15 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -21,6 +31,8 @@ interface EncryptedPayload {
   authTag: string;
   ciphertext: string;
 }
+
+const TOKEN_FILE_SIZE_LIMIT = 16 * 1024 * 1024;
 
 function settingsFor(configDir: string, encryptionKey = ""): TestSettings {
   return {
@@ -66,6 +78,26 @@ async function decryptStoredTokens(tokenFile: string, key: Buffer): Promise<Stor
     decipher.final(),
   ]).toString("utf8");
   return JSON.parse(plaintext) as StoredTokens;
+}
+
+async function expectGenericRejection(
+  promise: Promise<unknown>,
+  secretMarker: string,
+): Promise<Error> {
+  let rejection: unknown;
+  try {
+    await promise;
+  } catch (error: unknown) {
+    rejection = error;
+  }
+
+  expect(rejection).toBeInstanceOf(Error);
+  const result = rejection as Error;
+  expect(result.message).toMatch(/token|encryption/i);
+  if (secretMarker.length > 0) {
+    expect(result.message).not.toContain(secretMarker);
+  }
+  return result;
 }
 
 describe("TokenStore", () => {
@@ -179,6 +211,113 @@ describe("TokenStore", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "rejects a symlinked config directory without touching its target",
+    async () => {
+      const externalDir = await mkdtemp(join(tmpdir(), "graph-mcp-external-config-"));
+      const sentinel = join(externalDir, "outside-sentinel.txt");
+      const secretMarker = "outside-config-secret-marker";
+      await writeFile(sentinel, secretMarker);
+      await chmod(externalDir, 0o755);
+      await rm(configDir, { recursive: true, force: true });
+      await symlink(externalDir, configDir, "dir");
+
+      try {
+        await expectGenericRejection(new TokenStore(settings).initialize(), secretMarker);
+        expect(await readFile(sentinel, "utf8")).toBe(secretMarker);
+        expect((await stat(externalDir)).mode & 0o777).toBe(0o755);
+        await expect(stat(join(externalDir, ".key-v2"))).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        await rm(configDir, { force: true });
+        await rm(externalDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects symlinked key and token files without reading or chmodding their targets",
+    async () => {
+      const externalDir = await mkdtemp(join(tmpdir(), "graph-mcp-external-secrets-"));
+      const externalKey = join(externalDir, "outside-key");
+      const externalToken = join(externalDir, "outside-token");
+      const keyText = randomBytes(32).toString("base64");
+      const tokenMarker = "outside-token-secret-marker";
+      await writeFile(externalKey, keyText);
+      await writeFile(externalToken, tokenMarker);
+      await chmod(externalKey, 0o644);
+      await chmod(externalToken, 0o644);
+
+      try {
+        await symlink(externalKey, settings.keyFile);
+        await expectGenericRejection(new TokenStore(settings).initialize(), keyText);
+        expect(await readFile(externalKey, "utf8")).toBe(keyText);
+        expect((await stat(externalKey)).mode & 0o777).toBe(0o644);
+
+        await rm(settings.keyFile, { force: true });
+        settings = settingsFor(configDir, "explicit-key-for-token-symlink");
+        await symlink(externalToken, settings.tokenFile);
+        await expectGenericRejection(new TokenStore(settings).initialize(), tokenMarker);
+        expect(await readFile(externalToken, "utf8")).toBe(tokenMarker);
+        expect((await stat(externalToken)).mode & 0o777).toBe(0o644);
+      } finally {
+        await rm(externalDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects secret paths outside the validated directory without touching them",
+    async () => {
+      const externalDir = await mkdtemp(join(tmpdir(), "graph-mcp-outside-paths-"));
+      const outsideKey = join(externalDir, "outside-key");
+      const outsideToken = join(externalDir, "outside-token");
+      const keyMarker = "outside-direct-key-marker";
+      const tokenMarker = "outside-direct-token-marker";
+      await writeFile(outsideKey, keyMarker);
+      await writeFile(outsideToken, tokenMarker);
+      await chmod(outsideKey, 0o644);
+      await chmod(outsideToken, 0o644);
+
+      try {
+        await expectGenericRejection(
+          new TokenStore({ ...settings, keyFile: outsideKey }).initialize(),
+          keyMarker,
+        );
+        expect(await readFile(outsideKey, "utf8")).toBe(keyMarker);
+        expect((await stat(outsideKey)).mode & 0o777).toBe(0o644);
+
+        await expectGenericRejection(
+          new TokenStore({
+            ...settings,
+            graphTokenEncryptionKey: "explicit-direct-child-key",
+            tokenFile: outsideToken,
+          }).initialize(),
+          tokenMarker,
+        );
+        expect(await readFile(outsideToken, "utf8")).toBe(tokenMarker);
+        expect((await stat(outsideToken)).mode & 0o777).toBe(0o644);
+      } finally {
+        await rm(externalDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects multiply-linked key and token files",
+    async () => {
+      await writeFile(settings.keyFile, randomBytes(32).toString("base64"));
+      await link(settings.keyFile, join(configDir, "key-hard-link"));
+      await expectGenericRejection(new TokenStore(settings).initialize(), "unused-marker");
+
+      await rm(settings.keyFile, { force: true });
+      await rm(join(configDir, "key-hard-link"), { force: true });
+      settings = settingsFor(configDir, "hard-link-token-encryption-key");
+      await new TokenStore(settings).store({ access_token: "hard-link-access" });
+      await link(settings.tokenFile, join(configDir, "token-hard-link"));
+      await expectGenericRejection(new TokenStore(settings).initialize(), "hard-link-access");
+    },
+  );
+
   test("returns stored access and refresh tokens", async () => {
     const store = new TokenStore(settings);
     expect(store.getAccessToken()).toBeUndefined();
@@ -249,6 +388,35 @@ describe("TokenStore", () => {
     expect(await readFile(settings.keyFile, "utf8")).toBe(keyBefore);
   });
 
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "a failed clear preserves memory and disk and does not poison a later clear",
+    async () => {
+      const store = new TokenStore(settings);
+      await store.store({
+        access_token: "clear-failure-access",
+        refresh_token: "clear-failure-refresh",
+      });
+      const encryptedBefore = await readFile(settings.tokenFile, "utf8");
+      await chmod(configDir, 0o500);
+
+      try {
+        await expect(store.clear()).rejects.toThrow();
+        expect(store.getAccessToken()).toBe("clear-failure-access");
+        expect(store.getRefreshToken()).toBe("clear-failure-refresh");
+      } finally {
+        await chmod(configDir, 0o700);
+      }
+
+      expect(await readFile(settings.tokenFile, "utf8")).toBe(encryptedBefore);
+      const reloaded = new TokenStore(settings);
+      await reloaded.initialize();
+      expect(reloaded.getAccessToken()).toBe("clear-failure-access");
+      await store.clear();
+      expect(store.getAccessToken()).toBeUndefined();
+      await expect(stat(settings.tokenFile)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
   test("malformed, tampered, wrong-version, and malformed-plaintext files load as empty silently", async () => {
     const explicitKey = "malformed-file-test-key";
     settings = settingsFor(configDir, explicitKey);
@@ -266,6 +434,7 @@ describe("TokenStore", () => {
       "not-json-never-log-this-access",
       { ...validEnvelope, version: 1 },
       { ...validEnvelope, iv: "AAAA" },
+      { ...validEnvelope, authTag: "AAAA" },
       {
         ...validEnvelope,
         ciphertext: Buffer.from("tampered-never-log-this-access").toString("base64"),
@@ -337,25 +506,106 @@ describe("TokenStore", () => {
       refresh_token: "original-refresh",
       expires_in: 3600,
     });
-    const invalidResponses = [
+    const encryptedBefore = await readFile(settings.tokenFile, "utf8");
+    const invalidResponses: unknown[] = [
+      null,
+      [],
       { access_token: "" },
       { access_token: 123 },
+      { access_token: "invalid-refresh", refresh_token: 123 },
+      { access_token: "invalid-scope", scope: 123 },
       { access_token: "invalid-expiry", expires_in: 0 },
       { access_token: "invalid-expiry", expires_in: -1 },
+      { access_token: "invalid-expiry", expires_in: 1.5 },
       { access_token: "invalid-expiry", expires_in: Number.NaN },
       { access_token: "invalid-expiry", expires_in: Number.POSITIVE_INFINITY },
-    ] as unknown as TokenResponse[];
+      { access_token: "invalid-expiry", expires_in: Number.MAX_VALUE },
+      { access_token: "overflow-expiry", expires_in: Number.MAX_SAFE_INTEGER },
+    ];
 
     for (const response of invalidResponses) {
-      await expect(store.store(response)).rejects.toThrow();
+      await expect(store.store(response as TokenResponse)).rejects.toThrow();
       expect(store.getAccessToken()).toBe("original-access");
       expect(store.getRefreshToken()).toBe("original-refresh");
+      expect(await readFile(settings.tokenFile, "utf8")).toBe(encryptedBefore);
     }
 
     const reloaded = new TokenStore(settings);
     await reloaded.initialize();
     expect(reloaded.getAccessToken()).toBe("original-access");
     expect(reloaded.getRefreshToken()).toBe("original-refresh");
+  });
+
+  test("invalid clocks and expiry arithmetic reject without replacing prior tokens", async () => {
+    const original = new TokenStore(settings, { now: () => 1_000_000 });
+    await original.store({
+      access_token: "clock-original-access",
+      refresh_token: "clock-original-refresh",
+    });
+    const encryptedBefore = await readFile(settings.tokenFile, "utf8");
+
+    for (const invalidNow of [Number.NaN, Number.POSITIVE_INFINITY, 1.5, Number.MAX_SAFE_INTEGER]) {
+      const store = new TokenStore(settings, { now: () => invalidNow });
+      await store.initialize();
+      await expect(store.store({ access_token: "invalid-clock-access" })).rejects.toThrow();
+      expect(store.getAccessToken()).toBe("clock-original-access");
+      expect(await readFile(settings.tokenFile, "utf8")).toBe(encryptedBefore);
+    }
+  });
+
+  test("expiry checks reject invalid clocks and buffer arithmetic", async () => {
+    const store = new TokenStore(settings, { now: () => 1_000_000 });
+    await store.store({ access_token: "buffer-access", expires_in: 3600 });
+
+    for (const invalidBuffer of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      -1,
+      1.5,
+      Number.MAX_SAFE_INTEGER,
+    ]) {
+      expect(() => store.isAccessTokenExpired(invalidBuffer)).toThrow();
+    }
+
+    const invalidClock = new TokenStore(settings, { now: () => Number.NaN });
+    await invalidClock.initialize();
+    expect(() => invalidClock.isAccessTokenExpired()).toThrow();
+  });
+
+  test("repeated identical token content uses a unique IV", async () => {
+    const store = new TokenStore(settings, { now: () => 1_000_000 });
+    const response = {
+      access_token: "identical-access",
+      refresh_token: "identical-refresh",
+      expires_in: 3600,
+      scope: "User.Read",
+    };
+
+    await store.store(response);
+    const first = JSON.parse(await readFile(settings.tokenFile, "utf8")) as EncryptedPayload;
+    await store.store(response);
+    const second = JSON.parse(await readFile(settings.tokenFile, "utf8")) as EncryptedPayload;
+
+    expect(second.iv).not.toBe(first.iv);
+    expect(second.ciphertext).not.toBe(first.ciphertext);
+  });
+
+  test("oversized key and token files reject before their contents are accepted", async () => {
+    const keyMarker = "oversized-key-secret-marker";
+    await writeFile(settings.keyFile, `${keyMarker}${"x".repeat(129)}`);
+    await expectGenericRejection(new TokenStore(settings).initialize(), keyMarker);
+
+    await rm(settings.keyFile, { force: true });
+    settings = settingsFor(configDir, "oversized-token-explicit-key");
+    const tokenMarker = "oversized-token-secret-marker";
+    await writeFile(
+      settings.tokenFile,
+      Buffer.concat([
+        Buffer.from(tokenMarker),
+        Buffer.alloc(TOKEN_FILE_SIZE_LIMIT + 1 - tokenMarker.length, "x"),
+      ]),
+    );
+    await expectGenericRejection(new TokenStore(settings).initialize(), tokenMarker);
   });
 
   test("concurrent stores serialize in invocation order and leave one decryptable final file", async () => {
@@ -386,7 +636,7 @@ describe("TokenStore", () => {
     const slowLargeWrite = earlier.store({
       access_token: "earlier-large-access",
       refresh_token: "earlier-large-refresh",
-      scope: "x".repeat(16 * 1024 * 1024),
+      scope: "x".repeat(8 * 1024 * 1024),
     });
     const fastSmallWrite = later.store({
       access_token: "later-small-access",
@@ -405,6 +655,64 @@ describe("TokenStore", () => {
     expect(reloaded.getAccessToken()).toBe("later-small-access");
     expect(reloaded.getRefreshToken()).toBe("later-small-refresh");
     expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+  });
+
+  test("stores targeting different token paths retain independent write progress", async () => {
+    const otherConfigDir = await mkdtemp(join(tmpdir(), "graph-mcp-other-token-store-"));
+    const otherSettings = settingsFor(otherConfigDir);
+    let largeWriteFinished = false;
+
+    try {
+      const largeWrite = new TokenStore(settings)
+        .store({ access_token: "large-independent", scope: "x".repeat(8 * 1024 * 1024) })
+        .then(() => {
+          largeWriteFinished = true;
+        });
+      await new TokenStore(otherSettings).store({ access_token: "small-independent" });
+
+      expect(largeWriteFinished).toBe(false);
+      await largeWrite;
+    } finally {
+      await rm(otherConfigDir, { recursive: true, force: true });
+    }
+  });
+
+  test("initialize ordered before clear leaves no stale memory or token file", async () => {
+    await new TokenStore(settings).store({
+      access_token: "initialize-clear-access",
+      refresh_token: "initialize-clear-refresh",
+      scope: "x".repeat(8 * 1024 * 1024),
+    });
+    const store = new TokenStore(settings);
+
+    const initializing = store.initialize();
+    const clearing = store.clear();
+    await Promise.all([initializing, clearing]);
+
+    expect(store.getAccessToken()).toBeUndefined();
+    expect(store.getRefreshToken()).toBeUndefined();
+    await expect(stat(settings.tokenFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("initialize ordered before store commits the later token consistently", async () => {
+    await new TokenStore(settings).store({
+      access_token: "initialize-store-old",
+      scope: "x".repeat(8 * 1024 * 1024),
+    });
+    const store = new TokenStore(settings);
+
+    const initializing = store.initialize();
+    const storing = store.store({
+      access_token: "initialize-store-new",
+      refresh_token: "initialize-store-refresh",
+    });
+    await Promise.all([initializing, storing]);
+
+    expect(store.getAccessToken()).toBe("initialize-store-new");
+    const reloaded = new TokenStore(settings);
+    await reloaded.initialize();
+    expect(reloaded.getAccessToken()).toBe("initialize-store-new");
+    expect(reloaded.getRefreshToken()).toBe("initialize-store-refresh");
   });
 
   test("initialize is idempotent", async () => {
@@ -450,6 +758,8 @@ describe("TokenStore", () => {
         await expect(
           store.store({ access_token: "must-not-replace", refresh_token: "must-not-persist" }),
         ).rejects.toThrow();
+        expect(store.getAccessToken()).toBe("atomic-original");
+        expect(store.getRefreshToken()).toBe("atomic-refresh");
       } finally {
         await chmod(configDir, 0o700);
       }
@@ -473,7 +783,8 @@ describe("TokenStore", () => {
 
   test("concurrent generated-key initialization converges on one key readable by both stores", async () => {
     const first = new TokenStore(settings);
-    const second = new TokenStore(settings);
+    const secondSettings = { ...settings, tokenFile: join(configDir, "tokens-other-v2.enc") };
+    const second = new TokenStore(secondSettings);
     await Promise.all([first.initialize(), second.initialize()]);
 
     const keyText = await readFile(settings.keyFile, "utf8");
@@ -482,10 +793,44 @@ describe("TokenStore", () => {
     await first.store({ access_token: "first-race-value" });
     await second.store({ access_token: "second-race-value", refresh_token: "race-refresh" });
 
-    const reloaded = new TokenStore(settings);
-    await reloaded.initialize();
-    expect(reloaded.getAccessToken()).toBe("second-race-value");
-    expect(reloaded.getRefreshToken()).toBe("race-refresh");
+    const firstReloaded = new TokenStore(settings);
+    const secondReloaded = new TokenStore(secondSettings);
+    await Promise.all([firstReloaded.initialize(), secondReloaded.initialize()]);
+    expect(firstReloaded.getAccessToken()).toBe("first-race-value");
+    expect(secondReloaded.getAccessToken()).toBe("second-race-value");
+    expect(secondReloaded.getRefreshToken()).toBe("race-refresh");
     expect(await readFile(settings.keyFile, "utf8")).toBe(keyText);
+    expect((await stat(settings.keyFile)).nlink).toBe(1);
+    expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+  });
+
+  test("key generation failures leave no final or temporary key file", async () => {
+    const generationSecret = "random-generation-secret-marker";
+    await expectGenericRejection(
+      new TokenStore(settings, {
+        randomBytes: () => {
+          throw new Error(generationSecret);
+        },
+      }).initialize(),
+      generationSecret,
+    );
+    await expect(stat(settings.keyFile)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+
+    await expectGenericRejection(
+      new TokenStore(settings, { randomBytes: () => Buffer.alloc(31) }).initialize(),
+      "unused-marker",
+    );
+    await expect(stat(settings.keyFile)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+  });
+
+  test("empty or partial pre-existing key files fail without replacement", async () => {
+    for (const partial of ["", "AAAA", randomBytes(16).toString("base64")]) {
+      await writeFile(settings.keyFile, partial);
+      await expectGenericRejection(new TokenStore(settings).initialize(), partial);
+      expect(await readFile(settings.keyFile, "utf8")).toBe(partial);
+      expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+    }
   });
 });

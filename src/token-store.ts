@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { constants } from "node:fs";
-import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { link, lstat, mkdir, open, rename, rm, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import type { Settings } from "./config.js";
@@ -31,6 +31,11 @@ interface EncryptedPayload {
   ciphertext: string;
 }
 
+interface TokenFileWriteQueue {
+  tail: Promise<void>;
+  pending: number;
+}
+
 type TokenStoreSettings = Pick<
   Settings,
   "configDir" | "tokenFile" | "keyFile" | "graphTokenEncryptionKey" | "graphTokenRefreshBuffer"
@@ -41,19 +46,261 @@ const IV_BYTES = 12;
 const AUTH_TAG_BYTES = 16;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
+const MAX_KEY_FILE_BYTES = 128;
+const MAX_TOKEN_FILE_BYTES = 16 * 1024 * 1024;
 const BASE64_PATTERN = /^(?:[A-Za-z\d+/]{4})*(?:[A-Za-z\d+/]{2}==|[A-Za-z\d+/]{3}=)?$/;
+const SECURITY_ERROR_MESSAGE =
+  "Secure token storage validation failed. Check that the directory and secret files are private, regular, owned by the current user, and not links.";
+const ENCRYPTION_ERROR_MESSAGE = "Unable to initialize token encryption securely.";
+const TOKEN_WRITE_ERROR_MESSAGE = "Unable to persist encrypted token file securely.";
+const TOKEN_CLEAR_ERROR_MESSAGE = "Unable to clear encrypted token file securely.";
+const DIRECTORY_SYNC_ERROR_MESSAGE = "Unable to durably synchronize token storage.";
 
 let temporaryFileSequence = 0;
+const tokenFileWriteQueues = new Map<string, TokenFileWriteQueue>();
 
-interface TokenFileWriteQueue {
-  tail: Promise<void>;
-  pending: number;
+class SecurityValidationError extends Error {
+  constructor() {
+    super(SECURITY_ERROR_MESSAGE);
+  }
 }
 
-const tokenFileWriteQueues = new Map<string, TokenFileWriteQueue>();
+class KeyPublicationInProgressError extends SecurityValidationError {}
 
 function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
+}
+
+function securityError(): SecurityValidationError {
+  return new SecurityValidationError();
+}
+
+function encryptionError(): Error {
+  return new Error(ENCRYPTION_ERROR_MESSAGE);
+}
+
+function tokenWriteError(): Error {
+  return new Error(TOKEN_WRITE_ERROR_MESSAGE);
+}
+
+function tokenClearError(): Error {
+  return new Error(TOKEN_CLEAR_ERROR_MESSAGE);
+}
+
+function directorySyncError(): Error {
+  return new Error(DIRECTORY_SYNC_ERROR_MESSAGE);
+}
+
+function noFollowFlag(): number {
+  return process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+}
+
+function exclusiveWriteFlags(): number {
+  return constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag();
+}
+
+function readOnlyFlags(): number {
+  return constants.O_RDONLY | noFollowFlag();
+}
+
+function directoryReadFlags(): number {
+  return constants.O_RDONLY | constants.O_DIRECTORY | noFollowFlag();
+}
+
+function hasExpectedOwner(uid: number): boolean {
+  return process.platform === "win32" || process.getuid === undefined || uid === process.getuid();
+}
+
+function isUnsupportedModeError(error: unknown): boolean {
+  return (
+    isNodeError(error, "ENOSYS") ||
+    isNodeError(error, "ENOTSUP") ||
+    isNodeError(error, "EOPNOTSUPP")
+  );
+}
+
+function isUnsupportedDirectorySyncError(error: unknown): boolean {
+  return (
+    isNodeError(error, "EINVAL") ||
+    isNodeError(error, "ENOSYS") ||
+    isNodeError(error, "ENOTSUP") ||
+    isNodeError(error, "EOPNOTSUPP")
+  );
+}
+
+async function enforceHandleMode(handle: FileHandle, mode: number): Promise<void> {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  try {
+    await handle.chmod(mode);
+  } catch (error: unknown) {
+    if (!isUnsupportedModeError(error)) {
+      throw error;
+    }
+    return;
+  }
+
+  const stats = await handle.stat();
+  if ((stats.mode & 0o777) !== mode) {
+    throw securityError();
+  }
+}
+
+function validateOwner(uid: number): void {
+  if (!hasExpectedOwner(uid)) {
+    throw securityError();
+  }
+}
+
+async function validateConfigDirectory(
+  configDir: string,
+  options: { create: boolean; enforceMode: boolean },
+): Promise<boolean> {
+  let pathStats;
+  try {
+    pathStats = await lstat(configDir);
+  } catch (error: unknown) {
+    if (!isNodeError(error, "ENOENT")) {
+      throw securityError();
+    }
+    if (!options.create) {
+      return false;
+    }
+
+    try {
+      await mkdir(configDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+      pathStats = await lstat(configDir);
+    } catch {
+      throw securityError();
+    }
+  }
+
+  if (pathStats.isSymbolicLink() || !pathStats.isDirectory()) {
+    throw securityError();
+  }
+  validateOwner(pathStats.uid);
+
+  if (process.platform === "win32") {
+    return true;
+  }
+
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(configDir, directoryReadFlags());
+    const handleStats = await handle.stat();
+    if (!handleStats.isDirectory()) {
+      throw securityError();
+    }
+    validateOwner(handleStats.uid);
+    if (options.enforceMode) {
+      await enforceHandleMode(handle, PRIVATE_DIRECTORY_MODE);
+    }
+    return true;
+  } catch (error: unknown) {
+    if (error instanceof SecurityValidationError) {
+      throw error;
+    }
+    throw securityError();
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function validateNewPrivateFile(stats: Stats): void {
+  if (!stats.isFile() || stats.nlink !== 1) {
+    throw securityError();
+  }
+  validateOwner(stats.uid);
+}
+
+async function readSecureTextFile(
+  filePath: string,
+  maximumBytes: number,
+  options: { reportLinkCountRace?: boolean } = {},
+): Promise<string> {
+  let handle: FileHandle;
+  try {
+    handle = await open(filePath, readOnlyFlags());
+  } catch (error: unknown) {
+    if (isNodeError(error, "ENOENT")) {
+      throw error;
+    }
+    throw securityError();
+  }
+
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      throw securityError();
+    }
+    if (stats.nlink !== 1) {
+      if (options.reportLinkCountRace) {
+        throw new KeyPublicationInProgressError();
+      }
+      throw securityError();
+    }
+    validateOwner(stats.uid);
+    if (!Number.isSafeInteger(stats.size) || stats.size < 0 || stats.size > maximumBytes) {
+      throw securityError();
+    }
+    await enforceHandleMode(handle, PRIVATE_FILE_MODE);
+    return await handle.readFile({ encoding: "utf8" });
+  } catch (error: unknown) {
+    if (error instanceof SecurityValidationError) {
+      throw error;
+    }
+    throw securityError();
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+async function writePrivateTemporaryFile(filePath: string, content: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(filePath, exclusiveWriteFlags(), PRIVATE_FILE_MODE);
+    validateNewPrivateFile(await handle.stat());
+    await handle.writeFile(content, "utf8");
+    await enforceHandleMode(handle, PRIVATE_FILE_MODE);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function syncDirectory(configDir: string): Promise<void> {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(configDir, directoryReadFlags());
+    const stats = await handle.stat();
+    if (!stats.isDirectory()) {
+      throw securityError();
+    }
+    validateOwner(stats.uid);
+    await handle.sync();
+  } catch (error: unknown) {
+    if (isUnsupportedDirectorySyncError(error)) {
+      return;
+    }
+    if (error instanceof SecurityValidationError) {
+      throw error;
+    }
+    throw directorySyncError();
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function bestEffortSyncDirectory(configDir: string): Promise<void> {
+  await syncDirectory(configDir).catch(() => undefined);
 }
 
 function decodeBase64(value: unknown): Buffer | undefined {
@@ -81,7 +328,7 @@ function parseStoredTokens(value: unknown): StoredTokens | undefined {
     candidate.accessToken.length === 0 ||
     typeof candidate.refreshToken !== "string" ||
     typeof candidate.expiresAt !== "number" ||
-    !Number.isFinite(candidate.expiresAt) ||
+    !Number.isSafeInteger(candidate.expiresAt) ||
     typeof candidate.scope !== "string"
   ) {
     return undefined;
@@ -127,43 +374,58 @@ function parseEnvelope(value: unknown):
 }
 
 function validateTokenResponse(tokenResponse: TokenResponse): void {
+  if (typeof tokenResponse !== "object" || tokenResponse === null || Array.isArray(tokenResponse)) {
+    throw new Error("Token response must be an object.");
+  }
   if (typeof tokenResponse.access_token !== "string" || tokenResponse.access_token.length === 0) {
     throw new Error("Token response must contain a nonempty access token.");
   }
-
+  if (
+    tokenResponse.refresh_token !== undefined &&
+    typeof tokenResponse.refresh_token !== "string"
+  ) {
+    throw new Error("Token response refresh token must be a string.");
+  }
+  if (tokenResponse.scope !== undefined && typeof tokenResponse.scope !== "string") {
+    throw new Error("Token response scope must be a string.");
+  }
   if (
     tokenResponse.expires_in !== undefined &&
-    (!Number.isFinite(tokenResponse.expires_in) || tokenResponse.expires_in <= 0)
+    (!Number.isSafeInteger(tokenResponse.expires_in) || tokenResponse.expires_in <= 0)
   ) {
-    throw new Error("Token response expiry must be a positive finite number.");
+    throw new Error("Token response expiry must be a positive safe integer.");
   }
 }
 
-async function enforceMode(path: string, mode: number): Promise<void> {
-  if (process.platform === "win32") {
-    return;
+function validateNow(value: number): number {
+  if (!Number.isSafeInteger(value)) {
+    throw new Error("Current time must be a safe integer number of epoch milliseconds.");
   }
-
-  try {
-    await chmod(path, mode);
-  } catch (error: unknown) {
-    if (
-      !isNodeError(error, "ENOSYS") &&
-      !isNodeError(error, "ENOTSUP") &&
-      !isNodeError(error, "EOPNOTSUPP")
-    ) {
-      throw error;
-    }
-  }
+  return value;
 }
 
-function exclusiveWriteFlags(): number {
-  const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
-  return constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow;
+function computeExpiresAt(now: number, expiresIn: number): number {
+  const durationMilliseconds = expiresIn * 1000;
+  const expiresAt = now + durationMilliseconds;
+  if (
+    !Number.isSafeInteger(durationMilliseconds) ||
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt <= now
+  ) {
+    throw new Error("Token response expiry is outside the supported time range.");
+  }
+  return expiresAt;
 }
 
-function waitForKeyWriter(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 5));
+function validateBufferMilliseconds(bufferSeconds: number): number {
+  if (!Number.isSafeInteger(bufferSeconds) || bufferSeconds < 0) {
+    throw new Error("Token expiry buffer must be a nonnegative safe integer.");
+  }
+  const milliseconds = bufferSeconds * 1000;
+  if (!Number.isSafeInteger(milliseconds)) {
+    throw new Error("Token expiry buffer is outside the supported time range.");
+  }
+  return milliseconds;
 }
 
 function enqueueTokenFileWrite(tokenFile: string, operation: () => Promise<void>): Promise<void> {
@@ -193,52 +455,47 @@ function enqueueTokenFileWrite(tokenFile: string, operation: () => Promise<void>
   return pendingWrite;
 }
 
+function waitForKeyPublisher(): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+}
+
 export class TokenStore {
   readonly #settings: TokenStoreSettings;
   readonly #now: () => number;
   readonly #randomBytes: (size: number) => Buffer;
+  readonly #configDir: string;
+  readonly #tokenFile: string;
+  readonly #keyFile: string;
   #tokens: StoredTokens | undefined;
   #key: Buffer | undefined;
   #initialized = false;
-  #initializationPromise: Promise<void> | undefined;
 
   constructor(settings: TokenStoreSettings, dependencies: TokenStoreDependencies = {}) {
     this.#settings = settings;
     this.#now = dependencies.now ?? Date.now;
     this.#randomBytes = dependencies.randomBytes ?? randomBytes;
+    this.#configDir = resolve(settings.configDir);
+    this.#tokenFile = resolve(settings.tokenFile);
+    this.#keyFile = resolve(settings.keyFile);
   }
 
-  async initialize(): Promise<void> {
-    if (this.#initialized) {
-      return;
-    }
-
-    if (this.#initializationPromise === undefined) {
-      this.#initializationPromise = this.#initializeOnce()
-        .then(() => {
-          this.#initialized = true;
-        })
-        .finally(() => {
-          this.#initializationPromise = undefined;
-        });
-    }
-
-    await this.#initializationPromise;
+  initialize(): Promise<void> {
+    return enqueueTokenFileWrite(this.#tokenFile, () => this.#initializeUnlocked());
   }
 
   async store(tokenResponse: TokenResponse): Promise<void> {
     validateTokenResponse(tokenResponse);
+    const now = validateNow(this.#now());
     const storedTokens: StoredTokens = {
       accessToken: tokenResponse.access_token,
       refreshToken: tokenResponse.refresh_token ?? "",
-      expiresAt: this.#now() + (tokenResponse.expires_in ?? 3600) * 1000,
+      expiresAt: computeExpiresAt(now, tokenResponse.expires_in ?? 3600),
       scope: tokenResponse.scope ?? "",
     };
 
-    await enqueueTokenFileWrite(this.#settings.tokenFile, async () => {
-      await this.initialize();
+    await enqueueTokenFileWrite(this.#tokenFile, async () => {
+      await this.#initializeUnlocked();
       await this.#save(storedTokens);
-      this.#tokens = storedTokens;
     });
   }
 
@@ -251,11 +508,17 @@ export class TokenStore {
   }
 
   isAccessTokenExpired(bufferSeconds = this.#settings.graphTokenRefreshBuffer): boolean {
+    const bufferMilliseconds = validateBufferMilliseconds(bufferSeconds);
+    const now = validateNow(this.#now());
     if (this.#tokens === undefined) {
       return true;
     }
 
-    return this.#now() >= this.#tokens.expiresAt - bufferSeconds * 1000;
+    const expirationThreshold = this.#tokens.expiresAt - bufferMilliseconds;
+    if (!Number.isSafeInteger(expirationThreshold)) {
+      throw new Error("Token expiry comparison is outside the supported time range.");
+    }
+    return now >= expirationThreshold;
   }
 
   isAuthenticated(): boolean {
@@ -266,23 +529,34 @@ export class TokenStore {
   }
 
   clear(): Promise<void> {
-    return enqueueTokenFileWrite(this.#settings.tokenFile, async () => {
-      this.#tokens = undefined;
-      await rm(this.#settings.tokenFile, { force: true });
-    });
+    return enqueueTokenFileWrite(this.#tokenFile, () => this.#clearUnlocked());
   }
 
-  async #initializeOnce(): Promise<void> {
-    await mkdir(this.#settings.configDir, {
-      recursive: true,
-      mode: PRIVATE_DIRECTORY_MODE,
-    });
-    await enforceMode(this.#settings.configDir, PRIVATE_DIRECTORY_MODE);
+  #validateSecretPaths(): void {
+    if (
+      dirname(this.#keyFile) !== this.#configDir ||
+      dirname(this.#tokenFile) !== this.#configDir ||
+      this.#keyFile === this.#tokenFile
+    ) {
+      throw securityError();
+    }
+  }
 
-    this.#key = this.#settings.graphTokenEncryptionKey
+  async #initializeUnlocked(): Promise<void> {
+    if (this.#initialized) {
+      return;
+    }
+
+    this.#validateSecretPaths();
+    await validateConfigDirectory(this.#configDir, { create: true, enforceMode: true });
+    const key = this.#settings.graphTokenEncryptionKey
       ? createHash("sha256").update(this.#settings.graphTokenEncryptionKey, "utf8").digest()
       : await this.#loadOrCreateKey();
-    this.#tokens = await this.#loadTokens(this.#key);
+    const tokens = await this.#loadTokens(key);
+
+    this.#key = key;
+    this.#tokens = tokens;
+    this.#initialized = true;
   }
 
   async #loadOrCreateKey(): Promise<Buffer> {
@@ -294,64 +568,101 @@ export class TokenStore {
       }
     }
 
-    const candidate = this.#randomBytes(KEY_BYTES);
-    if (candidate.length !== KEY_BYTES) {
-      throw new Error("Unable to initialize token encryption.");
-    }
-
-    let handle;
+    let candidate: Buffer;
     try {
-      handle = await open(this.#settings.keyFile, exclusiveWriteFlags(), PRIVATE_FILE_MODE);
-      await handle.writeFile(candidate.toString("base64"), "utf8");
-      await handle.sync();
-      await handle.close();
-      handle = undefined;
-      await enforceMode(this.#settings.keyFile, PRIVATE_FILE_MODE);
-      return candidate;
-    } catch (error: unknown) {
-      if (!isNodeError(error, "EEXIST")) {
-        throw new Error("Unable to initialize token encryption.", { cause: error });
-      }
-    } finally {
-      await handle?.close().catch(() => undefined);
+      candidate = this.#randomBytes(KEY_BYTES);
+    } catch {
+      throw encryptionError();
+    }
+    if (candidate.length !== KEY_BYTES) {
+      throw encryptionError();
     }
 
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      try {
-        return await this.#readKeyFile();
-      } catch (error: unknown) {
-        if (attempt === 99) {
-          throw new Error("Unable to initialize token encryption.", { cause: error });
-        }
-        await waitForKeyWriter();
-      }
-    }
-
-    throw new Error("Unable to initialize token encryption.");
+    return this.#publishGeneratedKey(candidate);
   }
 
-  async #readKeyFile(): Promise<Buffer> {
-    const encoded = (await readFile(this.#settings.keyFile, "utf8")).trim();
+  async #publishGeneratedKey(candidate: Buffer): Promise<Buffer> {
+    const temporaryFile = this.#temporaryFilePath(this.#keyFile, "key");
+    let published = false;
+    try {
+      try {
+        await writePrivateTemporaryFile(temporaryFile, candidate.toString("base64"));
+      } catch {
+        throw encryptionError();
+      }
+
+      try {
+        await link(temporaryFile, this.#keyFile);
+        published = true;
+      } catch (error: unknown) {
+        if (!isNodeError(error, "EEXIST")) {
+          throw encryptionError();
+        }
+        await rm(temporaryFile, { force: true }).catch(() => undefined);
+        return await this.#readWinningKey();
+      }
+
+      let synchronizationFailure: Error | undefined;
+      try {
+        await syncDirectory(this.#configDir);
+      } catch (error: unknown) {
+        synchronizationFailure = error instanceof Error ? error : directorySyncError();
+      }
+
+      try {
+        await unlink(temporaryFile);
+      } catch {
+        throw encryptionError();
+      }
+      await bestEffortSyncDirectory(this.#configDir);
+
+      if (synchronizationFailure !== undefined) {
+        throw synchronizationFailure;
+      }
+      return candidate;
+    } finally {
+      await rm(temporaryFile, { force: true }).catch(() => undefined);
+      if (published) {
+        await bestEffortSyncDirectory(this.#configDir);
+      }
+    }
+  }
+
+  async #readWinningKey(): Promise<Buffer> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        return await this.#readKeyFile(true);
+      } catch (error: unknown) {
+        if (!(error instanceof KeyPublicationInProgressError) || attempt === 99) {
+          throw error;
+        }
+        await waitForKeyPublisher();
+      }
+    }
+    throw encryptionError();
+  }
+
+  async #readKeyFile(reportLinkCountRace = false): Promise<Buffer> {
+    const encoded = (
+      await readSecureTextFile(this.#keyFile, MAX_KEY_FILE_BYTES, { reportLinkCountRace })
+    ).trim();
     const key = decodeBase64(encoded);
     if (key?.length !== KEY_BYTES) {
-      throw new Error("Unable to initialize token encryption.");
+      throw encryptionError();
     }
-    await enforceMode(this.#settings.keyFile, PRIVATE_FILE_MODE);
     return key;
   }
 
   async #loadTokens(key: Buffer): Promise<StoredTokens | undefined> {
     let encryptedText: string;
     try {
-      encryptedText = await readFile(this.#settings.tokenFile, "utf8");
+      encryptedText = await readSecureTextFile(this.#tokenFile, MAX_TOKEN_FILE_BYTES);
     } catch (error: unknown) {
       if (isNodeError(error, "ENOENT")) {
         return undefined;
       }
-      throw new Error("Unable to read encrypted token file.", { cause: error });
+      throw error;
     }
-
-    await enforceMode(this.#settings.tokenFile, PRIVATE_FILE_MODE);
 
     try {
       const envelope = parseEnvelope(JSON.parse(encryptedText) as unknown);
@@ -373,12 +684,17 @@ export class TokenStore {
 
   async #save(tokens: StoredTokens): Promise<void> {
     if (this.#key === undefined) {
-      throw new Error("Token store is not initialized.");
+      throw tokenWriteError();
     }
 
-    const iv = this.#randomBytes(IV_BYTES);
+    let iv: Buffer;
+    try {
+      iv = this.#randomBytes(IV_BYTES);
+    } catch {
+      throw tokenWriteError();
+    }
     if (iv.length !== IV_BYTES) {
-      throw new Error("Unable to encrypt token file.");
+      throw tokenWriteError();
     }
 
     const cipher = createCipheriv("aes-256-gcm", this.#key, iv);
@@ -392,25 +708,63 @@ export class TokenStore {
       authTag: cipher.getAuthTag().toString("base64"),
       ciphertext: ciphertext.toString("base64"),
     };
-    const tokenDirectory = dirname(this.#settings.tokenFile);
-    temporaryFileSequence += 1;
-    const temporaryFile = join(
-      tokenDirectory,
-      `.${basename(this.#settings.tokenFile)}.${process.pid}.${process.hrtime.bigint()}.${temporaryFileSequence}.tmp`,
-    );
+    const serializedPayload = JSON.stringify(payload);
+    if (Buffer.byteLength(serializedPayload, "utf8") > MAX_TOKEN_FILE_BYTES) {
+      throw tokenWriteError();
+    }
 
-    let handle;
+    const temporaryFile = this.#temporaryFilePath(this.#tokenFile, "token");
     try {
-      handle = await open(temporaryFile, exclusiveWriteFlags(), PRIVATE_FILE_MODE);
-      await handle.writeFile(JSON.stringify(payload), "utf8");
-      await handle.sync();
-      await handle.close();
-      handle = undefined;
-      await rename(temporaryFile, this.#settings.tokenFile);
-      await enforceMode(this.#settings.tokenFile, PRIVATE_FILE_MODE);
+      try {
+        await writePrivateTemporaryFile(temporaryFile, serializedPayload);
+        await rename(temporaryFile, this.#tokenFile);
+      } catch {
+        throw tokenWriteError();
+      }
+
+      this.#tokens = tokens;
+      await syncDirectory(this.#configDir);
     } finally {
-      await handle?.close().catch(() => undefined);
       await rm(temporaryFile, { force: true }).catch(() => undefined);
     }
+  }
+
+  async #clearUnlocked(): Promise<void> {
+    this.#validateSecretPaths();
+    const directoryExists = await validateConfigDirectory(this.#configDir, {
+      create: false,
+      enforceMode: false,
+    });
+    if (!directoryExists) {
+      this.#tokens = undefined;
+      return;
+    }
+
+    try {
+      await unlink(this.#tokenFile);
+    } catch (error: unknown) {
+      if (!isNodeError(error, "ENOENT")) {
+        throw tokenClearError();
+      }
+    }
+
+    let synchronizationFailure: Error | undefined;
+    try {
+      await syncDirectory(this.#configDir);
+    } catch (error: unknown) {
+      synchronizationFailure = error instanceof Error ? error : directorySyncError();
+    }
+    this.#tokens = undefined;
+    if (synchronizationFailure !== undefined) {
+      throw synchronizationFailure;
+    }
+  }
+
+  #temporaryFilePath(targetFile: string, kind: "key" | "token"): string {
+    temporaryFileSequence += 1;
+    return join(
+      this.#configDir,
+      `.${basename(targetFile)}.${kind}.${process.pid}.${process.hrtime.bigint()}.${temporaryFileSequence}.tmp`,
+    );
   }
 }
