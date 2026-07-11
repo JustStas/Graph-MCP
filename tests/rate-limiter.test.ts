@@ -21,6 +21,28 @@ function createClock(start = 0) {
   };
 }
 
+function createDeferredSleep() {
+  const requested: number[] = [];
+  const resolvers: Array<() => void> = [];
+
+  return {
+    requested,
+    sleep: (milliseconds: number) => {
+      requested.push(milliseconds);
+      return new Promise<void>((resolve) => {
+        resolvers.push(resolve);
+      });
+    },
+    resolveNext: () => {
+      const resolve = resolvers.shift();
+      if (resolve === undefined) {
+        throw new Error("No deferred sleep is pending");
+      }
+      resolve();
+    },
+  };
+}
+
 describe("RateLimiter", () => {
   test("allows two acquisitions and rejects the third at capacity", async () => {
     const clock = createClock(100);
@@ -89,6 +111,54 @@ describe("RateLimiter", () => {
     expect(clock.sleeps).toEqual([11]);
   });
 
+  test("rechecks an extended backoff after the first sleep resolves", async () => {
+    const clock = createClock();
+    const deferred = createDeferredSleep();
+    const limiter = new RateLimiter({
+      maxRequests: 1,
+      windowMs: 1000,
+      now: clock.now,
+      sleep: deferred.sleep,
+    });
+
+    expect(limiter.handle429(1)).toBe(1);
+    const acquisition = limiter.acquire();
+    await Promise.resolve();
+    expect(deferred.requested).toEqual([1000]);
+
+    expect(limiter.handle429(2)).toBe(2);
+    clock.set(1000);
+    deferred.resolveNext();
+    await Promise.resolve();
+    expect(deferred.requested).toEqual([1000, 1000]);
+
+    clock.set(2000);
+    deferred.resolveNext();
+    await expect(acquisition).resolves.toBeUndefined();
+  });
+
+  test("sleeps again when injected sleep wakes before the deadline", async () => {
+    let current = 0;
+    let firstSleep = true;
+    const sleeps: number[] = [];
+    const limiter = new RateLimiter({
+      maxRequests: 1,
+      windowMs: 1000,
+      now: () => current,
+      sleep: (milliseconds: number) => {
+        sleeps.push(milliseconds);
+        current += firstSleep ? milliseconds - 1 : milliseconds;
+        firstSleep = false;
+        return Promise.resolve();
+      },
+    });
+
+    expect(limiter.handle429(1)).toBe(1);
+    await limiter.acquire();
+
+    expect(sleeps).toEqual([1000, 1]);
+  });
+
   test("uses exponential retry delays and caps them at 60 seconds", () => {
     const clock = createClock();
     const limiter = new RateLimiter({
@@ -122,6 +192,25 @@ describe("RateLimiter", () => {
     await limiter.acquire();
 
     expect(clock.sleeps).toEqual([2500]);
+  });
+
+  test("does not shorten a longer active backoff with a shorter retry-after", async () => {
+    const clock = createClock();
+    const limiter = new RateLimiter({
+      maxRequests: 1,
+      windowMs: 1000,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    expect(limiter.handle429(10)).toBe(10);
+    clock.set(100);
+    expect(limiter.handle429(1)).toBe(1);
+    clock.set(5000);
+
+    await limiter.acquire();
+
+    expect(clock.sleeps).toEqual([5000]);
   });
 
   test("falls back to exponential delay when retry-after is zero", () => {

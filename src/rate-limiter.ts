@@ -32,7 +32,7 @@ export class RateLimiter {
 
   async acquire(): Promise<void> {
     let now = this.now();
-    if (now < this.backoffUntil) {
+    while (now < this.backoffUntil) {
       await this.sleep(this.backoffUntil - now);
       now = this.now();
     }
@@ -61,7 +61,8 @@ export class RateLimiter {
       retryAfterSeconds !== undefined && retryAfterSeconds > 0
         ? retryAfterSeconds
         : Math.min(2 ** this.backoffCount, 60);
-    this.backoffUntil = this.now() + delay * 1000;
+    const proposedDeadline = this.now() + delay * 1000;
+    this.backoffUntil = Math.max(this.backoffUntil, proposedDeadline);
     return delay;
   }
 
