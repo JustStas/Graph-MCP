@@ -300,11 +300,12 @@ function sanitizeProviderText(value: string, secrets: readonly string[]): string
 }
 
 function providerErrorMessage(callback: OAuthCallback, secrets: readonly string[]): string {
+  const error = callback.error === undefined ? "" : sanitizeProviderText(callback.error, secrets);
   const description =
     callback.errorDescription === undefined
       ? ""
       : ` — ${sanitizeProviderText(callback.errorDescription, secrets)}`;
-  return `OAuth error: ${callback.error ?? "unknown"}${description}`;
+  return `OAuth error: ${error || "unknown"}${description}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -413,19 +414,17 @@ export async function runBrowserLogin(
       dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     );
 
-    if (callback.error !== undefined) {
-      throw authenticationError(providerErrorMessage(callback, [pkce.verifier, state]));
-    }
-    if (
-      callback.code === undefined ||
-      callback.code.length === 0 ||
-      callback.state === undefined ||
-      callback.state.length === 0
-    ) {
+    if (callback.state === undefined || callback.state.length === 0) {
       throw authenticationError(LOGIN_CANCELLED_MESSAGE);
     }
     if (callback.state !== state) {
       throw authenticationError("Invalid state parameter — possible CSRF attack");
+    }
+    if (callback.error !== undefined) {
+      throw authenticationError(providerErrorMessage(callback, [pkce.verifier, state]));
+    }
+    if (callback.code === undefined || callback.code.length === 0) {
+      throw authenticationError(LOGIN_CANCELLED_MESSAGE);
     }
 
     return await exchangeAuthorizationCode(

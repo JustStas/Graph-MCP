@@ -218,9 +218,34 @@ describe("runBrowserLogin", () => {
   });
 
   test("returns the provider OAuth error description without exchanging a token", async () => {
+    const verifierSource = Buffer.alloc(32);
+    const stateSource = Buffer.alloc(32, 1);
     const listener = listenerFor({
       error: "access_denied",
       errorDescription: "The user cancelled sign-in.",
+      state: stateSource.toString("base64url"),
+    });
+    const fetchToken = vi.fn();
+
+    await expectAuthenticationError(
+      runBrowserLogin(settings, {
+        randomBytes: randomBytesFrom([verifierSource, stateSource]),
+        createCallbackListener: vi.fn(() => listener.listener),
+        openBrowser: vi.fn(() => Promise.resolve()),
+        fetch: fetchToken,
+      }),
+      "OAuth error: access_denied — The user cancelled sign-in.",
+    );
+
+    expect(fetchToken).not.toHaveBeenCalled();
+    expect(listener.close).toHaveBeenCalledTimes(1);
+  });
+
+  test("rejects a provider error callback with a mismatched state as possible CSRF", async () => {
+    const listener = listenerFor({
+      error: "access_denied",
+      errorDescription: "The user cancelled sign-in.",
+      state: "attacker-state",
     });
     const fetchToken = vi.fn();
 
@@ -231,7 +256,85 @@ describe("runBrowserLogin", () => {
         openBrowser: vi.fn(() => Promise.resolve()),
         fetch: fetchToken,
       }),
-      "OAuth error: access_denied — The user cancelled sign-in.",
+      "Invalid state parameter — possible CSRF attack",
+    );
+
+    expect(fetchToken).not.toHaveBeenCalled();
+    expect(listener.close).toHaveBeenCalledTimes(1);
+  });
+
+  for (const [stateName, callback] of [
+    ["missing", { error: "access_denied", errorDescription: "The user cancelled sign-in." }],
+    [
+      "empty",
+      { error: "access_denied", errorDescription: "The user cancelled sign-in.", state: "" },
+    ],
+  ] as const) {
+    test(`treats a provider error callback with ${stateName} state as a cancelled login`, async () => {
+      const listener = listenerFor(callback);
+      const fetchToken = vi.fn();
+
+      await expectAuthenticationError(
+        runBrowserLogin(settings, {
+          randomBytes: randomBytesFrom([Buffer.alloc(32), Buffer.alloc(32)]),
+          createCallbackListener: vi.fn(() => listener.listener),
+          openBrowser: vi.fn(() => Promise.resolve()),
+          fetch: fetchToken,
+        }),
+        "Login timed out or was cancelled.",
+      );
+
+      expect(fetchToken).not.toHaveBeenCalled();
+      expect(listener.close).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  test("normalizes and redacts both provider error fields", async () => {
+    const verifierSource = Buffer.alloc(32);
+    const stateSource = Buffer.alloc(32, 1);
+    const verifier = verifierSource.toString("base64url");
+    const state = stateSource.toString("base64url");
+    const listener = listenerFor({
+      error: `\u0000access\t${state}\n${verifier}\r`,
+      errorDescription: `\u0007Provider\tdeclined ${verifier}\n${state}`,
+      state,
+    });
+    const fetchToken = vi.fn();
+
+    const error = await expectAuthenticationError(
+      runBrowserLogin(settings, {
+        randomBytes: randomBytesFrom([verifierSource, stateSource]),
+        createCallbackListener: vi.fn(() => listener.listener),
+        openBrowser: vi.fn(() => Promise.resolve()),
+        fetch: fetchToken,
+      }),
+      "OAuth error: access [redacted] [redacted] — Provider declined [redacted] [redacted]",
+    );
+
+    expect(error.message).not.toContain(state);
+    expect(error.message).not.toContain(verifier);
+    expect(fetchToken).not.toHaveBeenCalled();
+    expect(listener.close).toHaveBeenCalledTimes(1);
+  });
+
+  test("uses unknown when the sanitized provider error is empty", async () => {
+    const verifierSource = Buffer.alloc(32);
+    const stateSource = Buffer.alloc(32, 1);
+    const listener = listenerFor({
+      error: "\u0000\t\n",
+      errorDescription: "The user cancelled sign-in.",
+      state: stateSource.toString("base64url"),
+    });
+    const fetchToken = vi.fn();
+
+    await expectAuthenticationError(
+      runBrowserLogin(settings, {
+        randomBytes: randomBytesFrom([verifierSource, stateSource]),
+        createCallbackListener: vi.fn(() => listener.listener),
+        openBrowser: vi.fn(() => Promise.resolve()),
+        fetch: fetchToken,
+      }),
+      "OAuth error: unknown — The user cancelled sign-in.",
     );
 
     expect(fetchToken).not.toHaveBeenCalled();
