@@ -284,6 +284,47 @@ describe("TokenStore", () => {
     }
   });
 
+  test("rejects Windows token reads when the opened file identity cannot be verified", async () => {
+    const tokenMarker = "unverifiable-windows-token-secret-marker";
+    settings = settingsFor(configDir, "unverifiable-windows-encryption-key");
+    await new TokenStore(settings).store({ access_token: tokenMarker });
+
+    const probe = await open(settings.tokenFile, "r");
+    const originalStats = await probe.stat();
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+    await probe.close();
+    expect(originalStats.dev).toBeGreaterThan(0);
+    expect(originalStats.ino).toBeGreaterThan(0);
+    const originalStat = Object.getOwnPropertyDescriptor(fileHandlePrototype, "stat")?.value as
+      ((this: FileHandle) => ReturnType<FileHandle["stat"]>) | undefined;
+    if (originalStat === undefined) {
+      throw new Error("FileHandle.stat is unavailable");
+    }
+    let identityRemoved = false;
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.spyOn(fileHandlePrototype, "stat").mockImplementation(async function (this: FileHandle) {
+      const stats = await originalStat.call(this);
+      if (
+        !identityRemoved &&
+        stats.isFile() &&
+        stats.dev === originalStats.dev &&
+        stats.ino === originalStats.ino
+      ) {
+        identityRemoved = true;
+        const statsWithoutIdentity = Object.create(stats) as typeof stats;
+        Object.defineProperties(statsWithoutIdentity, {
+          dev: { value: 0 },
+          ino: { value: 0 },
+        });
+        return statsWithoutIdentity;
+      }
+      return stats;
+    });
+
+    await expectGenericRejection(new TokenStore(settings).initialize(), tokenMarker);
+    expect(identityRemoved).toBe(true);
+  });
+
   test.skipIf(process.platform === "win32")(
     "rejects secret paths outside the validated directory without touching them",
     async () => {

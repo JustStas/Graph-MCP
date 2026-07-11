@@ -245,9 +245,14 @@ function supportsFileIdentityComparison(stats: Stats): boolean {
 }
 
 function validateMatchingFileIdentity(pathStats: Stats, handleStats: Stats): void {
+  const pathIdentitySupported = supportsFileIdentityComparison(pathStats);
+  const handleIdentitySupported = supportsFileIdentityComparison(handleStats);
+  if (process.platform === "win32" && (!pathIdentitySupported || !handleIdentitySupported)) {
+    throw securityError();
+  }
   if (
-    supportsFileIdentityComparison(pathStats) &&
-    supportsFileIdentityComparison(handleStats) &&
+    pathIdentitySupported &&
+    handleIdentitySupported &&
     (pathStats.dev !== handleStats.dev || pathStats.ino !== handleStats.ino)
   ) {
     throw securityError();
