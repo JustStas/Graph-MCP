@@ -1,17 +1,23 @@
 import { createHash, randomBytes as nodeRandomBytes } from "node:crypto";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer, type RequestListener, type Server } from "node:http";
+import type { AddressInfo, Socket } from "node:net";
 
 import open from "open";
 
 import type { Settings } from "../config.js";
 import { AuthenticationError } from "../errors.js";
-import type { TokenResponse } from "../token-store.js";
+import { parseTokenResponse, type TokenResponse } from "../token-store.js";
 
 const PKCE_VERIFIER_BYTES = 32;
 const STATE_BYTES = 32;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const LOGIN_CANCELLED_MESSAGE = "Login timed out or was cancelled.";
+const LISTENER_CLOSED_MESSAGE = "Loopback callback listener is closed.";
+const LISTENER_FAILURE_MESSAGE = "Loopback callback listener failed.";
+const TOKEN_RESPONSE_ERROR_MESSAGE = "Token endpoint returned an invalid token response.";
+const TOKEN_EXCHANGE_ERROR_MESSAGE = "Token exchange failed.";
+const LOOPBACK_HEADERS_TIMEOUT_MS = 5_000;
+const LOOPBACK_REQUEST_TIMEOUT_MS = 10_000;
 const SUCCESS_HTML =
   "<!doctype html><html><body><p>Authentication complete. You can close this window.</p></body></html>";
 const FAILURE_HTML =
@@ -51,6 +57,12 @@ export interface LoopbackCallbackListener extends CallbackListener {
   readonly callbackUrl: string;
 }
 
+export type HttpServerFactory = (requestListener: RequestListener) => Server;
+
+export interface LoopbackCallbackListenerDependencies {
+  readonly createServer?: HttpServerFactory;
+}
+
 export interface CallbackListenerOptions {
   readonly redirectUri: string;
   readonly expectedState: string;
@@ -81,6 +93,7 @@ export interface BrowserLoginDependencies {
   readonly fetch?: TokenEndpointFetch;
   readonly timeoutMs?: number;
   readonly timeout?: TimeoutRunner;
+  readonly signal?: AbortSignal;
 }
 
 interface LoopbackRedirectUri {
@@ -130,12 +143,13 @@ function fixedHtml(
   response: import("node:http").ServerResponse,
   statusCode: number,
   html: string,
+  onComplete?: () => void,
 ): void {
   response.writeHead(statusCode, {
     "content-type": "text/html; charset=utf-8",
     "content-length": Buffer.byteLength(html),
   });
-  response.end(html);
+  response.end(html, onComplete);
 }
 
 function callbackFromUrl(url: URL): OAuthCallback {
@@ -175,14 +189,20 @@ function callbackUrlForAddress(redirectUri: URL, address: AddressInfo | string |
 
 export function createLoopbackCallbackListener(
   options: CallbackListenerOptions,
+  dependencies: LoopbackCallbackListenerDependencies = {},
 ): LoopbackCallbackListener {
   const redirect = parseLoopbackRedirectUri(options.redirectUri);
+  const sockets = new Set<Socket>();
   let callbackReceived = false;
+  let callbackSettled = false;
   let resolveCallback: (callback: OAuthCallback) => void = () => undefined;
-  const callback = new Promise<OAuthCallback>((resolve) => {
+  let rejectCallback: (error: AuthenticationError) => void = () => undefined;
+  const callback = new Promise<OAuthCallback>((resolve, reject) => {
     resolveCallback = resolve;
+    rejectCallback = reject;
   });
-  const server = createServer((request, response) => {
+  void callback.catch(() => undefined);
+  const server = (dependencies.createServer ?? createServer)((request, response) => {
     const requestUrl = new URL(request.url ?? "/", redirect.url);
     if (requestUrl.pathname !== redirect.url.pathname) {
       fixedHtml(response, 404, FAILURE_HTML);
@@ -199,36 +219,128 @@ export function createLoopbackCallbackListener(
     const html = callbackIsSuccessful(parsedCallback, options.expectedState)
       ? SUCCESS_HTML
       : FAILURE_HTML;
-    fixedHtml(response, 200, html);
-    resolveCallback(parsedCallback);
+    fixedHtml(response, 200, html, () => {
+      if (!callbackSettled) {
+        callbackSettled = true;
+        resolveCallback(parsedCallback);
+      }
+    });
   });
+  server.headersTimeout = LOOPBACK_HEADERS_TIMEOUT_MS;
+  server.requestTimeout = LOOPBACK_REQUEST_TIMEOUT_MS;
+  server.on("connection", (socket: Socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  let lifecycle: "idle" | "starting" | "listening" | "closed" = "idle";
   let startPromise: Promise<void> | undefined;
+  let rejectStart: ((error: Error) => void) | undefined;
   let closePromise: Promise<void> | undefined;
 
-  server.on("error", () => undefined);
+  function listenerFailure(): AuthenticationError {
+    return authenticationError(LISTENER_FAILURE_MESSAGE);
+  }
+
+  function rejectCallbackOnce(error: AuthenticationError): void {
+    if (callbackSettled) {
+      return;
+    }
+    callbackSettled = true;
+    rejectCallback(error);
+  }
+
+  function destroyConnections(): void {
+    server.closeAllConnections?.();
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+  }
+
+  function stopServer(): Promise<void> {
+    destroyConnections();
+    return new Promise<void>((resolve) => {
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  }
+
+  function stopLateServer(): void {
+    destroyConnections();
+    try {
+      server.close(() => undefined);
+    } catch {
+      // The server was never listening or has already stopped.
+    }
+  }
+
+  function closeListener(
+    startError: Error = authenticationError(LISTENER_CLOSED_MESSAGE),
+  ): Promise<void> {
+    if (closePromise !== undefined) {
+      return closePromise;
+    }
+
+    const previousLifecycle = lifecycle;
+    lifecycle = "closed";
+    if (previousLifecycle === "starting") {
+      rejectStart?.(startError);
+      rejectStart = undefined;
+    }
+    closePromise = previousLifecycle === "idle" ? Promise.resolve() : stopServer();
+    return closePromise;
+  }
+
+  server.on("error", (error: Error) => {
+    if (lifecycle === "starting") {
+      rejectStart?.(error);
+      rejectStart = undefined;
+      void closeListener(error);
+      return;
+    }
+    if (lifecycle === "listening") {
+      rejectCallbackOnce(listenerFailure());
+      void closeListener();
+    }
+  });
 
   return {
     get callbackUrl(): string {
       return callbackUrlForAddress(redirect.url, server.address());
     },
     start(): Promise<void> {
+      if (lifecycle === "closed") {
+        return Promise.reject(authenticationError(LISTENER_CLOSED_MESSAGE));
+      }
       if (startPromise !== undefined) {
         return startPromise;
       }
 
+      lifecycle = "starting";
       startPromise = new Promise<void>((resolve, reject) => {
-        const onError = (error: Error) => {
-          server.off("listening", onListening);
-          reject(error);
-        };
+        rejectStart = reject;
         const onListening = () => {
-          server.off("error", onError);
+          if (lifecycle === "closed") {
+            stopLateServer();
+            return;
+          }
+          lifecycle = "listening";
+          rejectStart = undefined;
           resolve();
         };
 
-        server.once("error", onError);
         server.once("listening", onListening);
-        server.listen({ host: redirect.host, port: redirect.port });
+        try {
+          server.listen({ host: redirect.host, port: redirect.port });
+        } catch (error: unknown) {
+          const startError =
+            error instanceof Error ? error : new Error("Unable to start callback listener.");
+          rejectStart?.(startError);
+          rejectStart = undefined;
+          void closeListener(startError);
+        }
       });
       return startPromise;
     },
@@ -236,14 +348,7 @@ export function createLoopbackCallbackListener(
       return callback;
     },
     close(): Promise<void> {
-      if (closePromise !== undefined) {
-        return closePromise;
-      }
-
-      closePromise = new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
-      return closePromise;
+      return closeListener();
     },
   };
 }
@@ -332,6 +437,7 @@ async function exchangeAuthorizationCode(
   verifier: string,
   state: string,
   fetchToken: TokenEndpointFetch,
+  signal: AbortSignal,
 ): Promise<TokenResponse> {
   const body = new URLSearchParams({
     client_id: settings.azureClientId,
@@ -340,17 +446,47 @@ async function exchangeAuthorizationCode(
     redirect_uri: settings.graphRedirectUri,
     code_verifier: verifier,
   });
-  const response = await fetchToken(settings.tokenEndpoint, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
+  let response: TokenEndpointResponse;
+  try {
+    response = await fetchToken(settings.tokenEndpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      signal,
+    });
+  } catch {
+    if (signal.aborted) {
+      throw authenticationError(LOGIN_CANCELLED_MESSAGE);
+    }
+    throw authenticationError(TOKEN_EXCHANGE_ERROR_MESSAGE);
+  }
+
+  if (signal.aborted) {
+    throw authenticationError(LOGIN_CANCELLED_MESSAGE);
+  }
 
   if (response.ok) {
-    return (await response.json()) as TokenResponse;
+    if (response.status === 204) {
+      throw authenticationError(TOKEN_RESPONSE_ERROR_MESSAGE);
+    }
+    try {
+      const payload: unknown = await response.json();
+      if (signal.aborted) {
+        throw authenticationError(LOGIN_CANCELLED_MESSAGE);
+      }
+      return parseTokenResponse(payload);
+    } catch {
+      if (signal.aborted) {
+        throw authenticationError(LOGIN_CANCELLED_MESSAGE);
+      }
+      throw authenticationError(TOKEN_RESPONSE_ERROR_MESSAGE);
+    }
   }
 
   const responseText = await response.text().catch(() => "");
+  if (signal.aborted) {
+    throw authenticationError(LOGIN_CANCELLED_MESSAGE);
+  }
   const description = providerDescription(responseText, [code, verifier, state]);
   if (description !== undefined) {
     throw authenticationError(`Token exchange failed: ${description}`);
@@ -358,20 +494,54 @@ async function exchangeAuthorizationCode(
   throw authenticationError(`Token exchange failed with status ${response.status}.`);
 }
 
-function defaultTimeout<Value>(operation: Promise<Value>, timeoutMs: number): Promise<Value> {
+function defaultTimeout<Value>(
+  operation: Promise<Value>,
+  timeoutMs: number,
+  cancel: () => void,
+): Promise<Value> {
   return new Promise<Value>((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(authenticationError(LOGIN_CANCELLED_MESSAGE)),
-      timeoutMs,
-    );
+    const timeout = setTimeout(() => {
+      cancel();
+      reject(authenticationError(LOGIN_CANCELLED_MESSAGE));
+    }, timeoutMs);
     void operation.then(
       (value) => {
         clearTimeout(timeout);
         resolve(value);
       },
-      () => {
+      (error: unknown) => {
         clearTimeout(timeout);
-        reject(authenticationError(LOGIN_CANCELLED_MESSAGE));
+        reject(error instanceof Error ? error : new Error("Browser login operation failed."));
+      },
+    );
+  });
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw authenticationError(LOGIN_CANCELLED_MESSAGE);
+  }
+}
+
+function rejectOnAbort<Value>(operation: Promise<Value>, signal: AbortSignal): Promise<Value> {
+  return new Promise<Value>((resolve, reject) => {
+    const onAbort = () => {
+      reject(authenticationError(LOGIN_CANCELLED_MESSAGE));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error instanceof Error ? error : new Error("Browser login operation failed."));
       },
     );
   });
@@ -391,7 +561,10 @@ export async function runBrowserLogin(
   settings: BrowserLoginSettings,
   dependencies: BrowserLoginDependencies = {},
 ): Promise<TokenResponse> {
-  parseLoopbackRedirectUri(settings.graphRedirectUri);
+  const redirect = parseLoopbackRedirectUri(settings.graphRedirectUri);
+  if (redirect.port === 0) {
+    throw authenticationError("graphRedirectUri must not use port 0.");
+  }
 
   const randomBytes = dependencies.randomBytes ?? nodeRandomBytes;
   const pkce = generatePkce({ randomBytes });
@@ -400,19 +573,24 @@ export async function runBrowserLogin(
     redirectUri: settings.graphRedirectUri,
     expectedState: state,
   });
-  const timeout = dependencies.timeout ?? defaultTimeout;
   const fetchToken: TokenEndpointFetch =
     dependencies.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const openBrowser: BrowserOpener = dependencies.openBrowser ?? open;
-  let terminalError: unknown;
-
-  try {
+  const cancellation = new AbortController();
+  const abortFromExternalSignal = () => cancellation.abort();
+  if (dependencies.signal?.aborted) {
+    cancellation.abort();
+  } else {
+    dependencies.signal?.addEventListener("abort", abortFromExternalSignal, { once: true });
+  }
+  const operation = (async () => {
+    throwIfAborted(cancellation.signal);
     await listener.start();
+    throwIfAborted(cancellation.signal);
     await openBrowser(buildAuthorizationUrl(settings, { state, challenge: pkce.challenge }));
-    const callback = await timeout(
-      listener.waitForCallback(),
-      dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    );
+    throwIfAborted(cancellation.signal);
+    const callback = await listener.waitForCallback();
+    throwIfAborted(cancellation.signal);
 
     if (callback.state === undefined || callback.state.length === 0) {
       throw authenticationError(LOGIN_CANCELLED_MESSAGE);
@@ -433,11 +611,25 @@ export async function runBrowserLogin(
       pkce.verifier,
       state,
       fetchToken,
+      cancellation.signal,
     );
+  })();
+  const abortableOperation = rejectOnAbort(operation, cancellation.signal);
+  void abortableOperation.catch(() => undefined);
+  const timeout =
+    dependencies.timeout ??
+    ((pendingOperation: Promise<TokenResponse>, timeoutMs: number) =>
+      defaultTimeout(pendingOperation, timeoutMs, () => cancellation.abort()));
+  let terminalError: unknown;
+
+  try {
+    return await timeout(abortableOperation, dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   } catch (error: unknown) {
     terminalError = error;
     throw error;
   } finally {
+    dependencies.signal?.removeEventListener("abort", abortFromExternalSignal);
+    cancellation.abort();
     await closeListener(listener, terminalError);
   }
 }

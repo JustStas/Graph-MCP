@@ -470,28 +470,37 @@ function parseEnvelope(value: unknown):
   return { iv, authTag, ciphertext };
 }
 
-function validateTokenResponse(tokenResponse: TokenResponse): void {
-  if (typeof tokenResponse !== "object" || tokenResponse === null || Array.isArray(tokenResponse)) {
+export function parseTokenResponse(value: unknown): TokenResponse {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("Token response must be an object.");
   }
-  if (typeof tokenResponse.access_token !== "string" || tokenResponse.access_token.length === 0) {
+  const tokenResponse = value as Record<string, unknown>;
+  const accessToken = tokenResponse.access_token;
+  const refreshToken = tokenResponse.refresh_token;
+  const expiresIn = tokenResponse.expires_in;
+  const scope = tokenResponse.scope;
+  if (typeof accessToken !== "string" || accessToken.length === 0) {
     throw new Error("Token response must contain a nonempty access token.");
   }
-  if (
-    tokenResponse.refresh_token !== undefined &&
-    typeof tokenResponse.refresh_token !== "string"
-  ) {
+  if (refreshToken !== undefined && typeof refreshToken !== "string") {
     throw new Error("Token response refresh token must be a string.");
   }
-  if (tokenResponse.scope !== undefined && typeof tokenResponse.scope !== "string") {
+  if (scope !== undefined && typeof scope !== "string") {
     throw new Error("Token response scope must be a string.");
   }
   if (
-    tokenResponse.expires_in !== undefined &&
-    (!Number.isSafeInteger(tokenResponse.expires_in) || tokenResponse.expires_in <= 0)
+    expiresIn !== undefined &&
+    (typeof expiresIn !== "number" || !Number.isSafeInteger(expiresIn) || expiresIn <= 0)
   ) {
     throw new Error("Token response expiry must be a positive safe integer.");
   }
+
+  return {
+    access_token: accessToken,
+    ...(refreshToken === undefined ? {} : { refresh_token: refreshToken }),
+    ...(expiresIn === undefined ? {} : { expires_in: expiresIn }),
+    ...(scope === undefined ? {} : { scope }),
+  };
 }
 
 function validateNow(value: number): number {
@@ -581,13 +590,13 @@ export class TokenStore {
   }
 
   async store(tokenResponse: TokenResponse): Promise<void> {
-    validateTokenResponse(tokenResponse);
+    const parsedTokenResponse = parseTokenResponse(tokenResponse);
     const now = validateNow(this.#now());
     const storedTokens: StoredTokens = {
-      accessToken: tokenResponse.access_token,
-      refreshToken: tokenResponse.refresh_token ?? "",
-      expiresAt: computeExpiresAt(now, tokenResponse.expires_in ?? 3600),
-      scope: tokenResponse.scope ?? "",
+      accessToken: parsedTokenResponse.access_token,
+      refreshToken: parsedTokenResponse.refresh_token ?? "",
+      expiresAt: computeExpiresAt(now, parsedTokenResponse.expires_in ?? 3600),
+      scope: parsedTokenResponse.scope ?? "",
     };
 
     await enqueueTokenFileWrite(this.#tokenFile, async () => {
