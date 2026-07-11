@@ -82,8 +82,13 @@ async function installFirstFileHandleSyncBarrier(
   return { reached: reached.promise, release: release.resolve };
 }
 
-function keyPublicationTempPath(configDir: string, keyFile: string): string {
-  return join(configDir, `.${basename(keyFile)}.key.${process.pid}.123456789.1.tmp`);
+function keyPublicationTempPath(
+  configDir: string,
+  keyFile: string,
+  timestamp = "123456789",
+  sequence = "1",
+): string {
+  return join(configDir, `.${basename(keyFile)}.key.${process.pid}.${timestamp}.${sequence}.tmp`);
 }
 
 function settingsFor(configDir: string, encryptionKey = ""): TestSettings {
@@ -963,10 +968,17 @@ describe("TokenStore", () => {
   });
 
   test.skipIf(process.platform === "win32")(
-    "ordinary initializers recover a live generated-key publication",
+    "ordinary initializers recover a live publication while preserving unrelated matching temps",
     async () => {
       const barrier = await installFirstFileHandleSyncBarrier("directory");
       const publisher = new TokenStore(settings);
+      const unrelatedTemporaryKey = keyPublicationTempPath(
+        configDir,
+        settings.keyFile,
+        "123456790",
+        "2",
+      );
+      const unrelatedMarker = "unrelated-live-publication-temp-marker";
       const ordinarySettings = {
         ...settings,
         tokenFile: join(configDir, "ordinary-initializer-tokens-v2.enc"),
@@ -974,6 +986,9 @@ describe("TokenStore", () => {
       let publisherInitialization: Promise<void> | undefined;
 
       try {
+        await writeFile(unrelatedTemporaryKey, unrelatedMarker, { mode: 0o600 });
+        await chmod(unrelatedTemporaryKey, 0o600);
+        const unrelatedStats = await stat(unrelatedTemporaryKey);
         publisherInitialization = publisher.initialize();
         await barrier.reached;
         expect((await stat(settings.keyFile)).nlink).toBe(2);
@@ -984,7 +999,12 @@ describe("TokenStore", () => {
         await expect(publisherInitialization).resolves.toBeUndefined();
 
         expect((await stat(settings.keyFile)).nlink).toBe(1);
-        expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+        expect(await readFile(unrelatedTemporaryKey, "utf8")).toBe(unrelatedMarker);
+        expect(await stat(unrelatedTemporaryKey)).toMatchObject({
+          dev: unrelatedStats.dev,
+          ino: unrelatedStats.ino,
+          nlink: 1,
+        });
       } finally {
         barrier.release();
         await publisherInitialization?.catch(() => undefined);
@@ -993,13 +1013,23 @@ describe("TokenStore", () => {
   );
 
   test.skipIf(process.platform === "win32")(
-    "recovers crash residue from a generated-key publication",
+    "recovers crash residue while preserving unrelated matching publication temps",
     async () => {
       const keyText = randomBytes(32).toString("base64");
       const temporaryKey = keyPublicationTempPath(configDir, settings.keyFile);
+      const unrelatedTemporaryKey = keyPublicationTempPath(
+        configDir,
+        settings.keyFile,
+        "123456790",
+        "2",
+      );
+      const unrelatedMarker = "unrelated-crash-publication-temp-marker";
       await writeFile(temporaryKey, keyText, { mode: 0o600 });
       await chmod(temporaryKey, 0o600);
       await link(temporaryKey, settings.keyFile);
+      await writeFile(unrelatedTemporaryKey, unrelatedMarker, { mode: 0o600 });
+      await chmod(unrelatedTemporaryKey, 0o600);
+      const unrelatedStats = await stat(unrelatedTemporaryKey);
       expect((await stat(settings.keyFile)).nlink).toBe(2);
 
       const recovered = new TokenStore(settings);
@@ -1007,6 +1037,12 @@ describe("TokenStore", () => {
       expect(await readFile(settings.keyFile, "utf8")).toBe(keyText);
       expect((await stat(settings.keyFile)).nlink).toBe(1);
       await expect(stat(temporaryKey)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(unrelatedTemporaryKey, "utf8")).toBe(unrelatedMarker);
+      expect(await stat(unrelatedTemporaryKey)).toMatchObject({
+        dev: unrelatedStats.dev,
+        ino: unrelatedStats.ino,
+        nlink: 1,
+      });
 
       await recovered.store({ access_token: "recovered-publication-access" });
       const reloaded = new TokenStore(settings);

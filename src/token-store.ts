@@ -765,38 +765,49 @@ export class TokenStore {
     } catch {
       throw securityError();
     }
-    if (temporaryNames.length !== 1) {
+
+    const sameInodeCandidates: Array<{ path: string; stats: Stats }> = [];
+    for (const temporaryName of temporaryNames) {
+      const temporaryFile = join(this.#configDir, temporaryName);
+      let temporaryStats: Stats;
+      try {
+        temporaryStats = await lstat(temporaryFile);
+      } catch (error: unknown) {
+        if (isNodeError(error, "ENOENT")) {
+          continue;
+        }
+        throw securityError();
+      }
+      if (
+        supportsFileIdentityComparison(temporaryStats) &&
+        finalStats.dev === temporaryStats.dev &&
+        finalStats.ino === temporaryStats.ino
+      ) {
+        sameInodeCandidates.push({ path: temporaryFile, stats: temporaryStats });
+      }
+    }
+
+    if (sameInodeCandidates.length === 0) {
       if (await this.#keyPublicationHasSettled(finalStats)) {
         return;
       }
       throw securityError();
     }
+    if (sameInodeCandidates.length !== 1) {
+      throw securityError();
+    }
 
-    const temporaryName = temporaryNames[0];
-    if (temporaryName === undefined) {
+    const candidate = sameInodeCandidates[0];
+    if (candidate === undefined) {
       throw securityError();
     }
-    const temporaryFile = join(this.#configDir, temporaryName);
-    let temporaryStats: Stats;
-    try {
-      temporaryStats = await lstat(temporaryFile);
-    } catch (error: unknown) {
-      if (isNodeError(error, "ENOENT") && (await this.#keyPublicationHasSettled(finalStats))) {
-        return;
-      }
-      throw securityError();
-    }
-    validateKeyPublicationFileStats(temporaryStats);
-    if (
-      finalStats.dev !== temporaryStats.dev ||
-      finalStats.ino !== temporaryStats.ino ||
-      finalStats.size !== temporaryStats.size
-    ) {
+    validateKeyPublicationFileStats(candidate.stats);
+    if (finalStats.size !== candidate.stats.size) {
       throw securityError();
     }
 
     try {
-      await unlink(temporaryFile);
+      await unlink(candidate.path);
     } catch (error: unknown) {
       if (!isNodeError(error, "ENOENT")) {
         throw securityError();
