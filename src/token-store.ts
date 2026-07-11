@@ -215,11 +215,83 @@ function validateNewPrivateFile(stats: Stats): void {
   validateOwner(stats.uid);
 }
 
+function validateSecureReadFileStats(
+  stats: Stats,
+  maximumBytes: number,
+  options: { reportLinkCountRace?: boolean },
+): void {
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw securityError();
+  }
+  if (stats.nlink !== 1) {
+    if (options.reportLinkCountRace) {
+      throw new KeyPublicationInProgressError();
+    }
+    throw securityError();
+  }
+  validateOwner(stats.uid);
+  if (!Number.isSafeInteger(stats.size) || stats.size < 0 || stats.size > maximumBytes) {
+    throw securityError();
+  }
+}
+
+function supportsFileIdentityComparison(stats: Stats): boolean {
+  return (
+    Number.isSafeInteger(stats.dev) &&
+    stats.dev > 0 &&
+    Number.isSafeInteger(stats.ino) &&
+    stats.ino > 0
+  );
+}
+
+function validateMatchingFileIdentity(pathStats: Stats, handleStats: Stats): void {
+  if (
+    supportsFileIdentityComparison(pathStats) &&
+    supportsFileIdentityComparison(handleStats) &&
+    (pathStats.dev !== handleStats.dev || pathStats.ino !== handleStats.ino)
+  ) {
+    throw securityError();
+  }
+}
+
+async function readBoundedTextFile(handle: FileHandle, maximumBytes: number): Promise<string> {
+  const content = Buffer.alloc(maximumBytes + 1);
+  let bytesReadTotal = 0;
+  while (bytesReadTotal < content.length) {
+    const { bytesRead } = await handle.read(
+      content,
+      bytesReadTotal,
+      content.length - bytesReadTotal,
+      bytesReadTotal,
+    );
+    if (bytesRead === 0) {
+      break;
+    }
+    bytesReadTotal += bytesRead;
+  }
+  if (bytesReadTotal > maximumBytes) {
+    throw securityError();
+  }
+  return content.subarray(0, bytesReadTotal).toString("utf8");
+}
+
 async function readSecureTextFile(
   filePath: string,
   maximumBytes: number,
   options: { reportLinkCountRace?: boolean } = {},
 ): Promise<string> {
+  let pathStats: Stats;
+  try {
+    pathStats = await lstat(filePath);
+  } catch (error: unknown) {
+    if (isNodeError(error, "ENOENT")) {
+      throw error;
+    }
+    throw securityError();
+  }
+
+  validateSecureReadFileStats(pathStats, maximumBytes, options);
+
   let handle: FileHandle;
   try {
     handle = await open(filePath, readOnlyFlags());
@@ -231,22 +303,11 @@ async function readSecureTextFile(
   }
 
   try {
-    const stats = await handle.stat();
-    if (!stats.isFile()) {
-      throw securityError();
-    }
-    if (stats.nlink !== 1) {
-      if (options.reportLinkCountRace) {
-        throw new KeyPublicationInProgressError();
-      }
-      throw securityError();
-    }
-    validateOwner(stats.uid);
-    if (!Number.isSafeInteger(stats.size) || stats.size < 0 || stats.size > maximumBytes) {
-      throw securityError();
-    }
+    const handleStats = await handle.stat();
+    validateSecureReadFileStats(handleStats, maximumBytes, options);
+    validateMatchingFileIdentity(pathStats, handleStats);
     await enforceHandleMode(handle, PRIVATE_FILE_MODE);
-    return await handle.readFile({ encoding: "utf8" });
+    return await readBoundedTextFile(handle, maximumBytes);
   } catch (error: unknown) {
     if (error instanceof SecurityValidationError) {
       throw error;

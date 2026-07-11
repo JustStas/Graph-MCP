@@ -3,12 +3,14 @@ import {
   chmod,
   link,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
   stat,
   symlink,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -264,6 +266,23 @@ describe("TokenStore", () => {
       }
     },
   );
+
+  test("rejects token symlinks before opening them when Windows cannot use O_NOFOLLOW", async () => {
+    const externalDir = await mkdtemp(join(tmpdir(), "graph-mcp-windows-fallback-secret-"));
+    const externalToken = join(externalDir, "outside-token");
+    const tokenMarker = "windows-fallback-token-secret-marker";
+    settings = settingsFor(configDir, "windows-fallback-encryption-key");
+    await writeFile(externalToken, tokenMarker);
+    await symlink(externalToken, settings.tokenFile);
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+
+    try {
+      await expectGenericRejection(new TokenStore(settings).initialize(), tokenMarker);
+      expect(await readFile(externalToken, "utf8")).toBe(tokenMarker);
+    } finally {
+      await rm(externalDir, { recursive: true, force: true });
+    }
+  });
 
   test.skipIf(process.platform === "win32")(
     "rejects secret paths outside the validated directory without touching them",
@@ -606,6 +625,38 @@ describe("TokenStore", () => {
       ]),
     );
     await expectGenericRejection(new TokenStore(settings).initialize(), tokenMarker);
+  });
+
+  test("rejects a token file that grows after its initial handle stat without exposing its contents", async () => {
+    const tokenMarker = "growing-token-secret-marker";
+    settings = settingsFor(configDir, "growing-token-encryption-key");
+    await new TokenStore(settings).store({ access_token: "initial-token" });
+
+    const probe = await open(settings.tokenFile, "r");
+    const originalStats = await probe.stat();
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+    await probe.close();
+    const originalStat = Object.getOwnPropertyDescriptor(fileHandlePrototype, "stat")?.value as
+      ((this: FileHandle) => ReturnType<FileHandle["stat"]>) | undefined;
+    if (originalStat === undefined) {
+      throw new Error("FileHandle.stat is unavailable");
+    }
+    let appended = false;
+    vi.spyOn(fileHandlePrototype, "stat").mockImplementation(async function (this: FileHandle) {
+      const stats = await originalStat.call(this);
+      if (!appended && stats.dev === originalStats.dev && stats.ino === originalStats.ino) {
+        appended = true;
+        await writeFile(
+          settings.tokenFile,
+          Buffer.concat([Buffer.from(tokenMarker), Buffer.alloc(TOKEN_FILE_SIZE_LIMIT + 1)]),
+          { flag: "a" },
+        );
+      }
+      return stats;
+    });
+
+    await expectGenericRejection(new TokenStore(settings).initialize(), tokenMarker);
+    expect(appended).toBe(true);
   });
 
   test("concurrent stores serialize in invocation order and leave one decryptable final file", async () => {
