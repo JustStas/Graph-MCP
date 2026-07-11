@@ -1,6 +1,16 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { link, lstat, mkdir, open, rename, rm, unlink, type FileHandle } from "node:fs/promises";
+import {
+  link,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  rename,
+  rm,
+  unlink,
+  type FileHandle,
+} from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import type { Settings } from "./config.js";
@@ -255,6 +265,27 @@ function validateMatchingFileIdentity(pathStats: Stats, handleStats: Stats): voi
     handleIdentitySupported &&
     (pathStats.dev !== handleStats.dev || pathStats.ino !== handleStats.ino)
   ) {
+    throw securityError();
+  }
+}
+
+function keyPublicationTemporaryFilePattern(keyFile: string): RegExp {
+  const escapedBasename = basename(keyFile).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\.${escapedBasename}\\.key\\.\\d+\\.\\d+\\.\\d+\\.tmp$`);
+}
+
+function validateKeyPublicationFileStats(stats: Stats): void {
+  if (stats.isSymbolicLink() || !stats.isFile() || stats.nlink !== 2) {
+    throw securityError();
+  }
+  validateOwner(stats.uid);
+  if (!Number.isSafeInteger(stats.size) || stats.size < 0 || stats.size > MAX_KEY_FILE_BYTES) {
+    throw securityError();
+  }
+  if (process.platform !== "win32" && (stats.mode & 0o777) !== PRIVATE_FILE_MODE) {
+    throw securityError();
+  }
+  if (!supportsFileIdentityComparison(stats)) {
     throw securityError();
   }
 }
@@ -627,7 +658,7 @@ export class TokenStore {
 
   async #loadOrCreateKey(): Promise<Buffer> {
     try {
-      return await this.#readKeyFile();
+      return await this.#readKeyFileWithPublicationRecovery();
     } catch (error: unknown) {
       if (!isNodeError(error, "ENOENT")) {
         throw error;
@@ -677,8 +708,10 @@ export class TokenStore {
 
       try {
         await unlink(temporaryFile);
-      } catch {
-        throw encryptionError();
+      } catch (error: unknown) {
+        if (!isNodeError(error, "ENOENT")) {
+          throw encryptionError();
+        }
       }
       await bestEffortSyncDirectory(this.#configDir);
 
@@ -695,6 +728,10 @@ export class TokenStore {
   }
 
   async #readWinningKey(): Promise<Buffer> {
+    return this.#readKeyFileWithPublicationRecovery();
+  }
+
+  async #readKeyFileWithPublicationRecovery(): Promise<Buffer> {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
         return await this.#readKeyFile(true);
@@ -702,10 +739,88 @@ export class TokenStore {
         if (!(error instanceof KeyPublicationInProgressError) || attempt === 99) {
           throw error;
         }
+        await this.#recoverGeneratedKeyPublication();
         await waitForKeyPublisher();
       }
     }
     throw encryptionError();
+  }
+
+  async #recoverGeneratedKeyPublication(): Promise<void> {
+    let finalStats: Stats;
+    try {
+      finalStats = await lstat(this.#keyFile);
+    } catch {
+      throw securityError();
+    }
+    if (finalStats.nlink === 1) {
+      return;
+    }
+    validateKeyPublicationFileStats(finalStats);
+
+    let temporaryNames: string[];
+    try {
+      const pattern = keyPublicationTemporaryFilePattern(this.#keyFile);
+      temporaryNames = (await readdir(this.#configDir)).filter((entry) => pattern.test(entry));
+    } catch {
+      throw securityError();
+    }
+    if (temporaryNames.length !== 1) {
+      if (await this.#keyPublicationHasSettled(finalStats)) {
+        return;
+      }
+      throw securityError();
+    }
+
+    const temporaryName = temporaryNames[0];
+    if (temporaryName === undefined) {
+      throw securityError();
+    }
+    const temporaryFile = join(this.#configDir, temporaryName);
+    let temporaryStats: Stats;
+    try {
+      temporaryStats = await lstat(temporaryFile);
+    } catch (error: unknown) {
+      if (isNodeError(error, "ENOENT") && (await this.#keyPublicationHasSettled(finalStats))) {
+        return;
+      }
+      throw securityError();
+    }
+    validateKeyPublicationFileStats(temporaryStats);
+    if (
+      finalStats.dev !== temporaryStats.dev ||
+      finalStats.ino !== temporaryStats.ino ||
+      finalStats.size !== temporaryStats.size
+    ) {
+      throw securityError();
+    }
+
+    try {
+      await unlink(temporaryFile);
+    } catch (error: unknown) {
+      if (!isNodeError(error, "ENOENT")) {
+        throw securityError();
+      }
+      if (!(await this.#keyPublicationHasSettled(finalStats))) {
+        throw securityError();
+      }
+      return;
+    }
+    await syncDirectory(this.#configDir);
+  }
+
+  async #keyPublicationHasSettled(finalStats: Stats): Promise<boolean> {
+    try {
+      const currentStats = await lstat(this.#keyFile);
+      return (
+        currentStats.nlink === 1 &&
+        supportsFileIdentityComparison(currentStats) &&
+        currentStats.dev === finalStats.dev &&
+        currentStats.ino === finalStats.ino
+      );
+    } catch {
+      throw securityError();
+    }
   }
 
   async #readKeyFile(reportLinkCountRace = false): Promise<Buffer> {

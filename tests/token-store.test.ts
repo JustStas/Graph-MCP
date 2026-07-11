@@ -36,6 +36,56 @@ interface EncryptedPayload {
 
 const TOKEN_FILE_SIZE_LIMIT = 16 * 1024 * 1024;
 
+interface Deferred {
+  promise: Promise<void>;
+  resolve: () => void;
+}
+
+function createDeferred(): Deferred {
+  let resolvePromise: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve: () => resolvePromise?.(),
+  };
+}
+
+async function installFirstFileHandleSyncBarrier(
+  kind: "file" | "directory",
+): Promise<{ reached: Promise<void>; release: () => void }> {
+  const probe = await open(process.execPath, "r");
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+  await probe.close();
+  const originalStat = Object.getOwnPropertyDescriptor(fileHandlePrototype, "stat")?.value as
+    ((this: FileHandle) => ReturnType<FileHandle["stat"]>) | undefined;
+  const originalSync = Object.getOwnPropertyDescriptor(fileHandlePrototype, "sync")?.value as
+    ((this: FileHandle) => ReturnType<FileHandle["sync"]>) | undefined;
+  if (originalStat === undefined || originalSync === undefined) {
+    throw new Error("FileHandle sync support is unavailable");
+  }
+
+  const reached = createDeferred();
+  const release = createDeferred();
+  let blocked = false;
+  vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+    const stats = await originalStat.call(this);
+    if (!blocked && (kind === "file" ? stats.isFile() : stats.isDirectory())) {
+      blocked = true;
+      reached.resolve();
+      await release.promise;
+    }
+    await originalSync.call(this);
+  });
+
+  return { reached: reached.promise, release: release.resolve };
+}
+
+function keyPublicationTempPath(configDir: string, keyFile: string): string {
+  return join(configDir, `.${basename(keyFile)}.key.${process.pid}.123456789.1.tmp`);
+}
+
 function settingsFor(configDir: string, encryptionKey = ""): TestSettings {
   return {
     configDir,
@@ -725,17 +775,25 @@ describe("TokenStore", () => {
     await earlier.initialize();
     await later.initialize();
 
-    const slowLargeWrite = earlier.store({
-      access_token: "earlier-large-access",
-      refresh_token: "earlier-large-refresh",
-      scope: "x".repeat(8 * 1024 * 1024),
-    });
-    const fastSmallWrite = later.store({
-      access_token: "later-small-access",
-      refresh_token: "later-small-refresh",
-      scope: "User.Read",
-    });
-    await Promise.all([slowLargeWrite, fastSmallWrite]);
+    const barrier = await installFirstFileHandleSyncBarrier("file");
+    let earlierWrite: Promise<void> | undefined;
+    try {
+      earlierWrite = earlier.store({
+        access_token: "earlier-large-access",
+        refresh_token: "earlier-large-refresh",
+      });
+      await barrier.reached;
+      const laterWrite = later.store({
+        access_token: "later-small-access",
+        refresh_token: "later-small-refresh",
+        scope: "User.Read",
+      });
+      barrier.release();
+      await Promise.all([earlierWrite, laterWrite]);
+    } finally {
+      barrier.release();
+      await earlierWrite?.catch(() => undefined);
+    }
 
     const finalTokens = await decryptStoredTokens(
       settings.tokenFile,
@@ -752,19 +810,27 @@ describe("TokenStore", () => {
   test("stores targeting different token paths retain independent write progress", async () => {
     const otherConfigDir = await mkdtemp(join(tmpdir(), "graph-mcp-other-token-store-"));
     const otherSettings = settingsFor(otherConfigDir);
-    let largeWriteFinished = false;
+    const first = new TokenStore(settings);
+    await first.initialize();
+    const barrier = await installFirstFileHandleSyncBarrier("file");
+    let firstWriteFinished = false;
+    let firstWrite: Promise<void> | undefined;
 
     try {
-      const largeWrite = new TokenStore(settings)
-        .store({ access_token: "large-independent", scope: "x".repeat(8 * 1024 * 1024) })
+      firstWrite = first
+        .store({ access_token: "first-independent", scope: "User.Read" })
         .then(() => {
-          largeWriteFinished = true;
+          firstWriteFinished = true;
         });
+      await barrier.reached;
       await new TokenStore(otherSettings).store({ access_token: "small-independent" });
 
-      expect(largeWriteFinished).toBe(false);
-      await largeWrite;
+      expect(firstWriteFinished).toBe(false);
+      barrier.release();
+      await firstWrite;
     } finally {
+      barrier.release();
+      await firstWrite?.catch(() => undefined);
       await rm(otherConfigDir, { recursive: true, force: true });
     }
   });
@@ -895,6 +961,74 @@ describe("TokenStore", () => {
     expect((await stat(settings.keyFile)).nlink).toBe(1);
     expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "ordinary initializers recover a live generated-key publication",
+    async () => {
+      const barrier = await installFirstFileHandleSyncBarrier("directory");
+      const publisher = new TokenStore(settings);
+      const ordinarySettings = {
+        ...settings,
+        tokenFile: join(configDir, "ordinary-initializer-tokens-v2.enc"),
+      };
+      let publisherInitialization: Promise<void> | undefined;
+
+      try {
+        publisherInitialization = publisher.initialize();
+        await barrier.reached;
+        expect((await stat(settings.keyFile)).nlink).toBe(2);
+
+        const ordinary = new TokenStore(ordinarySettings);
+        await expect(ordinary.initialize()).resolves.toBeUndefined();
+        barrier.release();
+        await expect(publisherInitialization).resolves.toBeUndefined();
+
+        expect((await stat(settings.keyFile)).nlink).toBe(1);
+        expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+      } finally {
+        barrier.release();
+        await publisherInitialization?.catch(() => undefined);
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "recovers crash residue from a generated-key publication",
+    async () => {
+      const keyText = randomBytes(32).toString("base64");
+      const temporaryKey = keyPublicationTempPath(configDir, settings.keyFile);
+      await writeFile(temporaryKey, keyText, { mode: 0o600 });
+      await chmod(temporaryKey, 0o600);
+      await link(temporaryKey, settings.keyFile);
+      expect((await stat(settings.keyFile)).nlink).toBe(2);
+
+      const recovered = new TokenStore(settings);
+      await expect(recovered.initialize()).resolves.toBeUndefined();
+      expect(await readFile(settings.keyFile, "utf8")).toBe(keyText);
+      expect((await stat(settings.keyFile)).nlink).toBe(1);
+      await expect(stat(temporaryKey)).rejects.toMatchObject({ code: "ENOENT" });
+
+      await recovered.store({ access_token: "recovered-publication-access" });
+      const reloaded = new TokenStore(settings);
+      await reloaded.initialize();
+      expect(reloaded.getAccessToken()).toBe("recovered-publication-access");
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects a generated key with an extra nonpublication hard link",
+    async () => {
+      const keyText = randomBytes(32).toString("base64");
+      const unrelatedLink = join(configDir, "unrelated-key-hard-link");
+      await writeFile(settings.keyFile, keyText, { mode: 0o600 });
+      await chmod(settings.keyFile, 0o600);
+      await link(settings.keyFile, unrelatedLink);
+
+      await expectGenericRejection(new TokenStore(settings).initialize(), keyText);
+      expect(await readFile(unrelatedLink, "utf8")).toBe(keyText);
+      expect((await stat(settings.keyFile)).nlink).toBe(2);
+    },
+  );
 
   test("key generation failures leave no final or temporary key file", async () => {
     const generationSecret = "random-generation-secret-marker";
