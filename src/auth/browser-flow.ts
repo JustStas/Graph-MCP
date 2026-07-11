@@ -285,6 +285,7 @@ export function createLoopbackCallbackListener(
 
     const previousLifecycle = lifecycle;
     lifecycle = "closed";
+    rejectCallbackOnce(authenticationError(LISTENER_CLOSED_MESSAGE));
     if (previousLifecycle === "starting") {
       rejectStart?.(startError);
       rejectStart = undefined;

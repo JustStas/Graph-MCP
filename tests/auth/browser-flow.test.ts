@@ -824,6 +824,25 @@ describe("createLoopbackCallbackListener", () => {
     }
   });
 
+  test("rejects a standalone callback waiter promptly when normally closed", async () => {
+    const listener = createLoopbackCallbackListener({
+      redirectUri: "http://127.0.0.1:0/auth/callback",
+      expectedState: "expected-state",
+    });
+    await listener.start();
+    const callback = listener.waitForCallback();
+
+    try {
+      await listener.close();
+      await expect(settlesPromptly(callback)).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Loopback callback listener is closed.",
+      });
+    } finally {
+      await listener.close();
+    }
+  });
+
   test("stops a server that reports listening after close during start", async () => {
     const pendingServer = new EventEmitter() as unknown as Server;
     const close = vi.fn((callback?: (error?: Error) => void) => {
