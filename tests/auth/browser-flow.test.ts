@@ -111,6 +111,20 @@ function settlesPromptly<Value>(promise: Promise<Value>, timeoutMs = 500): Promi
   });
 }
 
+function sendRawHttpRequest(host: string, port: number, request: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const socket = connect({ host, port });
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      response += chunk;
+    });
+    socket.once("error", reject);
+    socket.once("close", () => resolve(response));
+    socket.once("connect", () => socket.end(request));
+  });
+}
+
 async function expectAuthenticationError(
   operation: Promise<unknown>,
   message: string,
@@ -166,6 +180,31 @@ describe("buildAuthorizationUrl", () => {
 });
 
 describe("runBrowserLogin", () => {
+  test("clamps an oversized timeout before invoking the timeout runner", async () => {
+    const verifierSource = Buffer.alloc(32);
+    const stateSource = Buffer.alloc(32, 1);
+    const listener = listenerFor({
+      code: "authorization-code",
+      state: stateSource.toString("base64url"),
+    });
+    const { response } = successResponse();
+    let receivedTimeoutMs: number | undefined;
+
+    await runBrowserLogin(settings, {
+      randomBytes: randomBytesFrom([verifierSource, stateSource]),
+      createCallbackListener: () => listener.listener,
+      openBrowser: () => Promise.resolve(),
+      fetch: () => Promise.resolve(response),
+      timeoutMs: Number.MAX_SAFE_INTEGER,
+      timeout: <Value>(operation: Promise<Value>, timeoutMs: number) => {
+        receivedTimeoutMs = timeoutMs;
+        return operation;
+      },
+    });
+
+    expect(receivedTimeoutMs).toBe(2_147_483_647);
+  });
+
   test("waits for listener readiness before opening the browser", async () => {
     let markReady: (() => void) | undefined;
     const ready = new Promise<void>((resolve) => {
@@ -264,7 +303,7 @@ describe("runBrowserLogin", () => {
     expect(listener.close).toHaveBeenCalledTimes(1);
   });
 
-  test("returns the provider OAuth error description without exchanging a token", async () => {
+  test("returns only an allowlisted provider OAuth error identifier", async () => {
     const verifierSource = Buffer.alloc(32);
     const stateSource = Buffer.alloc(32, 1);
     const listener = listenerFor({
@@ -281,7 +320,7 @@ describe("runBrowserLogin", () => {
         openBrowser: vi.fn(() => Promise.resolve()),
         fetch: fetchToken,
       }),
-      "OAuth error: access_denied — The user cancelled sign-in.",
+      "OAuth error: access_denied",
     );
 
     expect(fetchToken).not.toHaveBeenCalled();
@@ -336,14 +375,18 @@ describe("runBrowserLogin", () => {
     });
   }
 
-  test("normalizes and redacts both provider error fields", async () => {
+  test("omits callback secrets and provider descriptions from OAuth errors", async () => {
     const verifierSource = Buffer.alloc(32);
     const stateSource = Buffer.alloc(32, 1);
     const verifier = verifierSource.toString("base64url");
     const state = stateSource.toString("base64url");
+    const code = "authorization-code-secret";
+    const accessToken = "callback-access-token-secret";
+    const refreshToken = "callback-refresh-token-secret";
     const listener = listenerFor({
-      error: `\u0000access\t${state}\n${verifier}\r`,
-      errorDescription: `\u0007Provider\tdeclined ${verifier}\n${state}`,
+      code,
+      error: "access_denied",
+      errorDescription: `Provider ${accessToken} ${refreshToken} ${code} ${verifier} ${state}`,
       state,
     });
     const fetchToken = vi.fn();
@@ -355,20 +398,21 @@ describe("runBrowserLogin", () => {
         openBrowser: vi.fn(() => Promise.resolve()),
         fetch: fetchToken,
       }),
-      "OAuth error: access [redacted] [redacted] — Provider declined [redacted] [redacted]",
+      "OAuth error: access_denied",
     );
 
-    expect(error.message).not.toContain(state);
-    expect(error.message).not.toContain(verifier);
+    for (const secret of [accessToken, refreshToken, code, verifier, state]) {
+      expect(error.message).not.toContain(secret);
+    }
     expect(fetchToken).not.toHaveBeenCalled();
     expect(listener.close).toHaveBeenCalledTimes(1);
   });
 
-  test("uses unknown when the sanitized provider error is empty", async () => {
+  test("uses unknown when the provider error identifier is not allowlisted", async () => {
     const verifierSource = Buffer.alloc(32);
     const stateSource = Buffer.alloc(32, 1);
     const listener = listenerFor({
-      error: "\u0000\t\n",
+      error: "access denied with provider text",
       errorDescription: "The user cancelled sign-in.",
       state: stateSource.toString("base64url"),
     });
@@ -381,7 +425,7 @@ describe("runBrowserLogin", () => {
         openBrowser: vi.fn(() => Promise.resolve()),
         fetch: fetchToken,
       }),
-      "OAuth error: unknown — The user cancelled sign-in.",
+      "OAuth error: unknown",
     );
 
     expect(fetchToken).not.toHaveBeenCalled();
@@ -444,19 +488,36 @@ describe("runBrowserLogin", () => {
     expect(listener.close).toHaveBeenCalledTimes(1);
   });
 
-  test("closes the listener when opening the browser fails", async () => {
-    const listener = listenerFor({ code: "authorization-code", state: "unused" });
-    const browserFailure = new Error("Browser unavailable");
+  test("sanitizes browser-open failures containing the authorization URL and credentials", async () => {
+    const verifierSource = Buffer.alloc(32);
+    const stateSource = Buffer.alloc(32, 1);
+    const verifier = verifierSource.toString("base64url");
+    const state = stateSource.toString("base64url");
+    const code = "browser-open-code-secret";
+    const accessToken = "browser-open-access-secret";
+    const refreshToken = "browser-open-refresh-secret";
+    const listener = listenerFor({ code: "unused", state: "unused" });
+    let openedUrl = "";
 
-    await expect(
+    const error = await expectAuthenticationError(
       runBrowserLogin(settings, {
-        randomBytes: randomBytesFrom([Buffer.alloc(32), Buffer.alloc(32)]),
+        randomBytes: randomBytesFrom([verifierSource, stateSource]),
         createCallbackListener: vi.fn(() => listener.listener),
-        openBrowser: vi.fn(() => Promise.reject(browserFailure)),
+        openBrowser: vi.fn((url: string) => {
+          openedUrl = url;
+          return Promise.reject(
+            new Error(`${url} ${accessToken} ${refreshToken} ${code} ${verifier} ${state}`),
+          );
+        }),
         fetch: vi.fn(),
       }),
-    ).rejects.toBe(browserFailure);
+      "Unable to open browser for authentication.",
+    );
 
+    expect(openedUrl).toContain(state);
+    for (const secret of [openedUrl, accessToken, refreshToken, code, verifier, state]) {
+      expect(error.message).not.toContain(secret);
+    }
     expect(listener.waitForCallback).not.toHaveBeenCalled();
     expect(listener.close).toHaveBeenCalledTimes(1);
   });
@@ -490,13 +551,187 @@ describe("runBrowserLogin", () => {
         openBrowser: vi.fn(() => Promise.resolve()),
         fetch: vi.fn(() => Promise.resolve(tokenResponse)),
       }),
-      "Token exchange failed: The authorization code was rejected.",
+      "Token exchange failed: invalid_grant",
     );
 
     expect(error.message).not.toContain(code);
     expect(error.message).not.toContain(verifier);
     expect(error.message).not.toContain(state);
     expect(listener.close).toHaveBeenCalledTimes(1);
+  });
+
+  test("never includes a raw token-endpoint error body in an authentication error", async () => {
+    const verifierSource = Buffer.alloc(32);
+    const stateSource = Buffer.alloc(32, 1);
+    const verifier = verifierSource.toString("base64url");
+    const state = stateSource.toString("base64url");
+    const code = "token-body-authorization-code";
+    const accessToken = "token-body-access-secret";
+    const refreshToken = "token-body-refresh-secret";
+    const listener = listenerFor({ code, state });
+    const tokenResponse = {
+      ok: false,
+      status: 400,
+      json: vi.fn(),
+      text: vi.fn(() =>
+        Promise.resolve(
+          JSON.stringify({
+            access_token: accessToken,
+            refresh_token: refreshToken,
+            code,
+            verifier,
+            state,
+          }),
+        ),
+      ),
+    } satisfies TokenEndpointResponse;
+
+    const error = await expectAuthenticationError(
+      runBrowserLogin(settings, {
+        randomBytes: randomBytesFrom([verifierSource, stateSource]),
+        createCallbackListener: vi.fn(() => listener.listener),
+        openBrowser: vi.fn(() => Promise.resolve()),
+        fetch: vi.fn(() => Promise.resolve(tokenResponse)),
+      }),
+      "Token exchange failed with status 400.",
+    );
+
+    for (const secret of [accessToken, refreshToken, code, verifier, state]) {
+      expect(error.message).not.toContain(secret);
+    }
+    expect(listener.close).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(["access_token", "refresh_token"] as const)(
+    "never echoes a token-shaped %s value used as the OAuth error identifier",
+    async (credentialField) => {
+      const verifierSource = Buffer.alloc(32);
+      const stateSource = Buffer.alloc(32, 1);
+      const verifier = verifierSource.toString("base64url");
+      const state = stateSource.toString("base64url");
+      const code = "token-identifier-authorization-code";
+      const accessToken = "tokenidentifieraccesssecret";
+      const refreshToken = "tokenidentifierrefreshsecret";
+      const tokenBody = {
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      };
+      const listener = listenerFor({ code, state });
+      const tokenResponse = {
+        ok: false,
+        status: 400,
+        json: vi.fn(),
+        text: vi.fn(() =>
+          Promise.resolve(
+            JSON.stringify({
+              error: tokenBody[credentialField],
+              ...tokenBody,
+            }),
+          ),
+        ),
+      } satisfies TokenEndpointResponse;
+
+      const error = await expectAuthenticationError(
+        runBrowserLogin(settings, {
+          randomBytes: randomBytesFrom([verifierSource, stateSource]),
+          createCallbackListener: vi.fn(() => listener.listener),
+          openBrowser: vi.fn(() => Promise.resolve()),
+          fetch: vi.fn(() => Promise.resolve(tokenResponse)),
+        }),
+        "Token exchange failed with status 400.",
+      );
+
+      for (const secret of [accessToken, refreshToken, code, verifier, state]) {
+        expect(error.message).not.toContain(secret);
+      }
+      expect(listener.close).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test.each(["access_token", "refresh_token"] as const)(
+    "does not echo an allowlisted identifier when it is also the %s value",
+    async (credentialField) => {
+      const verifierSource = Buffer.alloc(32);
+      const stateSource = Buffer.alloc(32, 1);
+      const state = stateSource.toString("base64url");
+      const code = "allowlist-collision-authorization-code";
+      const listener = listenerFor({ code, state });
+      const tokenResponse = {
+        ok: false,
+        status: 400,
+        json: vi.fn(),
+        text: vi.fn(() =>
+          Promise.resolve(
+            JSON.stringify({
+              error: "invalid_grant",
+              access_token: "access-secret",
+              refresh_token: "refresh-secret",
+              [credentialField]: "invalid_grant",
+            }),
+          ),
+        ),
+      } satisfies TokenEndpointResponse;
+
+      const error = await expectAuthenticationError(
+        runBrowserLogin(settings, {
+          randomBytes: randomBytesFrom([verifierSource, stateSource]),
+          createCallbackListener: vi.fn(() => listener.listener),
+          openBrowser: vi.fn(() => Promise.resolve()),
+          fetch: vi.fn(() => Promise.resolve(tokenResponse)),
+        }),
+        "Token exchange failed with status 400.",
+      );
+
+      expect(error.message).not.toContain("invalid_grant");
+      expect(listener.close).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("snapshots mutable settings before asynchronous browser-login work", async () => {
+    const mutableSettings = { ...settings, scopes: [...settings.scopes] };
+    const verifierSource = Buffer.alloc(32);
+    const stateSource = Buffer.alloc(32, 1);
+    const expectedState = stateSource.toString("base64url");
+    const listener = listenerFor({ code: "authorization-code", state: expectedState });
+    listener.start.mockImplementation(() => {
+      mutableSettings.azureClientId = "mutated-client";
+      mutableSettings.graphRedirectUri = "http://127.0.0.1:9876/mutated";
+      mutableSettings.authorizeEndpoint = "https://attacker.example/authorize";
+      mutableSettings.tokenEndpoint = "https://attacker.example/token";
+      mutableSettings.scopes.splice(0, mutableSettings.scopes.length, "Mutated.Scope");
+      return Promise.resolve();
+    });
+    const { response } = successResponse();
+    let openedUrl = "";
+    let tokenEndpoint = "";
+    let tokenRequest: RequestInit | undefined;
+
+    await runBrowserLogin(mutableSettings, {
+      randomBytes: randomBytesFrom([verifierSource, stateSource]),
+      createCallbackListener: vi.fn(() => listener.listener),
+      openBrowser: vi.fn((url: string) => {
+        openedUrl = url;
+        return Promise.resolve();
+      }),
+      fetch: vi.fn((endpoint: string, init: RequestInit) => {
+        tokenEndpoint = endpoint;
+        tokenRequest = init;
+        return Promise.resolve(response);
+      }),
+    });
+
+    const authorizationUrl = new URL(openedUrl);
+    expect(authorizationUrl.origin).toBe("https://login.example.test");
+    expect(authorizationUrl.searchParams.get("client_id")).toBe("client-id");
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
+      "http://127.0.0.1:4567/auth/callback",
+    );
+    expect(authorizationUrl.searchParams.get("scope")).toBe("openid profile User.Read");
+    expect(tokenEndpoint).toBe("https://login.example.test/token");
+    expect(tokenRequest?.body).toContain("client_id=client-id");
+    expect(tokenRequest?.body).toContain(
+      "redirect_uri=http%3A%2F%2F127.0.0.1%3A4567%2Fauth%2Fcallback",
+    );
   });
 
   test("rejects non-loopback and non-http redirect URIs before binding or opening", async () => {
@@ -948,6 +1183,86 @@ describe("createLoopbackCallbackListener", () => {
       expect(response.status).toBe(200);
       await expect(response.text()).resolves.toContain("Authentication failed.");
       await expect(callback).resolves.toEqual({ code: "", state: "expected-state" });
+    } finally {
+      await listener.close();
+    }
+  });
+
+  test("keeps callback credentials out of the fixed failure response body", async () => {
+    const listener = createLoopbackCallbackListener({
+      redirectUri: "http://127.0.0.1:0/auth/callback",
+      expectedState: "callback-state-secret",
+    });
+    await listener.start();
+    const callback = listener.waitForCallback();
+    const accessToken = "callback-page-access-secret";
+    const refreshToken = "callback-page-refresh-secret";
+    const verifier = "callback-page-verifier-secret";
+    const code = "callback-page-code-secret";
+    const state = "callback-state-secret";
+
+    try {
+      const callbackUrl = new URL(listener.callbackUrl);
+      callbackUrl.searchParams.set("error", "access_denied");
+      callbackUrl.searchParams.set(
+        "error_description",
+        `${accessToken} ${refreshToken} ${verifier} ${code} ${state}`,
+      );
+      callbackUrl.searchParams.set("code", code);
+      callbackUrl.searchParams.set("state", state);
+      const response = await fetch(callbackUrl);
+      const responseBody = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(responseBody).toContain("Authentication failed.");
+      for (const secret of [accessToken, refreshToken, verifier, code, state]) {
+        expect(responseBody).not.toContain(secret);
+      }
+      await expect(callback).resolves.toMatchObject({
+        error: "access_denied",
+        code,
+        state,
+      });
+    } finally {
+      await listener.close();
+    }
+  });
+
+  test("returns 400 for a malformed absolute request target and still accepts a valid callback", async () => {
+    const listener = createLoopbackCallbackListener({
+      redirectUri: "http://127.0.0.1:0/auth/callback",
+      expectedState: "expected-state",
+    });
+    await listener.start();
+    const callback = listener.waitForCallback();
+    const callbackUrl = new URL(listener.callbackUrl);
+
+    try {
+      const malformedResponse = await sendRawHttpRequest(
+        callbackUrl.hostname,
+        Number(callbackUrl.port),
+        "GET http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+      );
+
+      expect(malformedResponse).toContain(" 400 ");
+      expect(malformedResponse).toContain("Authentication failed.");
+
+      let settled = false;
+      void callback.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      callbackUrl.searchParams.set("code", "authorization-code");
+      callbackUrl.searchParams.set("state", "expected-state");
+      const validResponse = await fetch(callbackUrl);
+
+      expect(validResponse.status).toBe(200);
+      await expect(callback).resolves.toEqual({
+        code: "authorization-code",
+        state: "expected-state",
+      });
     } finally {
       await listener.close();
     }

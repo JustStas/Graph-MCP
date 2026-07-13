@@ -14,14 +14,28 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const LOGIN_CANCELLED_MESSAGE = "Login timed out or was cancelled.";
 const LISTENER_CLOSED_MESSAGE = "Loopback callback listener is closed.";
 const LISTENER_FAILURE_MESSAGE = "Loopback callback listener failed.";
+const BROWSER_OPEN_ERROR_MESSAGE = "Unable to open browser for authentication.";
 const TOKEN_RESPONSE_ERROR_MESSAGE = "Token endpoint returned an invalid token response.";
 const TOKEN_EXCHANGE_ERROR_MESSAGE = "Token exchange failed.";
 const LOOPBACK_HEADERS_TIMEOUT_MS = 5_000;
 const LOOPBACK_REQUEST_TIMEOUT_MS = 10_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const SUCCESS_HTML =
   "<!doctype html><html><body><p>Authentication complete. You can close this window.</p></body></html>";
 const FAILURE_HTML =
   "<!doctype html><html><body><p>Authentication failed. You can close this window.</p></body></html>";
+const SAFE_OAUTH_ERROR_IDENTIFIERS: ReadonlySet<string> = new Set([
+  "access_denied",
+  "invalid_client",
+  "invalid_grant",
+  "invalid_request",
+  "invalid_scope",
+  "server_error",
+  "temporarily_unavailable",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "unsupported_response_type",
+]);
 
 type BrowserFlowSettings = Pick<
   Settings,
@@ -203,7 +217,13 @@ export function createLoopbackCallbackListener(
   });
   void callback.catch(() => undefined);
   const server = (dependencies.createServer ?? createServer)((request, response) => {
-    const requestUrl = new URL(request.url ?? "/", redirect.url);
+    let requestUrl: URL;
+    try {
+      requestUrl = new URL(request.url ?? "/", redirect.url);
+    } catch {
+      fixedHtml(response, 400, FAILURE_HTML);
+      return;
+    }
     if (requestUrl.pathname !== redirect.url.pathname) {
       fixedHtml(response, 404, FAILURE_HTML);
       return;
@@ -388,48 +408,54 @@ export function buildAuthorizationUrl(
   return url.toString();
 }
 
-function sanitizeProviderText(value: string, secrets: readonly string[]): string {
-  let sanitized = value
-    .split("")
-    .map((character) =>
-      character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 ? " " : character,
-    )
-    .join("")
-    .replace(/\s+/g, " ")
-    .trim();
+function allowlistedOAuthErrorIdentifier(
+  value: string | undefined,
+  secrets: readonly string[],
+): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!SAFE_OAUTH_ERROR_IDENTIFIERS.has(normalized)) {
+    return undefined;
+  }
   for (const secret of secrets) {
-    if (secret.length > 0) {
-      sanitized = sanitized.split(secret).join("[redacted]");
+    if (secret.length > 0 && normalized.includes(secret.toLowerCase())) {
+      return undefined;
     }
   }
-  return sanitized.slice(0, 500);
+  return normalized;
 }
 
 function providerErrorMessage(callback: OAuthCallback, secrets: readonly string[]): string {
-  const error = callback.error === undefined ? "" : sanitizeProviderText(callback.error, secrets);
-  const description =
-    callback.errorDescription === undefined
-      ? ""
-      : ` — ${sanitizeProviderText(callback.errorDescription, secrets)}`;
-  return `OAuth error: ${error || "unknown"}${description}`;
+  const error = allowlistedOAuthErrorIdentifier(callback.error, secrets);
+  return `OAuth error: ${error ?? "unknown"}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function providerDescription(responseText: string, secrets: readonly string[]): string | undefined {
+function tokenEndpointErrorIdentifier(
+  responseText: string,
+  secrets: readonly string[],
+): string | undefined {
   try {
     const body: unknown = JSON.parse(responseText);
-    if (isRecord(body) && typeof body.error_description === "string") {
-      return sanitizeProviderText(body.error_description, secrets);
+    if (isRecord(body) && typeof body.error === "string") {
+      const bodySecrets = [
+        body.access_token,
+        body.refresh_token,
+        body.code,
+        body.code_verifier,
+        body.state,
+      ].filter((value): value is string => typeof value === "string");
+      return allowlistedOAuthErrorIdentifier(body.error, [...secrets, ...bodySecrets]);
     }
   } catch {
-    // A non-JSON error response is handled as safe plain text below.
+    // Non-JSON provider bodies are never included in authentication errors.
   }
-
-  const safeText = sanitizeProviderText(responseText, secrets);
-  return safeText.length === 0 ? undefined : safeText;
+  return undefined;
 }
 
 async function exchangeAuthorizationCode(
@@ -488,9 +514,9 @@ async function exchangeAuthorizationCode(
   if (signal.aborted) {
     throw authenticationError(LOGIN_CANCELLED_MESSAGE);
   }
-  const description = providerDescription(responseText, [code, verifier, state]);
-  if (description !== undefined) {
-    throw authenticationError(`Token exchange failed: ${description}`);
+  const errorIdentifier = tokenEndpointErrorIdentifier(responseText, [code, verifier, state]);
+  if (errorIdentifier !== undefined) {
+    throw authenticationError(`Token exchange failed: ${errorIdentifier}`);
   }
   throw authenticationError(`Token exchange failed with status ${response.status}.`);
 }
@@ -501,10 +527,13 @@ function defaultTimeout<Value>(
   cancel: () => void,
 ): Promise<Value> {
   return new Promise<Value>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cancel();
-      reject(authenticationError(LOGIN_CANCELLED_MESSAGE));
-    }, timeoutMs);
+    const timeout = setTimeout(
+      () => {
+        cancel();
+        reject(authenticationError(LOGIN_CANCELLED_MESSAGE));
+      },
+      Math.min(timeoutMs, MAX_TIMER_DELAY_MS),
+    );
     void operation.then(
       (value) => {
         clearTimeout(timeout);
@@ -562,16 +591,24 @@ export async function runBrowserLogin(
   settings: BrowserLoginSettings,
   dependencies: BrowserLoginDependencies = {},
 ): Promise<TokenResponse> {
-  const redirect = parseLoopbackRedirectUri(settings.graphRedirectUri);
+  const flowSettings: BrowserLoginSettings = Object.freeze({
+    ...settings,
+    scopes: Object.freeze([...settings.scopes]),
+  });
+  const redirect = parseLoopbackRedirectUri(flowSettings.graphRedirectUri);
   if (redirect.port === 0) {
     throw authenticationError("graphRedirectUri must not use port 0.");
+  }
+  const timeoutMs = dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("Browser login timeout must be a positive safe integer.");
   }
 
   const randomBytes = dependencies.randomBytes ?? nodeRandomBytes;
   const pkce = generatePkce({ randomBytes });
   const state = generateState(randomBytes);
   const listener = (dependencies.createCallbackListener ?? createLoopbackCallbackListener)({
-    redirectUri: settings.graphRedirectUri,
+    redirectUri: flowSettings.graphRedirectUri,
     expectedState: state,
   });
   const fetchToken: TokenEndpointFetch =
@@ -588,7 +625,14 @@ export async function runBrowserLogin(
     throwIfAborted(cancellation.signal);
     await listener.start();
     throwIfAborted(cancellation.signal);
-    await openBrowser(buildAuthorizationUrl(settings, { state, challenge: pkce.challenge }));
+    try {
+      await openBrowser(buildAuthorizationUrl(flowSettings, { state, challenge: pkce.challenge }));
+    } catch {
+      if (cancellation.signal.aborted) {
+        throw authenticationError(LOGIN_CANCELLED_MESSAGE);
+      }
+      throw authenticationError(BROWSER_OPEN_ERROR_MESSAGE);
+    }
     throwIfAborted(cancellation.signal);
     const callback = await listener.waitForCallback();
     throwIfAborted(cancellation.signal);
@@ -600,14 +644,16 @@ export async function runBrowserLogin(
       throw authenticationError("Invalid state parameter — possible CSRF attack");
     }
     if (callback.error !== undefined) {
-      throw authenticationError(providerErrorMessage(callback, [pkce.verifier, state]));
+      throw authenticationError(
+        providerErrorMessage(callback, [callback.code ?? "", pkce.verifier, state]),
+      );
     }
     if (callback.code === undefined || callback.code.length === 0) {
       throw authenticationError(LOGIN_CANCELLED_MESSAGE);
     }
 
     return await exchangeAuthorizationCode(
-      settings,
+      flowSettings,
       callback.code,
       pkce.verifier,
       state,
@@ -624,7 +670,7 @@ export async function runBrowserLogin(
   let terminalError: unknown;
 
   try {
-    return await timeout(abortableOperation, dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    return await timeout(abortableOperation, Math.min(timeoutMs, MAX_TIMER_DELAY_MS));
   } catch (error: unknown) {
     terminalError = error;
     throw error;

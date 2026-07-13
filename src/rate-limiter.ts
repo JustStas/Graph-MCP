@@ -14,6 +14,8 @@ const defaultSleep = (milliseconds: number): Promise<void> =>
     setTimeout(resolve, milliseconds);
   });
 
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 export class RateLimiter {
   private readonly maxRequests: number;
   private readonly windowMs: number;
@@ -57,13 +59,15 @@ export class RateLimiter {
 
   handle429(retryAfterSeconds?: number): number {
     this.backoffCount += 1;
-    const delay =
-      retryAfterSeconds !== undefined && retryAfterSeconds > 0
-        ? retryAfterSeconds
-        : Math.min(2 ** this.backoffCount, 60);
-    const proposedDeadline = this.now() + delay * 1000;
+    const retryAfterMilliseconds =
+      retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+        ? Math.min(retryAfterSeconds * 1000, MAX_TIMER_DELAY_MS)
+        : undefined;
+    const delayMilliseconds = retryAfterMilliseconds ?? Math.min(2 ** this.backoffCount, 60) * 1000;
+    const now = this.now();
+    const proposedDeadline = now + delayMilliseconds;
     this.backoffUntil = Math.max(this.backoffUntil, proposedDeadline);
-    return delay;
+    return (this.backoffUntil - now) / 1000;
   }
 
   resetBackoff(): void {

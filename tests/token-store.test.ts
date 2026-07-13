@@ -17,7 +17,12 @@ import { basename, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { TokenStore, type StoredTokens, type TokenResponse } from "../src/token-store.js";
+import {
+  parseTokenResponse,
+  TokenStore,
+  type StoredTokens,
+  type TokenResponse,
+} from "../src/token-store.js";
 
 interface TestSettings {
   configDir: string;
@@ -54,7 +59,15 @@ function createDeferred(): Deferred {
 
 async function installFirstFileHandleSyncBarrier(
   kind: "file" | "directory",
-): Promise<{ reached: Promise<void>; release: () => void }> {
+  phase: "before" | "after" = "before",
+): Promise<{
+  reached: Promise<void>;
+  completed: Promise<void>;
+  release: () => void;
+  restore: () => void;
+  matchingCalls: () => number;
+  matchingCompletions: () => number;
+}> {
   const probe = await open(process.execPath, "r");
   const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
   await probe.close();
@@ -68,18 +81,51 @@ async function installFirstFileHandleSyncBarrier(
 
   const reached = createDeferred();
   const release = createDeferred();
+  const completed = createDeferred();
   let blocked = false;
-  vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+  let matchingCallCount = 0;
+  let matchingCompletionCount = 0;
+  const syncSpy = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (
+    this: FileHandle,
+  ) {
     const stats = await originalStat.call(this);
-    if (!blocked && (kind === "file" ? stats.isFile() : stats.isDirectory())) {
-      blocked = true;
-      reached.resolve();
-      await release.promise;
+    const isMatchingCall = kind === "file" ? stats.isFile() : stats.isDirectory();
+    let isBlockedCall = false;
+    if (isMatchingCall) {
+      matchingCallCount += 1;
+      if (!blocked) {
+        blocked = true;
+        isBlockedCall = true;
+        if (phase === "before") {
+          reached.resolve();
+          await release.promise;
+        }
+      }
     }
-    await originalSync.call(this);
+    try {
+      await originalSync.call(this);
+      if (isBlockedCall && phase === "after") {
+        reached.resolve();
+        await release.promise;
+      }
+    } finally {
+      if (isMatchingCall) {
+        matchingCompletionCount += 1;
+      }
+      if (isBlockedCall) {
+        completed.resolve();
+      }
+    }
   });
 
-  return { reached: reached.promise, release: release.resolve };
+  return {
+    reached: reached.promise,
+    completed: completed.promise,
+    release: release.resolve,
+    restore: () => syncSpy.mockRestore(),
+    matchingCalls: () => matchingCallCount,
+    matchingCompletions: () => matchingCompletionCount,
+  };
 }
 
 function keyPublicationTempPath(
@@ -447,6 +493,160 @@ describe("TokenStore", () => {
     expect(store.getRefreshToken()).toBe("getter-refresh");
   });
 
+  test("returns a detached frozen snapshot for auth-state materialization", async () => {
+    const store = new TokenStore(settings, { now: () => 1_000_000 });
+    await store.store({
+      access_token: "snapshot-access",
+      refresh_token: "snapshot-refresh",
+      expires_in: 600,
+      scope: "User.Read",
+    });
+
+    const snapshot = store.getTokenSnapshot();
+
+    expect(snapshot).toEqual({
+      accessToken: "snapshot-access",
+      refreshToken: "snapshot-refresh",
+      expiresAt: 1_600_000,
+      scope: "User.Read",
+    });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(() => {
+      (snapshot as StoredTokens).accessToken = "mutated";
+    }).toThrow(TypeError);
+    expect(store.getAccessToken()).toBe("snapshot-access");
+    expect(store.getRefreshToken()).toBe("snapshot-refresh");
+  });
+
+  test("persists exact expired and future snapshots without recomputing expiry", async () => {
+    const now = 1_000_000;
+    const store = new TokenStore(settings, { now: () => now });
+    const expiredSnapshot: StoredTokens = {
+      accessToken: "expired-snapshot-access",
+      refreshToken: "expired-snapshot-refresh",
+      expiresAt: 999_999,
+      scope: "User.Read",
+    };
+
+    await store.storeTokenSnapshot(expiredSnapshot);
+    const expiredReloaded = new TokenStore(settings, { now: () => now });
+    await expiredReloaded.initialize();
+    expect(expiredReloaded.getTokenSnapshot()).toEqual(expiredSnapshot);
+    expect(expiredReloaded.isAccessTokenExpired(0)).toBe(true);
+
+    const futureSnapshot: StoredTokens = {
+      accessToken: "future-snapshot-access",
+      refreshToken: "future-snapshot-refresh",
+      expiresAt: 1_600_123,
+      scope: "Mail.Read",
+    };
+    await store.storeTokenSnapshot(futureSnapshot);
+    const futureReloaded = new TokenStore(settings, { now: () => now });
+    await futureReloaded.initialize();
+    expect(futureReloaded.getTokenSnapshot()).toEqual(futureSnapshot);
+    expect(futureReloaded.isAccessTokenExpired(0)).toBe(false);
+  });
+
+  test("commits a published token without waiting for post-rename directory sync", async () => {
+    const store = new TokenStore(settings);
+    await store.initialize();
+    const barrier = await installFirstFileHandleSyncBarrier("directory");
+
+    try {
+      await store.store({
+        access_token: "rename-commit-access",
+        refresh_token: "rename-commit-refresh",
+      });
+      await barrier.reached;
+
+      const reloaded = new TokenStore(settings);
+      await reloaded.initialize();
+      expect(reloaded.getAccessToken()).toBe("rename-commit-access");
+      expect(reloaded.getRefreshToken()).toBe("rename-commit-refresh");
+    } finally {
+      barrier.release();
+      await barrier.completed;
+      barrier.restore();
+    }
+  });
+
+  test("commits a visible clear without waiting for post-unlink directory sync", async () => {
+    const store = new TokenStore(settings);
+    await store.initialize();
+    const setupBarrier = await installFirstFileHandleSyncBarrier("directory");
+    await store.store({
+      access_token: "clear-commit-access",
+      refresh_token: "clear-commit-refresh",
+    });
+    await setupBarrier.reached;
+    setupBarrier.release();
+    await setupBarrier.completed;
+    setupBarrier.restore();
+
+    const barrier = await installFirstFileHandleSyncBarrier("directory");
+
+    try {
+      await store.clear();
+      await barrier.reached;
+
+      const reloaded = new TokenStore(settings);
+      await reloaded.initialize();
+      expect(reloaded.getAccessToken()).toBeUndefined();
+      expect(reloaded.getRefreshToken()).toBeUndefined();
+    } finally {
+      barrier.release();
+      await barrier.completed;
+      barrier.restore();
+    }
+  });
+
+  test("coalesces background directory sync while an earlier attempt is in flight", async () => {
+    const store = new TokenStore(settings);
+    await store.initialize();
+    const barrier = await installFirstFileHandleSyncBarrier("directory", "after");
+
+    try {
+      await store.store({
+        access_token: "first-coalesced-access",
+        refresh_token: "first-coalesced-refresh",
+      });
+      await barrier.reached;
+
+      await store.store({
+        access_token: "second-coalesced-access",
+        refresh_token: "second-coalesced-refresh",
+      });
+      await store.storeTokenSnapshot({
+        accessToken: "snapshot-coalesced-access",
+        refreshToken: "snapshot-coalesced-refresh",
+        expiresAt: Date.now() + 60_000,
+        scope: "",
+      });
+      await store.clear();
+
+      expect(barrier.matchingCalls()).toBe(1);
+      barrier.release();
+      await barrier.completed;
+      await vi.waitFor(() => {
+        expect(barrier.matchingCalls()).toBe(2);
+        expect(barrier.matchingCompletions()).toBe(2);
+      });
+    } finally {
+      barrier.release();
+      await barrier.completed;
+      barrier.restore();
+    }
+  });
+
+  test("rejects whitespace-only access tokens while preserving valid token bytes", () => {
+    expect(() => parseTokenResponse({ access_token: " \t\r\n " })).toThrow(
+      "Token response must contain a nonempty access token.",
+    );
+    expect(parseTokenResponse({ access_token: " padded-access " })).toEqual({
+      access_token: " padded-access ",
+    });
+  });
+
   test("expiry uses the configured buffer, explicit buffer, exact boundary, and empty state", async () => {
     let now = 10_000_000;
     const store = new TokenStore(settings, { now: () => now });
@@ -577,6 +777,77 @@ describe("TokenStore", () => {
     expect(error).not.toHaveBeenCalled();
   });
 
+  test("loads persisted whitespace-only access tokens as unauthenticated", async () => {
+    const explicitKey = "blank-access-token-test-key";
+    settings = settingsFor(configDir, explicitKey);
+    const envelope = encryptPlaintext(
+      JSON.stringify({
+        accessToken: " \t\r\n ",
+        refreshToken: "",
+        expiresAt: Date.now() + 60_000,
+        scope: "User.Read",
+      }),
+      encryptionKeyFor(explicitKey),
+    );
+    await writeFile(settings.tokenFile, JSON.stringify(envelope));
+
+    const store = new TokenStore(settings);
+    await store.initialize();
+
+    expect(store.getAccessToken()).toBeUndefined();
+    expect(store.getRefreshToken()).toBeUndefined();
+    expect(store.isAuthenticated()).toBe(false);
+  });
+
+  test("rejects persisted whitespace-only refresh tokens while retaining the empty sentinel", async () => {
+    const explicitKey = "blank-refresh-token-test-key";
+    settings = settingsFor(configDir, explicitKey);
+    const key = encryptionKeyFor(explicitKey);
+    const expiresAt = Date.now() + 600_000;
+
+    await writeFile(
+      settings.tokenFile,
+      JSON.stringify(
+        encryptPlaintext(
+          JSON.stringify({
+            accessToken: "persisted-access",
+            refreshToken: " \t\r\n ",
+            expiresAt,
+            scope: "User.Read",
+          }),
+          key,
+        ),
+      ),
+    );
+
+    const rejected = new TokenStore(settings);
+    await rejected.initialize();
+    expect(rejected.getAccessToken()).toBeUndefined();
+    expect(rejected.getRefreshToken()).toBeUndefined();
+    expect(rejected.isAuthenticated()).toBe(false);
+
+    await writeFile(
+      settings.tokenFile,
+      JSON.stringify(
+        encryptPlaintext(
+          JSON.stringify({
+            accessToken: "persisted-access",
+            refreshToken: "",
+            expiresAt,
+            scope: "User.Read",
+          }),
+          key,
+        ),
+      ),
+    );
+
+    const accepted = new TokenStore(settings);
+    await accepted.initialize();
+    expect(accepted.getAccessToken()).toBe("persisted-access");
+    expect(accepted.getRefreshToken()).toBe("");
+    expect(accepted.isAuthenticated()).toBe(true);
+  });
+
   test("rejects noncanonical base64 that Node would otherwise decode permissively", async () => {
     const explicitKey = "strict-base64-test-key";
     settings = settingsFor(configDir, explicitKey);
@@ -626,6 +897,7 @@ describe("TokenStore", () => {
       null,
       [],
       { access_token: "" },
+      { access_token: " \t\r\n " },
       { access_token: 123 },
       { access_token: "invalid-refresh", refresh_token: 123 },
       { access_token: "empty-refresh", refresh_token: "" },
@@ -773,6 +1045,142 @@ describe("TokenStore", () => {
     expect(await readdir(configDir)).toEqual(
       expect.arrayContaining([basename(settings.keyFile), basename(settings.tokenFile)]),
     );
+    expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+  });
+
+  test("pre-aborted store, snapshot restore, and clear leave existing state unchanged", async () => {
+    const store = new TokenStore(settings);
+    await store.store({
+      access_token: "existing-access",
+      refresh_token: "existing-refresh",
+    });
+
+    const storeController = new AbortController();
+    storeController.abort();
+    await expect(
+      store.store(
+        {
+          access_token: "must-not-store",
+          refresh_token: "must-not-store-refresh",
+        },
+        { signal: storeController.signal },
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    const snapshotController = new AbortController();
+    snapshotController.abort();
+    await expect(
+      store.storeTokenSnapshot(
+        {
+          accessToken: "must-not-restore",
+          refreshToken: "must-not-restore-refresh",
+          expiresAt: Date.now() + 60_000,
+          scope: "",
+        },
+        { signal: snapshotController.signal },
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    const clearController = new AbortController();
+    clearController.abort();
+    await expect(store.clear({ signal: clearController.signal })).rejects.toMatchObject({
+      name: "AbortError",
+    });
+
+    expect(store.getAccessToken()).toBe("existing-access");
+    expect(store.getRefreshToken()).toBe("existing-refresh");
+    const reloaded = new TokenStore(settings);
+    await reloaded.initialize();
+    expect(reloaded.getAccessToken()).toBe("existing-access");
+    expect(reloaded.getRefreshToken()).toBe("existing-refresh");
+  });
+
+  test.each(["store", "clear"] as const)(
+    "an aborted queued %s preserves invocation ordering and the earlier committed tokens",
+    async (mutation) => {
+      const store = new TokenStore(settings);
+      await store.initialize();
+      const barrier = await installFirstFileHandleSyncBarrier("file");
+      let earlierWrite: Promise<void> | undefined;
+
+      try {
+        earlierWrite = store.store({
+          access_token: "earlier-access",
+          refresh_token: "earlier-refresh",
+        });
+        await barrier.reached;
+
+        const controller = new AbortController();
+        const queued =
+          mutation === "store"
+            ? store.store(
+                {
+                  access_token: "must-not-win",
+                  refresh_token: "must-not-win-refresh",
+                },
+                { signal: controller.signal },
+              )
+            : store.clear({ signal: controller.signal });
+        controller.abort();
+
+        await expect(queued).rejects.toMatchObject({ name: "AbortError" });
+        barrier.release();
+        await earlierWrite;
+      } finally {
+        barrier.release();
+        await earlierWrite?.catch(() => undefined);
+      }
+
+      expect(store.getAccessToken()).toBe("earlier-access");
+      expect(store.getRefreshToken()).toBe("earlier-refresh");
+      const reloaded = new TokenStore(settings);
+      await reloaded.initialize();
+      expect(reloaded.getAccessToken()).toBe("earlier-access");
+      expect(reloaded.getRefreshToken()).toBe("earlier-refresh");
+      expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
+    },
+  );
+
+  test("an in-progress aborted store settles only after reaching a safe pre-commit boundary", async () => {
+    const store = new TokenStore(settings);
+    await store.initialize();
+    const barrier = await installFirstFileHandleSyncBarrier("file");
+    const controller = new AbortController();
+    let writing: Promise<void> | undefined;
+
+    try {
+      writing = store.store(
+        {
+          access_token: "must-not-commit",
+          refresh_token: "must-not-commit-refresh",
+        },
+        { signal: controller.signal },
+      );
+      let settled = false;
+      void writing.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await barrier.reached;
+
+      controller.abort();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      barrier.release();
+      await expect(writing).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      barrier.release();
+      await writing?.catch(() => undefined);
+    }
+
+    expect(store.getAccessToken()).toBeUndefined();
+    expect(store.getRefreshToken()).toBeUndefined();
+    await expect(stat(settings.tokenFile)).rejects.toMatchObject({ code: "ENOENT" });
     expect((await readdir(configDir)).filter((entry) => entry.includes(".tmp"))).toEqual([]);
   });
 

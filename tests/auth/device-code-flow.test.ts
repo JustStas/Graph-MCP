@@ -66,6 +66,16 @@ function settlesPromptly<Value>(promise: Promise<Value>, timeoutMs = 250): Promi
   });
 }
 
+function deferred<Value>() {
+  let resolve: (value: Value | PromiseLike<Value>) => void = () => undefined;
+  let reject: (error: unknown) => void = () => undefined;
+  const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 async function expectAuthenticationError(
   operation: Promise<unknown>,
   expectedMessage: string,
@@ -84,7 +94,9 @@ async function expectAuthenticationError(
 describe("startDeviceCodeLogin", () => {
   test("posts the exact device request and returns public details before polling", async () => {
     const fetch = sequenceFetch([response(200, deviceResponse())]);
-    const store = vi.fn<(tokens: TokenResponse) => Promise<void>>(() => Promise.resolve());
+    const store = vi.fn<
+      (tokens: TokenResponse, options?: { readonly signal?: AbortSignal }) => Promise<void>
+    >(() => Promise.resolve());
 
     const session = await startDeviceCodeLogin(settings, { store }, { fetch, now: () => 10_000 });
 
@@ -145,7 +157,9 @@ describe("startDeviceCodeLogin", () => {
       delays.push(milliseconds);
       return Promise.resolve();
     });
-    const store = vi.fn<(tokens: TokenResponse) => Promise<void>>(() => Promise.resolve());
+    const store = vi.fn<
+      (tokens: TokenResponse, options?: { readonly signal?: AbortSignal }) => Promise<void>
+    >(() => Promise.resolve());
 
     const session = await startDeviceCodeLogin(
       settings,
@@ -164,11 +178,170 @@ describe("startDeviceCodeLogin", () => {
       );
       expect(init.signal).toBeDefined();
     }
-    expect(store).toHaveBeenCalledWith({
+    expect(store).toHaveBeenCalledTimes(1);
+    const [storedTokens, storeOptions] = store.mock.calls[0]!;
+    expect(storedTokens).toEqual({
       access_token: "access-secret",
       refresh_token: "refresh-secret",
       expires_in: 3600,
     });
+    expect(storeOptions?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("clamps oversized request, lifetime, and storage timers to the Node timer limit", async () => {
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const store = vi.fn<
+        (tokens: TokenResponse, options?: { readonly signal?: AbortSignal }) => Promise<void>
+      >(() => Promise.resolve());
+      const session = await startDeviceCodeLogin(
+        settings,
+        { store },
+        {
+          fetch: sequenceFetch([
+            response(200, deviceResponse({ expires_in: 3_000_000, interval: 1 })),
+            response(200, {
+              access_token: "access-secret",
+              refresh_token: "refresh-secret",
+            }),
+          ]),
+          sleep: () => Promise.resolve(),
+          now: () => 0,
+          requestTimeoutMs: Number.MAX_SAFE_INTEGER,
+          storageTimeoutMs: Number.MAX_SAFE_INTEGER,
+        },
+      );
+
+      await session.poll();
+
+      expect(timeoutSpy.mock.calls.filter(([, delay]) => delay === 2_147_483_647)).toHaveLength(3);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  test("bounds token storage and aborts the cooperative store signal", async () => {
+    vi.useFakeTimers();
+    try {
+      let storeSignal: AbortSignal | undefined;
+      const store = vi.fn((_tokens: TokenResponse, options?: { readonly signal?: AbortSignal }) => {
+        storeSignal = options?.signal;
+        return new Promise<void>(() => undefined);
+      });
+      const session = await startDeviceCodeLogin(
+        settings,
+        { store },
+        {
+          fetch: sequenceFetch([
+            response(200, deviceResponse()),
+            response(200, { access_token: "access-secret" }),
+          ]),
+          sleep: () => Promise.resolve(),
+          now: () => 10_000,
+          storageTimeoutMs: 10,
+        },
+      );
+
+      const assertion = expectAuthenticationError(
+        session.poll(),
+        "Unable to store authentication tokens.",
+      );
+      await vi.advanceTimersByTimeAsync(100);
+
+      await assertion;
+      expect(storeSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("cancels token storage even when the injected store ignores abort", async () => {
+    const controller = new AbortController();
+    const storeStarted = deferred<void>();
+    let storeSignal: AbortSignal | undefined;
+    const store = vi.fn((_tokens: TokenResponse, options?: { readonly signal?: AbortSignal }) => {
+      storeSignal = options?.signal;
+      storeStarted.resolve();
+      return new Promise<void>(() => undefined);
+    });
+    const session = await startDeviceCodeLogin(
+      settings,
+      { store },
+      {
+        fetch: sequenceFetch([
+          response(200, deviceResponse()),
+          response(200, { access_token: "access-secret" }),
+        ]),
+        sleep: () => Promise.resolve(),
+        signal: controller.signal,
+        now: () => 10_000,
+      },
+    );
+
+    const polling = session.poll();
+    await storeStarted.promise;
+    controller.abort();
+
+    await expectAuthenticationError(settlesPromptly(polling), "Device-code login was cancelled.");
+    expect(storeSignal?.aborted).toBe(true);
+  });
+
+  test("contains a late store rejection after the storage timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const lateStore = deferred<void>();
+      const session = await startDeviceCodeLogin(
+        settings,
+        { store: () => lateStore.promise },
+        {
+          fetch: sequenceFetch([
+            response(200, deviceResponse()),
+            response(200, { access_token: "access-secret" }),
+          ]),
+          sleep: () => Promise.resolve(),
+          now: () => 10_000,
+          storageTimeoutMs: 10,
+        },
+      );
+
+      const assertion = expectAuthenticationError(
+        session.poll(),
+        "Unable to store authentication tokens.",
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await assertion;
+
+      lateStore.reject(new Error("late-store-secret"));
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("snapshots mutable settings before asynchronous device polling", async () => {
+    const mutableSettings = { ...settings, scopes: [...settings.scopes] };
+    const fetch = sequenceFetch([
+      response(200, deviceResponse()),
+      response(200, { access_token: "access-secret" }),
+    ]);
+    const session = await startDeviceCodeLogin(
+      mutableSettings,
+      { store: vi.fn(() => Promise.resolve()) },
+      { fetch, sleep: () => Promise.resolve(), now: () => 10_000 },
+    );
+
+    mutableSettings.azureClientId = "mutated-client";
+    mutableSettings.authority = "https://attacker.example/tenant";
+    mutableSettings.tokenEndpoint = "https://attacker.example/token";
+    mutableSettings.scopes.splice(0, mutableSettings.scopes.length, "Mutated.Scope");
+    await session.poll();
+
+    const [requestEndpoint, requestInit] = vi.mocked(fetch).mock.calls[0]!;
+    expect(requestEndpoint).toBe("https://login.microsoftonline.com/tenant/oauth2/v2.0/devicecode");
+    expect(requestInit.body).toBe("client_id=client-id&scope=openid+profile+User.Read");
+    const [pollEndpoint, pollInit] = vi.mocked(fetch).mock.calls[1]!;
+    expect(pollEndpoint).toBe("https://login.microsoftonline.com/tenant/oauth2/v2.0/token");
+    expect(pollInit.body).toContain("client_id=client-id");
   });
 
   test.each([
@@ -364,6 +537,21 @@ describe("startDeviceCodeLogin", () => {
     ["unsafe interval", deviceResponse({ interval: Number.MAX_SAFE_INTEGER + 1 })],
   ])("rejects malformed device responses: %s", async (_name, body) => {
     const fetch = sequenceFetch([response(200, body)]);
+
+    const error = await expectAuthenticationError(
+      startDeviceCodeLogin(settings, { store: vi.fn() }, { fetch }),
+      "Device-code endpoint returned an invalid response.",
+    );
+
+    expect(error.message).not.toContain("private-device-code");
+  });
+
+  test.each([
+    ["user_code", "CODE-private-device-code"],
+    ["verification_uri", "https://example.test/private-device-code"],
+    ["message", "Enter private-device-code in the browser."],
+  ])("rejects a public %s field that reflects the private device code", async (field, value) => {
+    const fetch = sequenceFetch([response(200, deviceResponse({ [field]: value }))]);
 
     const error = await expectAuthenticationError(
       startDeviceCodeLogin(settings, { store: vi.fn() }, { fetch }),

@@ -205,12 +205,41 @@ describe("RateLimiter", () => {
 
     expect(limiter.handle429(10)).toBe(10);
     clock.set(100);
-    expect(limiter.handle429(1)).toBe(1);
+    expect(limiter.handle429(1)).toBe(9.9);
     clock.set(5000);
 
     await limiter.acquire();
 
     expect(clock.sleeps).toEqual([5000]);
+  });
+
+  test("falls back deterministically for non-finite retry-after values", () => {
+    const clock = createClock();
+    const limiter = new RateLimiter({
+      maxRequests: 1,
+      windowMs: 1000,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    expect(limiter.handle429(Number.POSITIVE_INFINITY)).toBe(2);
+    limiter.resetBackoff();
+    expect(limiter.handle429(Number.NaN)).toBe(2);
+  });
+
+  test("clamps overflowing retry-after values to the largest safe timer delay", async () => {
+    const clock = createClock();
+    const limiter = new RateLimiter({
+      maxRequests: 1,
+      windowMs: 1000,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    expect(limiter.handle429(Number.MAX_VALUE)).toBe(2_147_483.647);
+    await limiter.acquire();
+
+    expect(clock.sleeps).toEqual([2_147_483_647]);
   });
 
   test("falls back to exponential delay when retry-after is zero", () => {

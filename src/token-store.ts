@@ -34,6 +34,10 @@ export interface TokenStoreDependencies {
   randomBytes?: (size: number) => Buffer;
 }
 
+export interface TokenStoreMutationOptions {
+  readonly signal?: AbortSignal;
+}
+
 interface EncryptedPayload {
   version: 2;
   iv: string;
@@ -44,6 +48,11 @@ interface EncryptedPayload {
 interface TokenFileWriteQueue {
   tail: Promise<void>;
   pending: number;
+}
+
+interface BackgroundDirectorySync {
+  dirty: boolean;
+  completion: Promise<void>;
 }
 
 type TokenStoreSettings = Pick<
@@ -65,9 +74,11 @@ const ENCRYPTION_ERROR_MESSAGE = "Unable to initialize token encryption securely
 const TOKEN_WRITE_ERROR_MESSAGE = "Unable to persist encrypted token file securely.";
 const TOKEN_CLEAR_ERROR_MESSAGE = "Unable to clear encrypted token file securely.";
 const DIRECTORY_SYNC_ERROR_MESSAGE = "Unable to durably synchronize token storage.";
+const TOKEN_MUTATION_ABORTED_MESSAGE = "Token storage operation was cancelled.";
 
 let temporaryFileSequence = 0;
 const tokenFileWriteQueues = new Map<string, TokenFileWriteQueue>();
+const backgroundDirectorySyncs = new Map<string, BackgroundDirectorySync>();
 
 class SecurityValidationError extends Error {
   constructor() {
@@ -95,6 +106,12 @@ function tokenWriteError(): Error {
 
 function tokenClearError(): Error {
   return new Error(TOKEN_CLEAR_ERROR_MESSAGE);
+}
+
+function tokenMutationAbortError(): Error {
+  const error = new Error(TOKEN_MUTATION_ABORTED_MESSAGE);
+  error.name = "AbortError";
+  return error;
 }
 
 function directorySyncError(): Error {
@@ -400,6 +417,36 @@ async function bestEffortSyncDirectory(configDir: string): Promise<void> {
   await syncDirectory(configDir).catch(() => undefined);
 }
 
+function scheduleBestEffortDirectorySync(configDir: string): void {
+  const syncKey = resolve(configDir);
+  const existing = backgroundDirectorySyncs.get(syncKey);
+  if (existing !== undefined) {
+    existing.dirty = true;
+    return;
+  }
+
+  const state: BackgroundDirectorySync = {
+    dirty: false,
+    completion: Promise.resolve(),
+  };
+  backgroundDirectorySyncs.set(syncKey, state);
+  state.completion = (async () => {
+    do {
+      state.dirty = false;
+      await bestEffortSyncDirectory(syncKey);
+    } while (state.dirty);
+  })();
+  void state.completion.finally(() => {
+    if (backgroundDirectorySyncs.get(syncKey) === state) {
+      const rerun = state.dirty;
+      backgroundDirectorySyncs.delete(syncKey);
+      if (rerun) {
+        scheduleBestEffortDirectorySync(syncKey);
+      }
+    }
+  });
+}
+
 function decodeBase64(value: unknown): Buffer | undefined {
   if (
     typeof value !== "string" ||
@@ -422,8 +469,9 @@ function parseStoredTokens(value: unknown): StoredTokens | undefined {
   const candidate = value as Record<string, unknown>;
   if (
     typeof candidate.accessToken !== "string" ||
-    candidate.accessToken.length === 0 ||
+    candidate.accessToken.trim().length === 0 ||
     typeof candidate.refreshToken !== "string" ||
+    (candidate.refreshToken.length > 0 && candidate.refreshToken.trim().length === 0) ||
     typeof candidate.expiresAt !== "number" ||
     !Number.isSafeInteger(candidate.expiresAt) ||
     typeof candidate.scope !== "string"
@@ -479,7 +527,7 @@ export function parseTokenResponse(value: unknown): TokenResponse {
   const refreshToken = tokenResponse.refresh_token;
   const expiresIn = tokenResponse.expires_in;
   const scope = tokenResponse.scope;
-  if (typeof accessToken !== "string" || accessToken.length === 0) {
+  if (typeof accessToken !== "string" || accessToken.trim().length === 0) {
     throw new Error("Token response must contain a nonempty access token.");
   }
   if (
@@ -537,7 +585,53 @@ function validateBufferMilliseconds(bufferSeconds: number): number {
   return milliseconds;
 }
 
-function enqueueTokenFileWrite(tokenFile: string, operation: () => Promise<void>): Promise<void> {
+function throwIfMutationAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw tokenMutationAbortError();
+  }
+}
+
+function rejectMutationOnAbort(
+  operation: Promise<void>,
+  signal: AbortSignal | undefined,
+  operationStarted: () => boolean,
+): Promise<void> {
+  if (signal === undefined) {
+    return operation;
+  }
+
+  return new Promise<void>((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const finish = (settle: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      settle();
+    };
+    const onAbort = () => {
+      if (!operationStarted()) {
+        finish(() => rejectPromise(tokenMutationAbortError()));
+      }
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      () => finish(resolvePromise),
+      (error: unknown) =>
+        finish(() => rejectPromise(error instanceof Error ? error : tokenWriteError())),
+    );
+    if (signal.aborted) {
+      onAbort();
+    }
+  });
+}
+
+function enqueueTokenFileWrite(
+  tokenFile: string,
+  operation: () => Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
   const queueKey = resolve(tokenFile);
   let queue = tokenFileWriteQueues.get(queueKey);
   if (queue === undefined) {
@@ -546,7 +640,12 @@ function enqueueTokenFileWrite(tokenFile: string, operation: () => Promise<void>
   }
 
   queue.pending += 1;
-  const pendingWrite = queue.tail.then(operation);
+  let operationStarted = false;
+  const pendingWrite = queue.tail.then(async () => {
+    operationStarted = true;
+    throwIfMutationAborted(signal);
+    await operation();
+  });
   const settledTail = pendingWrite.catch(() => undefined);
   queue.tail = settledTail;
 
@@ -561,7 +660,7 @@ function enqueueTokenFileWrite(tokenFile: string, operation: () => Promise<void>
     }
   });
 
-  return pendingWrite;
+  return rejectMutationOnAbort(pendingWrite, signal, () => operationStarted);
 }
 
 function waitForKeyPublisher(): Promise<void> {
@@ -592,7 +691,12 @@ export class TokenStore {
     return enqueueTokenFileWrite(this.#tokenFile, () => this.#initializeUnlocked());
   }
 
-  async store(tokenResponse: TokenResponse): Promise<void> {
+  async store(
+    tokenResponse: TokenResponse,
+    options: TokenStoreMutationOptions = {},
+  ): Promise<void> {
+    const signal = options.signal;
+    throwIfMutationAborted(signal);
     const parsedTokenResponse = parseTokenResponse(tokenResponse);
     const now = validateNow(this.#now());
     const storedTokens: StoredTokens = {
@@ -602,10 +706,39 @@ export class TokenStore {
       scope: parsedTokenResponse.scope ?? "",
     };
 
-    await enqueueTokenFileWrite(this.#tokenFile, async () => {
-      await this.#initializeUnlocked();
-      await this.#save(storedTokens);
-    });
+    await enqueueTokenFileWrite(
+      this.#tokenFile,
+      async () => {
+        throwIfMutationAborted(signal);
+        await this.#initializeUnlocked();
+        throwIfMutationAborted(signal);
+        await this.#save(storedTokens, signal);
+      },
+      signal,
+    );
+  }
+
+  async storeTokenSnapshot(
+    snapshot: Readonly<StoredTokens>,
+    options: TokenStoreMutationOptions = {},
+  ): Promise<void> {
+    const signal = options.signal;
+    throwIfMutationAborted(signal);
+    const storedTokens = parseStoredTokens(snapshot);
+    if (storedTokens === undefined) {
+      throw new Error("Stored token snapshot is invalid.");
+    }
+
+    await enqueueTokenFileWrite(
+      this.#tokenFile,
+      async () => {
+        throwIfMutationAborted(signal);
+        await this.#initializeUnlocked();
+        throwIfMutationAborted(signal);
+        await this.#save(storedTokens, signal);
+      },
+      signal,
+    );
   }
 
   getAccessToken(): string | undefined {
@@ -614,6 +747,10 @@ export class TokenStore {
 
   getRefreshToken(): string | undefined {
     return this.#tokens?.refreshToken;
+  }
+
+  getTokenSnapshot(): Readonly<StoredTokens> | undefined {
+    return this.#tokens === undefined ? undefined : Object.freeze({ ...this.#tokens });
   }
 
   isAccessTokenExpired(bufferSeconds = this.#settings.graphTokenRefreshBuffer): boolean {
@@ -637,8 +774,10 @@ export class TokenStore {
     );
   }
 
-  clear(): Promise<void> {
-    return enqueueTokenFileWrite(this.#tokenFile, () => this.#clearUnlocked());
+  async clear(options: TokenStoreMutationOptions = {}): Promise<void> {
+    const signal = options.signal;
+    throwIfMutationAborted(signal);
+    await enqueueTokenFileWrite(this.#tokenFile, () => this.#clearUnlocked(signal), signal);
   }
 
   #validateSecretPaths(): void {
@@ -886,7 +1025,8 @@ export class TokenStore {
     }
   }
 
-  async #save(tokens: StoredTokens): Promise<void> {
+  async #save(tokens: StoredTokens, signal?: AbortSignal): Promise<void> {
+    throwIfMutationAborted(signal);
     if (this.#key === undefined) {
       throw tokenWriteError();
     }
@@ -918,27 +1058,40 @@ export class TokenStore {
     }
 
     const temporaryFile = this.#temporaryFilePath(this.#tokenFile, "token");
+    let published = false;
     try {
       try {
+        throwIfMutationAborted(signal);
         await writePrivateTemporaryFile(temporaryFile, serializedPayload);
+        throwIfMutationAborted(signal);
         await rename(temporaryFile, this.#tokenFile);
+        published = true;
       } catch {
+        throwIfMutationAborted(signal);
         throw tokenWriteError();
       }
 
       this.#tokens = tokens;
-      await syncDirectory(this.#configDir);
+      // Rename is the authentication commit point: once the new file is visible,
+      // callers must not be told the mutation failed or a restart could accept a
+      // token that AuthManager classified as unaccepted. Directory durability is
+      // still attempted, but this recoverable cache does not block on or surface it.
+      scheduleBestEffortDirectorySync(this.#configDir);
     } finally {
-      await rm(temporaryFile, { force: true }).catch(() => undefined);
+      if (!published) {
+        await rm(temporaryFile, { force: true }).catch(() => undefined);
+      }
     }
   }
 
-  async #clearUnlocked(): Promise<void> {
+  async #clearUnlocked(signal?: AbortSignal): Promise<void> {
+    throwIfMutationAborted(signal);
     this.#validateSecretPaths();
     const directoryExists = await validateConfigDirectory(this.#configDir, {
       create: false,
       enforceMode: false,
     });
+    throwIfMutationAborted(signal);
     if (!directoryExists) {
       this.#tokens = undefined;
       return;
@@ -952,16 +1105,10 @@ export class TokenStore {
       }
     }
 
-    let synchronizationFailure: Error | undefined;
-    try {
-      await syncDirectory(this.#configDir);
-    } catch (error: unknown) {
-      synchronizationFailure = error instanceof Error ? error : directorySyncError();
-    }
     this.#tokens = undefined;
-    if (synchronizationFailure !== undefined) {
-      throw synchronizationFailure;
-    }
+    // Unlink is likewise the commit point; post-commit directory durability is
+    // best-effort so a visible clear is never reported as an unaccepted failure.
+    scheduleBestEffortDirectorySync(this.#configDir);
   }
 
   #temporaryFilePath(targetFile: string, kind: "key" | "token"): string {
