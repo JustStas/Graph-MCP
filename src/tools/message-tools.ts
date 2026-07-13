@@ -39,7 +39,7 @@ export function normalizeMentions(
     const mentionId =
       mention.mention_id !== null && mention.mention_id !== undefined
         ? mention.mention_id
-        : typeof rawId === "number"
+        : typeof rawId === "number" && Number.isInteger(rawId)
           ? rawId
           : index;
     const mentionText =

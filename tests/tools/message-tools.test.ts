@@ -220,6 +220,23 @@ describe("normalizeMentions", () => {
     }
   });
 
+  test.each([
+    { label: "fractional numbers", rawId: 1.5 },
+    { label: "NaN", rawId: Number.NaN },
+    { label: "positive infinity", rawId: Number.POSITIVE_INFINITY },
+    { label: "negative infinity", rawId: Number.NEGATIVE_INFINITY },
+  ])("falls back to the zero-based index for $label", ({ rawId }) => {
+    const result = normalizeMentions([
+      {
+        id: rawId,
+        name: "Jane Smith",
+        user_id: "user-1",
+      },
+    ]);
+
+    expect(result[0]?.id).toBe(0);
+  });
+
   test("throws the exact legacy validation message when the name is missing", () => {
     expect(() => normalizeMentions([{ user_id: "user-1" }])).toThrowError(INVALID_MENTION_MESSAGE);
   });
