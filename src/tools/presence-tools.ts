@@ -4,6 +4,12 @@ import { z } from "zod";
 import { successResponse } from "../responses.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
 
+const USER_ID_SCHEMA = z
+  .string()
+  .refine((value) => value !== "" && value !== "." && value !== "..", {
+    message: "user_id must not be empty, '.' or '..'.",
+  });
+
 export function registerPresenceTools(
   server: Pick<McpServer, "registerTool">,
   dependencies: ToolDependencies,
@@ -27,11 +33,12 @@ export function registerPresenceTools(
     {
       description: "Get another user's presence status.",
       inputSchema: {
-        user_id: z.string(),
+        user_id: USER_ID_SCHEMA,
       },
     },
     async ({ user_id }) => {
-      const result = await dependencies.graphClient.get(`/users/${user_id}/presence`);
+      const encodedUserId = encodeURIComponent(user_id);
+      const result = await dependencies.graphClient.get(`/users/${encodedUserId}/presence`);
       return successResponse(result);
     },
   );

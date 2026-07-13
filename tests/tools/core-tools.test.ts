@@ -102,8 +102,39 @@ const EXPECTED_TOOLS = [
   },
 ] as const;
 
+const INVALID_GRAPH_RESPONSE_RESULT = {
+  content: [
+    {
+      type: "text",
+      text: '{"error":"Graph API error: Invalid Microsoft Graph response."}',
+    },
+  ],
+} as const;
+
 function unknownThrow(value: unknown): never {
   throw value;
+}
+
+function countUnquotedOrOperators(search: string): number {
+  let count = 0;
+  let inQuotedValue = false;
+
+  for (let index = 0; index < search.length; index += 1) {
+    if (search[index] === '"') {
+      if (inQuotedValue && search[index + 1] === '"') {
+        index += 1;
+      } else {
+        inQuotedValue = !inQuotedValue;
+      }
+      continue;
+    }
+    if (!inQuotedValue && search.startsWith(" OR ", index)) {
+      count += 1;
+      index += 3;
+    }
+  }
+
+  return count;
 }
 
 function nextGraphResponse(responses: unknown[]): unknown {
@@ -325,6 +356,13 @@ describe("core tool registration", () => {
       user_id: "user-1",
     });
     expect(userPresenceSchema.safeParse({}).success).toBe(false);
+    for (const userId of ["", ".", ".."]) {
+      const result = userPresenceSchema.safeParse({ user_id: userId });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0]?.message).toBe("user_id must not be empty, '.' or '..'.");
+      }
+    }
 
     const setPresenceShape = schemaFor(harness, "graph_set_my_presence");
     expect(Object.keys(setPresenceShape)).toEqual([
@@ -681,6 +719,94 @@ describe("Graph-backed core tools", () => {
     ]);
   });
 
+  test.each([
+    {
+      query: 'Ada" OR "displayName:Bob',
+      expectedSearch:
+        '"displayName:Ada"" OR ""displayName:Bob" OR "mail:Ada"" OR ""displayName:Bob"',
+    },
+    {
+      query: "domain\\user",
+      expectedSearch: '"displayName:domain\\user" OR "mail:domain\\user"',
+    },
+    {
+      query: "Ada OR Bob",
+      expectedSearch: '"displayName:Ada OR Bob" OR "mail:Ada OR Bob"',
+    },
+  ])(
+    "keeps user search query $query inside two quoted KQL values",
+    async ({ query, expectedSearch }) => {
+      const harness = createToolHarness();
+      const { dependencies, graph } = createDependencies({}, [{ value: [] }]);
+      registerUserTools(harness.server, dependencies);
+
+      await harness.invoke("graph_search_users", { query });
+
+      expect(graph.calls).toEqual([
+        {
+          method: "GET",
+          path: "/users",
+          params: {
+            $search: expectedSearch,
+            $select: USER_PROFILE_FIELDS,
+            $top: "10",
+          },
+          headers: { ConsistencyLevel: "eventual" },
+        },
+      ]);
+      const params = graph.calls[0]?.params as Record<string, string> | undefined;
+      expect(countUnquotedOrOperators(params?.$search ?? "")).toBe(1);
+    },
+  );
+
+  test.each([
+    {
+      label: "null result",
+      response: null,
+    },
+    {
+      label: "text result",
+      response: "payload-secret-text-result",
+    },
+    {
+      label: "scalar result",
+      response: 42,
+    },
+    {
+      label: "array result",
+      response: [{ secret: "payload-secret-array-result" }],
+    },
+    {
+      label: "null value",
+      response: { value: null, secret: "payload-secret-null-value" },
+    },
+    {
+      label: "text value",
+      response: { value: "payload-secret-text-value" },
+    },
+    {
+      label: "scalar value",
+      response: { value: 42, secret: "payload-secret-scalar-value" },
+    },
+    {
+      label: "object value",
+      response: { value: { secret: "payload-secret-object-value" } },
+    },
+  ])("rejects malformed user search response: $label", async ({ response }) => {
+    const harness = createToolHarness();
+    const { dependencies } = createDependencies({}, [response]);
+    registerUserTools(harness.server, dependencies);
+
+    const result = await harness.invoke("graph_search_users", { query: "Ada" });
+
+    expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("payload-secret");
+    expect(serialized).not.toContain("TypeError");
+    expect(serialized).not.toContain("Cannot read");
+    expect(serialized).not.toContain("not iterable");
+  });
+
   test("gets the full current-user and selected-user presence results", async () => {
     const harness = createToolHarness();
     const { dependencies, graph } = createDependencies({}, [
@@ -712,6 +838,64 @@ describe("Graph-backed core tools", () => {
       { method: "GET", path: "/users/user-42/presence" },
     ]);
   });
+
+  test.each([
+    {
+      userId: "../me/messages#",
+      encodedUserId: "..%2Fme%2Fmessages%23",
+    },
+    {
+      userId: "domain\\user",
+      encodedUserId: "domain%5Cuser",
+    },
+    {
+      userId: "team/user",
+      encodedUserId: "team%2Fuser",
+    },
+    {
+      userId: "user#fragment",
+      encodedUserId: "user%23fragment",
+    },
+    {
+      userId: "ada.lovelace@example.com",
+      encodedUserId: "ada.lovelace%40example.com",
+    },
+  ])(
+    "keeps user_id $userId inside one encoded Graph path segment",
+    async ({ userId, encodedUserId }) => {
+      const harness = createToolHarness();
+      const { dependencies, graph } = createDependencies({}, [
+        { id: userId, availability: "Available", activity: "Available" },
+      ]);
+      registerPresenceTools(harness.server, dependencies);
+
+      await harness.invoke("graph_get_user_presence", { user_id: userId });
+
+      expect(graph.calls).toEqual([
+        {
+          method: "GET",
+          path: `/users/${encodedUserId}/presence`,
+        },
+      ]);
+      const path = graph.calls[0]?.path;
+      if (path === undefined) {
+        throw new Error("Expected a recorded Graph path.");
+      }
+      const resolved = new URL(path.replace(/^\/+/, ""), "https://graph.microsoft.com/v1.0/");
+      expect(resolved.href).toBe(
+        `https://graph.microsoft.com/v1.0/users/${encodedUserId}/presence`,
+      );
+      expect(resolved.hash).toBe("");
+      expect(resolved.pathname.split("/")).toEqual([
+        "",
+        "v1.0",
+        "users",
+        encodedUserId,
+        "presence",
+      ]);
+      expect(decodeURIComponent(resolved.pathname.split("/")[3] ?? "")).toBe(userId);
+    },
+  );
 
   test("sets presence with the exact body and public expiration_duration default", async () => {
     const harness = createToolHarness();
@@ -780,6 +964,7 @@ describe("Graph-backed core tools", () => {
                 hits: [
                   { resource: { id: "message-1", subject: "First" } },
                   { id: "fallback-hit", score: 0.8 },
+                  { resource: null },
                 ],
               },
               {
@@ -805,7 +990,7 @@ describe("Graph-backed core tools", () => {
       content: [
         {
           type: "text",
-          text: '{"data":[{"id":"message-1","subject":"First"},{"id":"fallback-hit","score":0.8},{"id":"message-2","subject":"Second"},{"id":"message-3","subject":"Third"}],"message":"success"}',
+          text: '{"data":[{"id":"message-1","subject":"First"},{"id":"fallback-hit","score":0.8},null,{"id":"message-2","subject":"Second"},{"id":"message-3","subject":"Third"}],"message":"success"}',
         },
       ],
     });
@@ -825,6 +1010,197 @@ describe("Graph-backed core tools", () => {
         },
       },
     ]);
+  });
+
+  test.each([{}, { value: [{}] }, { value: [{ hitsContainers: [{}] }] }])(
+    "treats missing optional message search collections as empty",
+    async (response) => {
+      const harness = createToolHarness();
+      const { dependencies } = createDependencies({}, [response]);
+      registerSearchTools(harness.server, dependencies);
+
+      await expect(
+        harness.invoke("graph_search_messages", { query: "missing collections" }),
+      ).resolves.toEqual({
+        content: [{ type: "text", text: '{"data":[],"message":"success"}' }],
+      });
+    },
+  );
+
+  test.each([
+    {
+      label: "null result",
+      response: null,
+    },
+    {
+      label: "text result",
+      response: "payload-secret-text-result",
+    },
+    {
+      label: "scalar result",
+      response: 42,
+    },
+    {
+      label: "array result",
+      response: [{ secret: "payload-secret-array-result" }],
+    },
+    {
+      label: "null value",
+      response: { value: null, secret: "payload-secret-null-value" },
+    },
+    {
+      label: "object value",
+      response: { value: { secret: "payload-secret-object-value" } },
+    },
+    {
+      label: "text value",
+      response: { value: "payload-secret-text-value" },
+    },
+    {
+      label: "scalar value",
+      response: { value: 42, secret: "payload-secret-scalar-value" },
+    },
+    {
+      label: "null response entry",
+      response: { value: [null] },
+    },
+    {
+      label: "text response entry",
+      response: { value: ["payload-secret-text-response"] },
+    },
+    {
+      label: "array response entry",
+      response: { value: [[{ secret: "payload-secret-array-response" }]] },
+    },
+    {
+      label: "scalar response entry",
+      response: { value: [42] },
+    },
+    {
+      label: "null hitsContainers",
+      response: {
+        value: [{ hitsContainers: null, secret: "payload-secret-null-containers" }],
+      },
+    },
+    {
+      label: "object hitsContainers",
+      response: {
+        value: [{ hitsContainers: { secret: "payload-secret-object-containers" } }],
+      },
+    },
+    {
+      label: "text hitsContainers",
+      response: {
+        value: [{ hitsContainers: "payload-secret-text-containers" }],
+      },
+    },
+    {
+      label: "scalar hitsContainers",
+      response: {
+        value: [{ hitsContainers: 42, secret: "payload-secret-scalar-containers" }],
+      },
+    },
+    {
+      label: "null container entry",
+      response: { value: [{ hitsContainers: [null] }] },
+    },
+    {
+      label: "text container entry",
+      response: {
+        value: [{ hitsContainers: ["payload-secret-text-container"] }],
+      },
+    },
+    {
+      label: "array container entry",
+      response: {
+        value: [{ hitsContainers: [[{ secret: "payload-secret-array-container" }]] }],
+      },
+    },
+    {
+      label: "scalar container entry",
+      response: {
+        value: [{ hitsContainers: [42] }],
+      },
+    },
+    {
+      label: "null hits",
+      response: {
+        value: [
+          {
+            hitsContainers: [{ hits: null, secret: "payload-secret-null-hits" }],
+          },
+        ],
+      },
+    },
+    {
+      label: "object hits",
+      response: {
+        value: [
+          {
+            hitsContainers: [{ hits: { secret: "payload-secret-object-hits" } }],
+          },
+        ],
+      },
+    },
+    {
+      label: "text hits",
+      response: {
+        value: [
+          {
+            hitsContainers: [{ hits: "payload-secret-text-hits" }],
+          },
+        ],
+      },
+    },
+    {
+      label: "scalar hits",
+      response: {
+        value: [
+          {
+            hitsContainers: [{ hits: 42, secret: "payload-secret-scalar-hits" }],
+          },
+        ],
+      },
+    },
+    {
+      label: "null hit entry",
+      response: { value: [{ hitsContainers: [{ hits: [null] }] }] },
+    },
+    {
+      label: "text hit entry",
+      response: {
+        value: [{ hitsContainers: [{ hits: ["payload-secret-text-hit"] }] }],
+      },
+    },
+    {
+      label: "array hit entry",
+      response: {
+        value: [
+          {
+            hitsContainers: [{ hits: [[{ secret: "payload-secret-array-hit" }]] }],
+          },
+        ],
+      },
+    },
+    {
+      label: "scalar hit entry",
+      response: {
+        value: [{ hitsContainers: [{ hits: [42] }] }],
+      },
+    },
+  ])("rejects malformed message search response: $label", async ({ response }) => {
+    const harness = createToolHarness();
+    const { dependencies } = createDependencies({}, [response]);
+    registerSearchTools(harness.server, dependencies);
+
+    const result = await harness.invoke("graph_search_messages", { query: "launch" });
+
+    expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("payload-secret");
+    expect(serialized).not.toContain("TypeError");
+    expect(serialized).not.toContain("Cannot read");
+    expect(serialized).not.toContain("not iterable");
   });
 
   test("converts a Graph-backed AuthenticationError through the authenticated wrapper", async () => {

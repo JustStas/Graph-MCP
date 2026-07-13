@@ -1,20 +1,35 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+import { GraphApiError } from "../errors.js";
 import { successResponse } from "../responses.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
 
-interface SearchHit {
-  readonly resource?: unknown;
-  readonly [key: string]: unknown;
+const INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
+
+function isNonArrayObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-interface SearchHitContainer {
-  readonly hits?: SearchHit[];
+function requireGraphObject(value: unknown): Record<string, unknown> {
+  if (!isNonArrayObject(value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
+  }
+  return value;
 }
 
-interface SearchResponse {
-  readonly hitsContainers?: SearchHitContainer[];
+function optionalGraphArray(
+  response: Readonly<Record<string, unknown>>,
+  property: string,
+): unknown[] {
+  if (!Object.hasOwn(response, property)) {
+    return [];
+  }
+  const value = response[property];
+  if (!Array.isArray(value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
+  }
+  return value;
 }
 
 export function registerSearchTools(
@@ -32,7 +47,7 @@ export function registerSearchTools(
       },
     },
     async ({ query, top }) => {
-      const result = (await dependencies.graphClient.post("/search/query", {
+      const result = await dependencies.graphClient.post("/search/query", {
         requests: [
           {
             entityTypes: ["chatMessage"],
@@ -41,13 +56,16 @@ export function registerSearchTools(
             size: Math.min(top, 25),
           },
         ],
-      })) as { readonly value?: SearchResponse[] };
+      });
       const hits: unknown[] = [];
 
-      for (const response of result.value ?? []) {
-        for (const container of response.hitsContainers ?? []) {
-          for (const hit of container.hits ?? []) {
-            hits.push("resource" in hit ? hit.resource : hit);
+      for (const responseValue of optionalGraphArray(requireGraphObject(result), "value")) {
+        const response = requireGraphObject(responseValue);
+        for (const containerValue of optionalGraphArray(response, "hitsContainers")) {
+          const container = requireGraphObject(containerValue);
+          for (const hitValue of optionalGraphArray(container, "hits")) {
+            const hit = requireGraphObject(hitValue);
+            hits.push(Object.hasOwn(hit, "resource") ? hit.resource : hit);
           }
         }
       }

@@ -1,9 +1,33 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+import { GraphApiError } from "../errors.js";
 import { successResponse } from "../responses.js";
 import { USER_PROFILE_FIELDS } from "../select-fields.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
+
+const INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
+
+function escapeKqlStringToken(value: string): string {
+  return value.replaceAll('"', '""');
+}
+
+function isNonArrayObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function userSearchValues(response: unknown): unknown[] {
+  if (!isNonArrayObject(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
+  }
+  if (!Object.hasOwn(response, "value")) {
+    return [];
+  }
+  if (!Array.isArray(response.value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
+  }
+  return response.value;
+}
 
 export function registerUserTools(
   server: Pick<McpServer, "registerTool">,
@@ -20,16 +44,17 @@ export function registerUserTools(
       },
     },
     async ({ query, top }) => {
-      const result = (await dependencies.graphClient.get(
+      const escapedQuery = escapeKqlStringToken(query);
+      const result = await dependencies.graphClient.get(
         "/users",
         {
-          $search: `"displayName:${query}" OR "mail:${query}"`,
+          $search: `"displayName:${escapedQuery}" OR "mail:${escapedQuery}"`,
           $select: USER_PROFILE_FIELDS,
           $top: String(Math.min(top, 25)),
         },
         { ConsistencyLevel: "eventual" },
-      )) as { readonly value?: unknown };
-      return successResponse(result.value ?? []);
+      );
+      return successResponse(userSearchValues(result));
     },
   );
 }
