@@ -1074,10 +1074,11 @@ describe("AuthManager storage mutation fencing", () => {
     }
   });
 
-  test("uses accepted credentials when a timed-out relogin mutates before never settling", async () => {
+  test("uses accepted credentials while and after a relogin store mutates before never settling", async () => {
     vi.useFakeTimers();
     try {
       const store = new MemoryTokenStore();
+      const reloginStoreStarted = deferred<void>();
       store.store
         .mockImplementationOnce((tokens) => {
           store.accessToken = tokens.access_token;
@@ -1091,6 +1092,7 @@ describe("AuthManager storage mutation fencing", () => {
           store.refreshToken = tokens.refresh_token;
           store.expired = false;
           store.actuallyExpired = false;
+          reloginStoreStarted.resolve();
           return new Promise<void>(() => undefined);
         });
       const runBrowserLogin = vi
@@ -1114,6 +1116,12 @@ describe("AuthManager storage mutation fencing", () => {
 
       await manager.login();
       const relogin = manager.login();
+
+      await reloginStoreStarted.promise;
+      expect(store.getAccessToken()).toBe("mutated-access");
+      await expect(manager.getValidAccessToken()).resolves.toBe("accepted-access");
+      expectStatus(manager, { state: "authenticated" });
+
       const reloginAssertion = expect(relogin).rejects.toMatchObject({
         name: "AuthenticationError",
         message: "Unable to store authentication tokens.",
@@ -1128,6 +1136,105 @@ describe("AuthManager storage mutation fencing", () => {
       await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
       await expect(manager.getValidAccessToken()).resolves.toBe("newer-access");
       expect(store.getRefreshToken()).toBe("newer-refresh");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("uses accepted credentials while a refresh store is still in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new MemoryTokenStore();
+      store.accessToken = "accepted-access";
+      store.refreshToken = "accepted-refresh";
+      store.expired = false;
+      store.actuallyExpired = false;
+      const refreshStoreStarted = deferred<void>();
+      store.store.mockImplementationOnce((tokens) => {
+        store.accessToken = tokens.access_token;
+        store.refreshToken = tokens.refresh_token;
+        store.expired = false;
+        store.actuallyExpired = false;
+        refreshStoreStarted.resolve();
+        return new Promise<void>(() => undefined);
+      });
+      const manager = new AuthManager(
+        settings,
+        store,
+        withStorageTimeout(
+          {
+            fetch: () =>
+              Promise.resolve(
+                response(200, {
+                  access_token: "unaccepted-refresh-access",
+                  refresh_token: "unaccepted-refresh-token",
+                }),
+              ),
+          },
+          10,
+        ),
+      );
+
+      const refresh = manager.refreshAccessToken();
+      await refreshStoreStarted.promise;
+
+      expect(store.getAccessToken()).toBe("unaccepted-refresh-access");
+      await expect(manager.getValidAccessToken()).resolves.toBe("accepted-access");
+      expectStatus(manager, { state: "authenticated" });
+
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(refresh).resolves.toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("keeps device login pending and uses accepted credentials while its store is in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new MemoryTokenStore();
+      store.accessToken = "accepted-access";
+      store.refreshToken = "accepted-refresh";
+      store.expired = false;
+      store.actuallyExpired = false;
+      const deviceStoreStarted = deferred<void>();
+      store.store.mockImplementationOnce((tokens) => {
+        store.accessToken = tokens.access_token;
+        store.refreshToken = tokens.refresh_token;
+        store.expired = false;
+        store.actuallyExpired = false;
+        deviceStoreStarted.resolve();
+        return new Promise<void>(() => undefined);
+      });
+      const startDeviceCodeLogin = vi.fn<DeviceCodeLoginStarter>((_settings, deviceStore) =>
+        Promise.resolve({
+          details: deviceDetails,
+          poll: () =>
+            deviceStore.store({
+              access_token: "unaccepted-device-access",
+              refresh_token: "unaccepted-device-refresh",
+            }),
+        }),
+      );
+      const manager = new AuthManager(
+        settings,
+        store,
+        withStorageTimeout({ startDeviceCodeLogin }, 10),
+      );
+
+      await expect(manager.login("device_code")).resolves.toEqual({
+        state: "pending",
+        method: "device_code",
+        ...deviceDetails,
+      });
+      await deviceStoreStarted.promise;
+
+      expect(store.getAccessToken()).toBe("unaccepted-device-access");
+      expectStatus(manager, { state: "pending", method: "device_code", ...deviceDetails });
+      await expect(manager.getValidAccessToken()).resolves.toBe("accepted-access");
+
+      await vi.advanceTimersByTimeAsync(100);
+      expectStatus(manager, { state: "authenticated" });
     } finally {
       vi.useRealTimers();
     }

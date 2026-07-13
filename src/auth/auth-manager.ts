@@ -1154,9 +1154,10 @@ export class AuthManager {
     }
     return (
       target !== undefined &&
-      [...this.#pendingLosingMutations.values()].some((mutation) =>
-        this.#mutationConflictsWithTarget(mutation, target),
-      )
+      (this.#activePrimaryStorageMutations > 0 ||
+        [...this.#pendingLosingMutations.values()].some((mutation) =>
+          this.#mutationConflictsWithTarget(mutation, target),
+        ))
     );
   }
 
