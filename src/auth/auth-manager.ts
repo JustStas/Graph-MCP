@@ -138,6 +138,10 @@ interface PendingLosingMutation {
   rawRejected: boolean;
 }
 
+interface PhysicalStorageSlot {
+  readonly occupied: true;
+}
+
 class InternalAuthenticationError extends AuthenticationError {}
 
 class StorageMutationCancelledError extends Error {
@@ -348,6 +352,7 @@ export class AuthManager {
   #desiredRevision = 0;
   #storageMutationSequence = 0;
   #activePrimaryStorageMutations = 0;
+  #physicalStorageSlot: PhysicalStorageSlot | undefined;
   readonly #pendingLosingMutations = new Map<number, PendingLosingMutation>();
   #reconciliationRequested = false;
   #reconciliationRunning = false;
@@ -395,6 +400,9 @@ export class AuthManager {
     if (this.#activeLogin !== undefined) {
       throw authenticationError(LOGIN_COLLISION_MESSAGE);
     }
+    if (this.#physicalStorageSlot !== undefined) {
+      throw authenticationError(STORE_FAILURE_MESSAGE);
+    }
 
     const previousRefresh = this.#activeRefresh;
     this.#authGeneration += 1;
@@ -432,6 +440,9 @@ export class AuthManager {
     }
     if (this.#activeRefresh !== undefined) {
       return this.#activeRefresh.settlement;
+    }
+    if (this.#physicalStorageSlot !== undefined) {
+      return Promise.resolve(false);
     }
 
     const storageIsFenced = this.#storageReadIsFenced();
@@ -777,14 +788,16 @@ export class AuthManager {
       capturedRefresh?.settlement.catch(() => false),
     ]);
 
-    try {
-      await this.#clearTokens(
-        [],
-        logoutGeneration,
-        () => this.#logoutInProgress && this.#authGeneration === logoutGeneration,
-      );
-    } catch {
-      throw authenticationError(LOGOUT_FAILURE_MESSAGE);
+    if (this.#physicalStorageSlot === undefined) {
+      try {
+        await this.#clearTokens(
+          [],
+          logoutGeneration,
+          () => this.#logoutInProgress && this.#authGeneration === logoutGeneration,
+        );
+      } catch {
+        throw authenticationError(LOGOUT_FAILURE_MESSAGE);
+      }
     }
     if (this.#activeLogin === capturedLogin) {
       this.#activeLogin = undefined;
@@ -799,6 +812,23 @@ export class AuthManager {
     return (
       this.#refreshOperationIsCurrent(active) && this.#currentRefreshToken() === active.refreshToken
     );
+  }
+
+  #acquirePhysicalStorageSlot(): PhysicalStorageSlot | undefined {
+    if (this.#physicalStorageSlot !== undefined) {
+      return undefined;
+    }
+    const slot: PhysicalStorageSlot = { occupied: true };
+    this.#physicalStorageSlot = slot;
+    return slot;
+  }
+
+  #releasePhysicalStorageSlot(slot: PhysicalStorageSlot): void {
+    if (this.#physicalStorageSlot !== slot) {
+      return;
+    }
+    this.#physicalStorageSlot = undefined;
+    this.#maybeStartReconciliation();
   }
 
   async #storeTokens(
@@ -842,7 +872,16 @@ export class AuthManager {
     generation: number,
     isCurrent: () => boolean,
   ): Promise<void> {
-    this.#materializeDesiredBaseline();
+    const physicalSlot = this.#acquirePhysicalStorageSlot();
+    if (physicalSlot === undefined) {
+      throw new StorageMutationCancelledError();
+    }
+    try {
+      this.#materializeDesiredBaseline();
+    } catch (error: unknown) {
+      this.#releasePhysicalStorageSlot(physicalSlot);
+      throw error;
+    }
     const record: PrimaryStorageMutation = {
       id: (this.#storageMutationSequence += 1),
       startRevision: this.#desiredAuthState?.revision ?? 0,
@@ -862,17 +901,20 @@ export class AuthManager {
           ? this.#tokenStore.store(tokens, { signal: managed.signal })
           : this.#tokenStore.clear({ signal: managed.signal });
     } catch (error: unknown) {
+      this.#releasePhysicalStorageSlot(physicalSlot);
       operation = Promise.reject(
         error instanceof Error ? error : new Error("Authentication storage failed."),
       );
     }
     const markRawFulfilled = () => {
       record.rawSettled = true;
+      this.#releasePhysicalStorageSlot(physicalSlot);
       this.#reportLosingMutation(record);
     };
     const markRawRejected = () => {
       record.rawSettled = true;
       record.rawRejected = true;
+      this.#releasePhysicalStorageSlot(physicalSlot);
       this.#reportLosingMutation(record);
     };
     void operation.then(markRawFulfilled, markRawRejected);
@@ -1002,6 +1044,7 @@ export class AuthManager {
     if (
       this.#reconciliationRunning ||
       !this.#reconciliationRequested ||
+      this.#physicalStorageSlot !== undefined ||
       this.#activePrimaryStorageMutations > 0 ||
       this.#activeLogin !== undefined ||
       this.#activeRefresh !== undefined ||
@@ -1027,6 +1070,7 @@ export class AuthManager {
   async #runReconciliationLoop(): Promise<void> {
     while (
       this.#reconciliationRequested &&
+      this.#physicalStorageSlot === undefined &&
       this.#activePrimaryStorageMutations === 0 &&
       this.#activeLogin === undefined &&
       this.#activeRefresh === undefined &&
@@ -1054,6 +1098,11 @@ export class AuthManager {
     target: DesiredAuthState,
     eligibleIds: readonly number[],
   ): Promise<void> {
+    const physicalSlot = this.#acquirePhysicalStorageSlot();
+    if (physicalSlot === undefined) {
+      this.#reconciliationRequested = true;
+      return;
+    }
     const managed = createManagedStorageAbort([], this.#storageTimeoutMs);
     const correctionId = (this.#storageMutationSequence += 1);
     let correctionMarkerRegistered = false;
@@ -1069,6 +1118,7 @@ export class AuthManager {
         operation = this.#tokenStore.clear({ signal: managed.signal });
       }
     } catch (error: unknown) {
+      this.#releasePhysicalStorageSlot(physicalSlot);
       operation = Promise.reject(
         error instanceof Error ? error : new Error("Authentication storage failed."),
       );
@@ -1096,6 +1146,7 @@ export class AuthManager {
         });
         correctionMarkerRegistered = true;
         this.#requestReconciliation();
+        this.#releasePhysicalStorageSlot(physicalSlot);
         return;
       }
       for (const id of eligibleIds) {
@@ -1105,17 +1156,18 @@ export class AuthManager {
         this.#pendingLosingMutations.delete(correctionId);
       }
       this.#requestReconciliation();
+      this.#releasePhysicalStorageSlot(physicalSlot);
     };
     const observeRejection = () => {
       rawSettled = true;
-      if (!correctionMarkerRegistered) {
-        return;
+      if (correctionMarkerRegistered) {
+        const marker = this.#pendingLosingMutations.get(correctionId);
+        if (marker !== undefined) {
+          marker.rawSettled = true;
+          marker.rawRejected = true;
+        }
       }
-      const marker = this.#pendingLosingMutations.get(correctionId);
-      if (marker !== undefined) {
-        marker.rawSettled = true;
-        marker.rawRejected = true;
-      }
+      this.#releasePhysicalStorageSlot(physicalSlot);
     };
     void operation.then(observeFulfillment, observeRejection);
     try {
@@ -1154,7 +1206,8 @@ export class AuthManager {
     }
     return (
       target !== undefined &&
-      (this.#activePrimaryStorageMutations > 0 ||
+      (this.#physicalStorageSlot !== undefined ||
+        this.#activePrimaryStorageMutations > 0 ||
         [...this.#pendingLosingMutations.values()].some((mutation) =>
           this.#mutationConflictsWithTarget(mutation, target),
         ))

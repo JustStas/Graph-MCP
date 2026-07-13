@@ -261,7 +261,7 @@ describe("AuthManager login", () => {
     expectStatus(manager, { state: "authenticated" });
   });
 
-  test("bounds browser token storage, aborts its signal, and permits a later login", async () => {
+  test("bounds browser token storage, aborts its signal, and quarantines later login", async () => {
     vi.useFakeTimers();
     try {
       const store = new MemoryTokenStore();
@@ -295,9 +295,11 @@ describe("AuthManager login", () => {
       await firstLoginAssertion;
       expect(storeSignal?.aborted).toBe(true);
 
-      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
-      expect(store.getAccessToken()).toBe("browser-access");
-      expect(store.getRefreshToken()).toBe("browser-refresh");
+      await expect(manager.login()).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+      expect(store.store).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -839,7 +841,7 @@ describe("AuthManager refresh and access tokens", () => {
     },
   );
 
-  test("bounds refresh token storage and does not leave future authentication wedged", async () => {
+  test("bounds refresh token storage and quarantines later authentication writes", async () => {
     vi.useFakeTimers();
     try {
       const store = new MemoryTokenStore();
@@ -879,9 +881,11 @@ describe("AuthManager refresh and access tokens", () => {
 
       await expect(refresh).resolves.toBe(false);
       expect(storeSignal?.aborted).toBe(true);
-      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
-      expect(store.getAccessToken()).toBe("browser-access");
-      expect(store.getRefreshToken()).toBe("browser-refresh");
+      await expect(manager.login()).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+      expect(store.store).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1133,9 +1137,12 @@ describe("AuthManager storage mutation fencing", () => {
       await expect(manager.getValidAccessToken()).resolves.toBe("accepted-access");
       expectStatus(manager, { state: "authenticated" });
 
-      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
-      await expect(manager.getValidAccessToken()).resolves.toBe("newer-access");
-      expect(store.getRefreshToken()).toBe("newer-refresh");
+      await expect(manager.login()).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+      expect(runBrowserLogin).toHaveBeenCalledTimes(2);
+      expect(store.store).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
@@ -1240,6 +1247,222 @@ describe("AuthManager storage mutation fencing", () => {
     }
   });
 
+  test("bounds repeated persistence attempts while one raw store remains unresolved", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new MemoryTokenStore();
+      store.accessToken = "accepted-access";
+      store.refreshToken = "accepted-refresh";
+      store.expired = false;
+      store.actuallyExpired = false;
+      const rawStore = deferred<void>();
+      const rawObserver = vi.spyOn(rawStore.promise, "then");
+      store.store.mockImplementation((tokens) => {
+        store.accessToken = tokens.access_token;
+        store.refreshToken = tokens.refresh_token;
+        store.expired = false;
+        store.actuallyExpired = false;
+        return rawStore.promise;
+      });
+      const runBrowserLogin = vi.fn<BrowserLoginRunner>(() =>
+        Promise.resolve({
+          access_token: "unaccepted-access",
+          refresh_token: "unaccepted-refresh",
+        }),
+      );
+      const manager = new AuthManager(settings, store, withStorageTimeout({ runBrowserLogin }, 10));
+
+      const firstLogin = manager.login();
+      const firstAssertion = expect(firstLogin).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await firstAssertion;
+      const retainedObserverCount = rawObserver.mock.calls.length;
+      expect(retainedObserverCount).toBeGreaterThan(0);
+
+      for (let attempt = 0; attempt < 250; attempt += 1) {
+        const login = manager.login();
+        const assertion = expect(login).rejects.toMatchObject({
+          name: "AuthenticationError",
+          message: "Unable to store authentication tokens.",
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        await assertion;
+      }
+
+      expect(store.store).toHaveBeenCalledTimes(1);
+      expect(runBrowserLogin).toHaveBeenCalledTimes(1);
+      expect(rawObserver).toHaveBeenCalledTimes(retainedObserverCount);
+      await expect(manager.getValidAccessToken()).resolves.toBe("accepted-access");
+
+      rawStore.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("releases the physical slot when store throws before returning a raw promise", async () => {
+    const store = new MemoryTokenStore();
+    store.accessToken = "accepted-access";
+    store.refreshToken = "accepted-refresh";
+    store.expired = false;
+    store.actuallyExpired = false;
+    store.store.mockImplementationOnce(() => {
+      throw new Error("synchronous storage failure");
+    });
+    const runBrowserLogin = vi
+      .fn<BrowserLoginRunner>()
+      .mockResolvedValueOnce({
+        access_token: "rejected-access",
+        refresh_token: "rejected-refresh",
+      })
+      .mockResolvedValueOnce({
+        access_token: "recovered-access",
+        refresh_token: "recovered-refresh",
+      });
+    const manager = new AuthManager(settings, store, { runBrowserLogin });
+
+    await expect(manager.login()).rejects.toMatchObject({
+      name: "AuthenticationError",
+      message: "Unable to store authentication tokens.",
+    });
+    await flushAsync();
+
+    await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
+    await expect(manager.getValidAccessToken()).resolves.toBe("recovered-access");
+    expect(store.store).toHaveBeenCalledTimes(2);
+  });
+
+  test("fails refresh and device login promptly while storage is quarantined", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new MemoryTokenStore();
+      store.accessToken = "accepted-access";
+      store.refreshToken = "accepted-refresh";
+      store.expired = false;
+      store.actuallyExpired = false;
+      store.store.mockImplementation((tokens) => {
+        store.accessToken = tokens.access_token;
+        store.refreshToken = tokens.refresh_token;
+        store.expired = false;
+        store.actuallyExpired = false;
+        return new Promise<void>(() => undefined);
+      });
+      const fetch = vi.fn<OAuthFetch>(() =>
+        Promise.resolve(
+          response(200, {
+            access_token: "refresh-access",
+            refresh_token: "refresh-token",
+          }),
+        ),
+      );
+      const startDeviceCodeLogin = vi.fn<DeviceCodeLoginStarter>((_settings, deviceStore) =>
+        Promise.resolve({
+          details: deviceDetails,
+          poll: () =>
+            deviceStore.store({
+              access_token: "device-access",
+              refresh_token: "device-refresh",
+            }),
+        }),
+      );
+      const manager = new AuthManager(
+        settings,
+        store,
+        withStorageTimeout(
+          {
+            fetch,
+            runBrowserLogin: () =>
+              Promise.resolve({
+                access_token: "quarantined-access",
+                refresh_token: "quarantined-refresh",
+              }),
+            startDeviceCodeLogin,
+          },
+          10,
+        ),
+      );
+
+      const firstLogin = manager.login();
+      const firstAssertion = expect(firstLogin).rejects.toBeInstanceOf(AuthenticationError);
+      await vi.advanceTimersByTimeAsync(100);
+      await firstAssertion;
+
+      const refresh = manager.refreshAccessToken();
+      const refreshAssertion = expect(refresh).resolves.toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+      await refreshAssertion;
+      await expect(manager.login("device_code")).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+
+      expect(fetch).not.toHaveBeenCalled();
+      expect(startDeviceCodeLogin).not.toHaveBeenCalled();
+      expect(store.store).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("logs out logically during quarantine and clears once after raw settlement", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new MemoryTokenStore();
+      store.accessToken = "accepted-access";
+      store.refreshToken = "accepted-refresh";
+      store.expired = false;
+      store.actuallyExpired = false;
+      const rawStore = deferred<void>();
+      store.store.mockImplementationOnce((tokens) => {
+        store.accessToken = tokens.access_token;
+        store.refreshToken = tokens.refresh_token;
+        store.expired = false;
+        store.actuallyExpired = false;
+        return rawStore.promise;
+      });
+      const runBrowserLogin = vi
+        .fn<BrowserLoginRunner>()
+        .mockResolvedValueOnce({
+          access_token: "unaccepted-access",
+          refresh_token: "unaccepted-refresh",
+        })
+        .mockResolvedValueOnce({
+          access_token: "recovered-access",
+          refresh_token: "recovered-refresh",
+        });
+      const manager = new AuthManager(settings, store, withStorageTimeout({ runBrowserLogin }, 10));
+
+      const login = manager.login();
+      const loginAssertion = expect(login).rejects.toBeInstanceOf(AuthenticationError);
+      await vi.advanceTimersByTimeAsync(100);
+      await loginAssertion;
+
+      await expect(manager.logout()).resolves.toBeUndefined();
+      expect(store.clear).not.toHaveBeenCalled();
+      expectStatus(manager, { state: "unauthenticated" });
+      await expect(manager.getValidAccessToken()).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: loginRequiredMessage,
+      });
+
+      rawStore.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.clear).toHaveBeenCalledTimes(1);
+      expect(store.getAccessToken()).toBeUndefined();
+      expect(store.getRefreshToken()).toBeUndefined();
+
+      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
+      await expect(manager.getValidAccessToken()).resolves.toBe("recovered-access");
+      expect(store.store).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("clears a late stale browser store that settles after logout", async () => {
     const store = new MemoryTokenStore();
     const storeStarted = deferred<void>();
@@ -1255,23 +1478,15 @@ describe("AuthManager storage mutation fencing", () => {
         store.actuallyExpired = false;
       });
     });
-    store.clear
-      .mockImplementationOnce(() => {
+    store.clear.mockImplementationOnce(() => {
+      correctionStarted.resolve();
+      return correction.promise.then(() => {
         store.accessToken = undefined;
         store.refreshToken = undefined;
         store.expired = true;
         store.actuallyExpired = true;
-        return Promise.resolve();
-      })
-      .mockImplementationOnce(() => {
-        correctionStarted.resolve();
-        return correction.promise.then(() => {
-          store.accessToken = undefined;
-          store.refreshToken = undefined;
-          store.expired = true;
-          store.actuallyExpired = true;
-        });
       });
+    });
     const manager = new AuthManager(settings, store, {
       runBrowserLogin: () =>
         Promise.resolve({
@@ -1289,7 +1504,7 @@ describe("AuthManager storage mutation fencing", () => {
 
     await expect(settlesPromptly(manager.logout())).resolves.toBeUndefined();
     await loginAssertion;
-    expect(store.clear).toHaveBeenCalledTimes(1);
+    expect(store.clear).not.toHaveBeenCalled();
     expectStatus(manager, { state: "unauthenticated" });
 
     lateStore.resolve();
@@ -1305,13 +1520,13 @@ describe("AuthManager storage mutation fencing", () => {
     correction.resolve();
     await flushAsync();
 
-    expect(store.clear).toHaveBeenCalledTimes(2);
+    expect(store.clear).toHaveBeenCalledTimes(1);
     expect(store.getAccessToken()).toBeUndefined();
     expect(store.getRefreshToken()).toBeUndefined();
     expectStatus(manager, { state: "unauthenticated" });
   });
 
-  test("restores the latest accepted login after an older timed-out store settles", async () => {
+  test("allows the latest login only after an older timed-out store is corrected", async () => {
     vi.useFakeTimers();
     try {
       const store = new MemoryTokenStore();
@@ -1344,21 +1559,29 @@ describe("AuthManager storage mutation fencing", () => {
       await vi.advanceTimersByTimeAsync(100);
       await staleAssertion;
 
-      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
-      expect(store.getAccessToken()).toBe("latest-access");
-      expect(store.getRefreshToken()).toBe("latest-refresh");
+      await expect(settlesPromptly(manager.login())).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+      expect(runBrowserLogin).toHaveBeenCalledTimes(1);
+      expect(store.store).toHaveBeenCalledTimes(1);
 
       lateStore.resolve();
       await vi.advanceTimersByTimeAsync(0);
 
+      expect(store.clear).toHaveBeenCalledTimes(1);
+      expect(store.getAccessToken()).toBeUndefined();
+      expect(store.getRefreshToken()).toBeUndefined();
+
+      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
       expect(store.getAccessToken()).toBe("latest-access");
       expect(store.getRefreshToken()).toBe("latest-refresh");
       expect(store.store).toHaveBeenCalledTimes(2);
-      expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(1);
+      expect(store.storeTokenSnapshot).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1_000);
       expect(store.store).toHaveBeenCalledTimes(2);
-      expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(1);
+      expect(store.clear).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1482,6 +1705,7 @@ describe("AuthManager storage mutation fencing", () => {
       expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(1);
 
       expectStatus(manager, { state: "authenticated" });
+      expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(2);
       await retryStarted.promise;
       await expect(manager.getValidAccessToken()).resolves.toBe("accepted-access");
 
@@ -1498,23 +1722,23 @@ describe("AuthManager storage mutation fencing", () => {
     }
   });
 
-  test("tracks a timed-out correction until its late rejection is repaired", async () => {
+  test("quarantines a timed-out correction until settlement then repairs the latest target", async () => {
     vi.useFakeTimers();
     try {
       const store = new MemoryTokenStore();
       const lateRelogin = deferred<void>();
       const firstCorrectionStarted = deferred<void>();
-      let rejectFirstCorrection: (() => void) | undefined;
+      let settleFirstCorrection: (() => void) | undefined;
       store.storeTokenSnapshot.mockImplementationOnce(
         (snapshot: Readonly<StoredTokens>) =>
-          new Promise<void>((_resolve, reject) => {
+          new Promise<void>((resolve) => {
             firstCorrectionStarted.resolve();
-            rejectFirstCorrection = () => {
+            settleFirstCorrection = () => {
               store.accessToken = snapshot.accessToken;
               store.refreshToken = snapshot.refreshToken;
               store.actuallyExpired = Date.now() >= snapshot.expiresAt;
               store.expired = store.actuallyExpired;
-              reject(new Error("late corrective durability failure"));
+              resolve();
             };
           }),
       );
@@ -1559,17 +1783,95 @@ describe("AuthManager storage mutation fencing", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(1);
 
-      await manager.login();
-      expect(store.getAccessToken()).toBe("newer-access");
+      await expect(manager.login()).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+      expect(runBrowserLogin).toHaveBeenCalledTimes(2);
+      await expect(manager.logout()).resolves.toBeUndefined();
+      expect(store.clear).not.toHaveBeenCalled();
+      expectStatus(manager, { state: "unauthenticated" });
 
-      rejectFirstCorrection?.();
+      settleFirstCorrection?.();
       await vi.advanceTimersByTimeAsync(0);
+      expect(store.clear).toHaveBeenCalledTimes(1);
+      expect(store.getAccessToken()).toBeUndefined();
+      expect(store.getRefreshToken()).toBeUndefined();
+
+      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
       await expect(manager.getValidAccessToken()).resolves.toBe("newer-access");
-      await vi.advanceTimersByTimeAsync(0);
+      expect(runBrowserLogin).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
+  test("keeps a timed-out rejected correction single-flight until a later read retries it", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new MemoryTokenStore();
+      const lateRelogin = deferred<void>();
+      const correctionStarted = deferred<void>();
+      const correctionRaw = deferred<void>();
+      let correctionSnapshot: Readonly<StoredTokens> | undefined;
+      store.storeTokenSnapshot.mockImplementationOnce((snapshot) => {
+        correctionSnapshot = snapshot;
+        correctionStarted.resolve();
+        return correctionRaw.promise;
+      });
+      const runBrowserLogin = vi
+        .fn<BrowserLoginRunner>()
+        .mockResolvedValueOnce({
+          access_token: "accepted-access",
+          refresh_token: "accepted-refresh",
+        })
+        .mockResolvedValueOnce({
+          access_token: "stale-access",
+          refresh_token: "stale-refresh",
+        });
+      const manager = new AuthManager(settings, store, withStorageTimeout({ runBrowserLogin }, 10));
+
+      await manager.login();
+      store.store.mockImplementationOnce((tokens) =>
+        lateRelogin.promise.then(() => {
+          store.accessToken = tokens.access_token;
+          store.refreshToken = tokens.refresh_token;
+          store.expired = false;
+          store.actuallyExpired = false;
+        }),
+      );
+      const relogin = manager.login();
+      const reloginAssertion = expect(relogin).rejects.toBeInstanceOf(AuthenticationError);
+      await vi.advanceTimersByTimeAsync(100);
+      await reloginAssertion;
+
+      lateRelogin.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await correctionStarted.promise;
+      await vi.advanceTimersByTimeAsync(100);
+
+      for (let read = 0; read < 50; read += 1) {
+        expectStatus(manager, { state: "authenticated" });
+        await expect(manager.getValidAccessToken()).resolves.toBe("accepted-access");
+      }
+      expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(1);
+
+      if (correctionSnapshot !== undefined) {
+        store.accessToken = correctionSnapshot.accessToken;
+        store.refreshToken = correctionSnapshot.refreshToken;
+        store.actuallyExpired = Date.now() >= correctionSnapshot.expiresAt;
+        store.expired = store.actuallyExpired;
+      }
+      correctionRaw.reject(new Error("late corrective durability failure"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(1);
+
+      await expect(manager.getValidAccessToken()).resolves.toBe("accepted-access");
+      await vi.advanceTimersByTimeAsync(0);
       expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(2);
-      expect(store.getAccessToken()).toBe("newer-access");
-      expect(store.getRefreshToken()).toBe("newer-refresh");
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
@@ -1618,7 +1920,7 @@ describe("AuthManager storage mutation fencing", () => {
     }
   });
 
-  test("restores the latest accepted login after a timed-out clear settles", async () => {
+  test("allows the latest login only after a timed-out clear settles", async () => {
     vi.useFakeTimers();
     try {
       const store = new MemoryTokenStore();
@@ -1658,13 +1960,19 @@ describe("AuthManager storage mutation fencing", () => {
       await vi.advanceTimersByTimeAsync(100);
       await logoutAssertion;
 
-      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
-      expect(store.getAccessToken()).toBe("latest-access");
-      expect(store.getRefreshToken()).toBe("latest-refresh");
+      await expect(settlesPromptly(manager.login())).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+      expect(store.store).not.toHaveBeenCalled();
 
       lateClear.resolve();
       await vi.advanceTimersByTimeAsync(0);
 
+      expect(store.getAccessToken()).toBeUndefined();
+      expect(store.getRefreshToken()).toBeUndefined();
+
+      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
       expect(store.getAccessToken()).toBe("latest-access");
       expect(store.getRefreshToken()).toBe("latest-refresh");
       expect(store.store).toHaveBeenCalledTimes(1);
@@ -1680,7 +1988,7 @@ describe("AuthManager storage mutation fencing", () => {
     }
   });
 
-  test("accepts refreshed desired credentials when an older clear wins the raw-store race", async () => {
+  test("accepts refreshed credentials after a quarantined clear settles", async () => {
     vi.useFakeTimers();
     try {
       const store = new MemoryTokenStore();
@@ -1726,6 +2034,14 @@ describe("AuthManager storage mutation fencing", () => {
       });
       await vi.advanceTimersByTimeAsync(100);
       await logoutAssertion;
+
+      await expect(settlesPromptly(manager.login())).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+
+      lateClear.resolve();
+      await vi.advanceTimersByTimeAsync(0);
       await manager.login();
 
       store.store.mockImplementationOnce((tokens) => {
@@ -1733,7 +2049,6 @@ describe("AuthManager storage mutation fencing", () => {
         store.refreshToken = tokens.refresh_token;
         store.expired = false;
         store.actuallyExpired = false;
-        lateClear.resolve();
         return Promise.resolve();
       });
 
@@ -1747,7 +2062,7 @@ describe("AuthManager storage mutation fencing", () => {
     }
   });
 
-  test("reconciles an older background clear that settles during a newer store", async () => {
+  test("blocks a newer store until an older stale write is cleared", async () => {
     const store = new MemoryTokenStore();
     const staleStoreStarted = deferred<void>();
     const lateStaleStore = deferred<void>();
@@ -1773,23 +2088,15 @@ describe("AuthManager storage mutation fencing", () => {
         latestStoreStarted.resolve();
         return latestStoreCompletion.promise;
       });
-    store.clear
-      .mockImplementationOnce(() => {
+    store.clear.mockImplementationOnce(() => {
+      reconciliationClearStarted.resolve();
+      return reconciliationClear.promise.then(() => {
         store.accessToken = undefined;
         store.refreshToken = undefined;
         store.expired = true;
         store.actuallyExpired = true;
-        return Promise.resolve();
-      })
-      .mockImplementationOnce(() => {
-        reconciliationClearStarted.resolve();
-        return reconciliationClear.promise.then(() => {
-          store.accessToken = undefined;
-          store.refreshToken = undefined;
-          store.expired = true;
-          store.actuallyExpired = true;
-        });
       });
+    });
     const runBrowserLogin = vi
       .fn<BrowserLoginRunner>()
       .mockResolvedValueOnce({
@@ -1810,62 +2117,60 @@ describe("AuthManager storage mutation fencing", () => {
     await staleStoreStarted.promise;
     await manager.logout();
     await staleAssertion;
+    expect(store.clear).not.toHaveBeenCalled();
 
     lateStaleStore.resolve();
     await reconciliationClearStarted.promise;
 
-    const latestLogin = manager.login();
-    await latestStoreStarted.promise;
+    await expect(settlesPromptly(manager.login())).rejects.toMatchObject({
+      name: "AuthenticationError",
+      message: "Unable to store authentication tokens.",
+    });
+    expect(runBrowserLogin).toHaveBeenCalledTimes(1);
+
     reconciliationClear.resolve();
     await flushAsync();
+
+    const latestLogin = manager.login();
+    await latestStoreStarted.promise;
     latestStoreCompletion.resolve();
     await latestLogin;
-    await flushAsync();
-    await flushAsync();
 
     expect(store.getAccessToken()).toBe("latest-access");
     expect(store.getRefreshToken()).toBe("latest-refresh");
     expect(store.store).toHaveBeenCalledTimes(2);
-    expect(store.storeTokenSnapshot).toHaveBeenCalledTimes(1);
-    expect(store.clear).toHaveBeenCalledTimes(2);
+    expect(store.storeTokenSnapshot).not.toHaveBeenCalled();
+    expect(store.clear).toHaveBeenCalledTimes(1);
   });
 
   test("logout remains bounded while an earlier reconciliation continues in the background", async () => {
     vi.useFakeTimers();
     try {
       const store = new MemoryTokenStore();
+      store.accessToken = "accepted-access";
+      store.refreshToken = "accepted-refresh";
+      store.expired = false;
+      store.actuallyExpired = false;
       const lateStore = deferred<void>();
       const reconciliationStarted = deferred<void>();
-      store.store
-        .mockImplementationOnce((tokens) =>
-          lateStore.promise.then(() => {
-            store.accessToken = tokens.access_token;
-            store.refreshToken = tokens.refresh_token;
-            store.expired = false;
-            store.actuallyExpired = false;
-          }),
-        )
-        .mockImplementationOnce((tokens) => {
+      store.store.mockImplementationOnce((tokens) =>
+        lateStore.promise.then(() => {
           store.accessToken = tokens.access_token;
           store.refreshToken = tokens.refresh_token;
           store.expired = false;
           store.actuallyExpired = false;
-          return Promise.resolve();
-        });
+        }),
+      );
       store.storeTokenSnapshot.mockImplementationOnce(() => {
         reconciliationStarted.resolve();
         return new Promise<void>(() => undefined);
       });
-      const runBrowserLogin = vi
-        .fn<BrowserLoginRunner>()
-        .mockResolvedValueOnce({
+      const runBrowserLogin = vi.fn<BrowserLoginRunner>(() =>
+        Promise.resolve({
           access_token: "stale-access",
           refresh_token: "stale-refresh",
-        })
-        .mockResolvedValueOnce({
-          access_token: "latest-access",
-          refresh_token: "latest-refresh",
-        });
+        }),
+      );
       const manager = new AuthManager(settings, store, withStorageTimeout({ runBrowserLogin }, 10));
 
       const staleLogin = manager.login();
@@ -1875,14 +2180,13 @@ describe("AuthManager storage mutation fencing", () => {
       });
       await vi.advanceTimersByTimeAsync(100);
       await staleAssertion;
-      await manager.login();
 
       lateStore.resolve();
       await vi.advanceTimersByTimeAsync(0);
       await reconciliationStarted.promise;
 
       await expect(settlesPromptly(manager.logout())).resolves.toBeUndefined();
-      expect(store.clear).toHaveBeenCalledTimes(1);
+      expect(store.clear).not.toHaveBeenCalled();
       expectStatus(manager, { state: "unauthenticated" });
     } finally {
       vi.useRealTimers();
@@ -2009,7 +2313,7 @@ describe("AuthManager logout", () => {
     await finalLogout;
   });
 
-  test("bounds an ignored clear, aborts its signal, and releases the logout gate", async () => {
+  test("bounds an ignored clear, aborts its signal, and quarantines later writes", async () => {
     vi.useFakeTimers();
     try {
       const store = new MemoryTokenStore();
@@ -2046,9 +2350,12 @@ describe("AuthManager logout", () => {
 
       await logoutAssertion;
       expect(clearSignal?.aborted).toBe(true);
-      await expect(manager.login()).resolves.toEqual({ state: "authenticated" });
-      expect(store.getAccessToken()).toBe("new-access");
-      expect(store.getRefreshToken()).toBe("new-refresh");
+      await expect(settlesPromptly(manager.login())).rejects.toMatchObject({
+        name: "AuthenticationError",
+        message: "Unable to store authentication tokens.",
+      });
+      expect(store.store).not.toHaveBeenCalled();
+      expectStatus(manager, { state: "unauthenticated" });
     } finally {
       vi.useRealTimers();
     }
