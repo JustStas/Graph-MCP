@@ -243,9 +243,69 @@ describe("GraphClient", () => {
 
     const init = harness.fetch.mock.calls[0]?.[1];
     const headers = new Headers(init?.headers);
-    expect(init?.body).toBe(bytes);
+    expect(init?.body).toBeInstanceOf(Uint8Array);
+    if (!(init?.body instanceof Uint8Array)) {
+      throw new Error("Expected a Uint8Array request body");
+    }
+    expect(Array.from(init.body)).toEqual([0, 1, 2, 255]);
     expect(init?.body).not.toBe('{"ignored":true}');
     expect(headers.has("Content-Type")).toBe(false);
+  });
+
+  test("presents SharedArrayBuffer upload bytes to native Request as raw bytes", async () => {
+    const harness = createHarness();
+    const sharedBuffer = new SharedArrayBuffer(4);
+    const source = new Uint8Array(sharedBuffer);
+    source.set([1, 2, 3, 4]);
+    let bodyUsesArrayBuffer = false;
+    let nativeRequestBytes: number[] = [];
+    harness.fetch.mockImplementation(async (input, init) => {
+      const body = init?.body;
+      if (!(body instanceof Uint8Array)) {
+        throw new Error("Expected a Uint8Array request body");
+      }
+      bodyUsesArrayBuffer = body.buffer instanceof ArrayBuffer;
+      const request = new Request(input, init);
+      nativeRequestBytes = Array.from(new Uint8Array(await request.arrayBuffer()));
+      return jsonResponse({ uploaded: true });
+    });
+
+    await expect(harness.client.put("/drive/root/content", source)).resolves.toEqual({
+      uploaded: true,
+    });
+
+    expect(source.buffer).toBeInstanceOf(SharedArrayBuffer);
+    expect(bodyUsesArrayBuffer).toBe(true);
+    expect(nativeRequestBytes).toEqual([1, 2, 3, 4]);
+  });
+
+  test("reuses one upload byte snapshot across a 429 retry", async () => {
+    const harness = createHarness();
+    const source = new Uint8Array([1, 2, 3, 4]);
+    const nativeRequestBodies: number[][] = [];
+    let fetchAttempt = 0;
+    harness.fetch.mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      nativeRequestBodies.push(Array.from(new Uint8Array(await request.arrayBuffer())));
+      fetchAttempt += 1;
+      return fetchAttempt === 1
+        ? textResponse("slow down", 429, "text/plain", { "Retry-After": "1" })
+        : jsonResponse({ uploaded: true });
+    });
+    harness.sleep.mockImplementation(() => {
+      source.set([9, 9, 9, 9]);
+      return Promise.resolve();
+    });
+
+    await expect(harness.client.put("/drive/root/content", source)).resolves.toEqual({
+      uploaded: true,
+    });
+
+    expect(Array.from(source)).toEqual([9, 9, 9, 9]);
+    expect(nativeRequestBodies).toEqual([
+      [1, 2, 3, 4],
+      [1, 2, 3, 4],
+    ]);
   });
 
   test("restricts PUT binary input to replayable bytes", () => {

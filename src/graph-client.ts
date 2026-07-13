@@ -186,7 +186,9 @@ export class GraphClient {
 
   #requestBody(jsonBody: unknown, binaryBody?: Uint8Array): BodyInit | undefined {
     if (binaryBody !== undefined) {
-      return binaryBody as BodyInit;
+      const snapshot = new Uint8Array(binaryBody.byteLength);
+      snapshot.set(binaryBody);
+      return snapshot;
     }
     if (jsonBody === undefined) {
       return undefined;
