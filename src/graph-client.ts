@@ -3,6 +3,9 @@ import { AuthenticationError, GraphApiError, GraphMcpError } from "./errors.js";
 import type { RateLimiter } from "./rate-limiter.js";
 
 const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0/";
+const GRAPH_ORIGIN = "https://graph.microsoft.com";
+const GRAPH_BASE_PATH = "/v1.0/";
+const INVALID_GRAPH_PATH_MESSAGE = "Microsoft Graph request path must stay under /v1.0/.";
 const SESSION_EXPIRED_MESSAGE = "Session expired. Please log in again.";
 
 export type GraphQueryParameters =
@@ -14,6 +17,11 @@ export interface GraphClientDependencies {
   fetch: typeof globalThis.fetch;
   sleep: (ms: number) => Promise<void>;
   timeoutMs: number;
+}
+
+interface GraphAttempt {
+  response: Response;
+  signal: AbortSignal;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -64,7 +72,12 @@ export class GraphClient {
     return this.#request("PATCH", path, undefined, jsonBody, headers);
   }
 
-  put(path: string, data?: BodyInit, jsonBody?: unknown, headers?: HeadersInit): Promise<unknown> {
+  put(
+    path: string,
+    data?: Uint8Array,
+    jsonBody?: unknown,
+    headers?: HeadersInit,
+  ): Promise<unknown> {
     return this.#request("PUT", path, undefined, jsonBody, headers, data);
   }
 
@@ -78,11 +91,11 @@ export class GraphClient {
     params?: GraphQueryParameters,
     jsonBody?: unknown,
     callerHeaders?: HeadersInit,
-    binaryBody?: BodyInit,
+    binaryBody?: Uint8Array,
   ): Promise<unknown> {
+    const url = this.#buildUrl(path, params);
     await this.#rateLimiter.acquire();
 
-    const url = this.#buildUrl(path, params);
     const body = this.#requestBody(jsonBody, binaryBody);
     let accessToken = await this.#authManager.getValidAccessToken();
     let retried401 = false;
@@ -95,22 +108,24 @@ export class GraphClient {
         headers.set("Content-Type", "application/json");
       }
 
-      const response = await this.#fetchAttempt(method, url, headers, body);
+      const { response, signal } = await this.#fetchAttempt(method, url, headers, body);
 
       if (response.status === 429) {
+        const delaySeconds = this.#rateLimiter.handle429(
+          retryAfterSeconds(response.headers.get("Retry-After")),
+        );
+        await this.#disposeResponseBody(response);
         if (retried429) {
           throw new GraphApiError("Rate limit exceeded after retry", 429);
         }
         retried429 = true;
-        const delaySeconds = this.#rateLimiter.handle429(
-          retryAfterSeconds(response.headers.get("Retry-After")),
-        );
         await this.#sleep(delaySeconds * 1_000);
         accessToken = await this.#authManager.getValidAccessToken();
         continue;
       }
 
       if (response.status === 401) {
+        await this.#disposeResponseBody(response);
         if (retried401) {
           throw sessionExpiredError();
         }
@@ -129,17 +144,32 @@ export class GraphClient {
       }
 
       if (!response.ok) {
-        throw await this.#graphApiError(response);
+        throw await this.#graphApiError(response, signal);
       }
 
+      const result = await this.#parseSuccessfulResponse(response, signal);
       this.#rateLimiter.resetBackoff();
-      return await this.#parseSuccessfulResponse(response);
+      return result;
+    }
+  }
+
+  async #disposeResponseBody(response: Response): Promise<void> {
+    if (response.body === null) {
+      return;
+    }
+    try {
+      await response.body.cancel();
+    } catch {
+      // Body disposal must not replace stable authentication or rate-limit errors.
     }
   }
 
   #buildUrl(path: string, params?: GraphQueryParameters): URL {
     const normalizedPath = path.replace(/^\/+/, "");
     const url = new URL(normalizedPath, GRAPH_BASE_URL);
+    if (url.origin !== GRAPH_ORIGIN || !url.pathname.startsWith(GRAPH_BASE_PATH)) {
+      throw new GraphMcpError(INVALID_GRAPH_PATH_MESSAGE);
+    }
     if (params === undefined) {
       return url;
     }
@@ -154,9 +184,9 @@ export class GraphClient {
     return url;
   }
 
-  #requestBody(jsonBody: unknown, binaryBody?: BodyInit): BodyInit | undefined {
+  #requestBody(jsonBody: unknown, binaryBody?: Uint8Array): BodyInit | undefined {
     if (binaryBody !== undefined) {
-      return binaryBody;
+      return binaryBody as BodyInit;
     }
     if (jsonBody === undefined) {
       return undefined;
@@ -174,7 +204,7 @@ export class GraphClient {
     url: URL,
     headers: Headers,
     body?: BodyInit,
-  ): Promise<Response> {
+  ): Promise<GraphAttempt> {
     const signal = AbortSignal.timeout(this.#timeoutMs);
     const init: RequestInit = {
       method,
@@ -186,21 +216,33 @@ export class GraphClient {
     }
 
     try {
-      return await this.#fetch(url, init);
+      const response = await this.#fetch(url, init);
+      return { response, signal };
     } catch {
-      if (signal.aborted) {
-        throw new GraphMcpError(
-          `Microsoft Graph request timed out after ${this.#timeoutMs} ms. Check your network connection and try again.`,
-        );
-      }
-      throw new GraphMcpError(
-        "Microsoft Graph request failed. Check your network connection and try again.",
-      );
+      throw this.#requestFailure(signal);
     }
   }
 
-  async #graphApiError(response: Response): Promise<GraphApiError> {
-    const text = await response.text();
+  #requestFailure(signal: AbortSignal): GraphMcpError {
+    return signal.aborted
+      ? new GraphMcpError(
+          `Microsoft Graph request timed out after ${this.#timeoutMs} ms. Check your network connection and try again.`,
+        )
+      : new GraphMcpError(
+          "Microsoft Graph request failed. Check your network connection and try again.",
+        );
+  }
+
+  async #readResponseText(response: Response, signal: AbortSignal): Promise<string> {
+    try {
+      return await response.text();
+    } catch {
+      throw this.#requestFailure(signal);
+    }
+  }
+
+  async #graphApiError(response: Response, signal: AbortSignal): Promise<GraphApiError> {
+    const text = await this.#readResponseText(response, signal);
     let message = text;
 
     try {
@@ -219,12 +261,12 @@ export class GraphClient {
     return new GraphApiError(`${response.status}: ${message}`, response.status);
   }
 
-  async #parseSuccessfulResponse(response: Response): Promise<unknown> {
+  async #parseSuccessfulResponse(response: Response, signal: AbortSignal): Promise<unknown> {
     if (response.status === 204) {
       return null;
     }
 
-    const text = await response.text();
+    const text = await this.#readResponseText(response, signal);
     if (text.length === 0) {
       return null;
     }

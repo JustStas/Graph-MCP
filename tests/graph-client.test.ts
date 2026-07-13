@@ -62,6 +62,26 @@ function textResponse(
   });
 }
 
+function cancellableResponse(status: number, label: string, events: string[], cancelError?: Error) {
+  const cancel = vi.fn(() => {
+    events.push(`cancel:${label}`);
+    if (cancelError !== undefined) {
+      throw cancelError;
+    }
+  });
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1]));
+    },
+    cancel,
+  });
+
+  return {
+    response: new Response(body, { status }),
+    cancel,
+  };
+}
+
 function authorizationFor(fetch: ReturnType<typeof vi.fn<typeof globalThis.fetch>>, call: number) {
   return new Headers(fetch.mock.calls[call]?.[1]?.headers).get("Authorization");
 }
@@ -123,6 +143,39 @@ describe("GraphClient", () => {
     expect(harness.fetch.mock.invocationCallOrder[0]).toBeLessThan(
       harness.resetBackoff.mock.invocationCallOrder[0] ?? 0,
     );
+  });
+
+  test.each([
+    "https://attacker.example/collect",
+    "/https://attacker.example/collect",
+    "../beta/users",
+    "%2e%2e/beta/users",
+  ])("rejects unsafe Graph path %s before auth or fetch", async (path) => {
+    const harness = createHarness();
+    harness.fetch.mockResolvedValue(new Response(null, { status: 204 }));
+
+    const error = await rejectedError(harness.client.get(path));
+
+    expect(error).toEqual(
+      expect.objectContaining({
+        name: "GraphMcpError",
+        message: "Microsoft Graph request path must stay under /v1.0/.",
+      }),
+    );
+    expect(harness.authManager.getValidAccessToken).not.toHaveBeenCalled();
+    expect(harness.fetch).not.toHaveBeenCalled();
+  });
+
+  test("keeps query-only paths on the Graph v1.0 base", async () => {
+    const harness = createHarness();
+    harness.fetch.mockResolvedValue(new Response(null, { status: 204 }));
+
+    await expect(harness.client.get("?$select=id")).resolves.toBeNull();
+
+    const url = requestUrl(harness.fetch.mock.calls[0]?.[0]);
+    expect(url.origin).toBe("https://graph.microsoft.com");
+    expect(url.pathname).toBe("/v1.0/");
+    expect(url.searchParams.get("$select")).toBe("id");
   });
 
   test("normalizes paths and routes every public verb through the request pipeline", async () => {
@@ -193,6 +246,19 @@ describe("GraphClient", () => {
     expect(init?.body).toBe(bytes);
     expect(init?.body).not.toBe('{"ignored":true}');
     expect(headers.has("Content-Type")).toBe(false);
+  });
+
+  test("restricts PUT binary input to replayable bytes", () => {
+    type PutBody = Parameters<GraphClient["put"]>[1];
+
+    const bytes: PutBody = new Uint8Array([1, 2, 3]);
+    const buffer: PutBody = Buffer.from([4, 5, 6]);
+    // @ts-expect-error Blob bodies are not replayable across Graph retries.
+    const blob: PutBody = new Blob(["not replayable"]);
+
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(buffer).toBeInstanceOf(Uint8Array);
+    expect(blob).toBeInstanceOf(Blob);
   });
 
   test("returns null for 204 and empty successful responses", async () => {
@@ -300,11 +366,12 @@ describe("GraphClient", () => {
     expect(harness.sleep).toHaveBeenCalledWith(3_000);
   });
 
-  test("throws the exact GraphApiError after a second 429", async () => {
+  test("records a second 429 before throwing the exact terminal GraphApiError", async () => {
     const harness = createHarness();
+    harness.handle429.mockReturnValueOnce(2).mockReturnValueOnce(9);
     harness.fetch
-      .mockResolvedValueOnce(textResponse("slow down", 429))
-      .mockResolvedValueOnce(textResponse("still slow", 429));
+      .mockResolvedValueOnce(textResponse("slow down", 429, "text/plain", { "Retry-After": "1.5" }))
+      .mockResolvedValueOnce(textResponse("still slow", 429, "text/plain", { "Retry-After": "7" }));
 
     await expect(harness.client.get("/throttled")).rejects.toEqual(
       expect.objectContaining({
@@ -314,8 +381,59 @@ describe("GraphClient", () => {
       }),
     );
     expect(harness.fetch).toHaveBeenCalledTimes(2);
-    expect(harness.handle429).toHaveBeenCalledOnce();
+    expect(harness.handle429.mock.calls).toEqual([[1.5], [7]]);
+    expect(harness.sleep).toHaveBeenCalledOnce();
+    expect(harness.sleep).toHaveBeenCalledWith(2_000);
+    expect(harness.authManager.getValidAccessToken).toHaveBeenCalledTimes(2);
     expect(harness.resetBackoff).not.toHaveBeenCalled();
+  });
+
+  test("cancels 429 bodies before retry and terminal rate-limit handling", async () => {
+    const cancellationSecret = "rate-cancel-secret";
+    const events: string[] = [];
+    const harness = createHarness();
+    const first = cancellableResponse(429, "first-429", events);
+    const second = cancellableResponse(
+      429,
+      "second-429",
+      events,
+      new Error(`cancel failed with ${cancellationSecret}`),
+    );
+    let fetchAttempt = 0;
+    harness.authManager.getValidAccessToken
+      .mockImplementationOnce(() => {
+        events.push("token:initial");
+        return Promise.resolve("initial-token");
+      })
+      .mockImplementationOnce(() => {
+        events.push("token:retry");
+        return Promise.resolve("retry-token");
+      });
+    harness.sleep.mockImplementation(() => {
+      events.push("sleep");
+      return Promise.resolve();
+    });
+    harness.fetch.mockImplementation(() => {
+      fetchAttempt += 1;
+      events.push(`fetch:${fetchAttempt}`);
+      return Promise.resolve(fetchAttempt === 1 ? first.response : second.response);
+    });
+
+    const error = await rejectedError(harness.client.get("/throttled"));
+
+    expect(error).toEqual(
+      expect.objectContaining({
+        name: "GraphApiError",
+        message: "Rate limit exceeded after retry",
+        statusCode: 429,
+      }),
+    );
+    expect(error.message).not.toContain(cancellationSecret);
+    expect(first.cancel).toHaveBeenCalledOnce();
+    expect(second.cancel).toHaveBeenCalledOnce();
+    expect(events.indexOf("cancel:first-429")).toBeLessThan(events.indexOf("sleep"));
+    expect(events.indexOf("cancel:first-429")).toBeLessThan(events.indexOf("token:retry"));
+    expect(events.indexOf("cancel:second-429")).toBeGreaterThan(events.indexOf("fetch:2"));
   });
 
   test("refreshes once after 401, gets the current token, and retries", async () => {
@@ -394,6 +512,53 @@ describe("GraphClient", () => {
     expect(harness.resetBackoff).not.toHaveBeenCalled();
   });
 
+  test("cancels 401 bodies before refresh and terminal authentication handling", async () => {
+    const cancellationSecret = "auth-cancel-secret";
+    const events: string[] = [];
+    const harness = createHarness();
+    const first = cancellableResponse(401, "first-401", events);
+    const second = cancellableResponse(
+      401,
+      "second-401",
+      events,
+      new Error(`cancel failed with ${cancellationSecret}`),
+    );
+    let fetchAttempt = 0;
+    harness.authManager.getValidAccessToken
+      .mockImplementationOnce(() => {
+        events.push("token:initial");
+        return Promise.resolve("initial-token");
+      })
+      .mockImplementationOnce(() => {
+        events.push("token:retry");
+        return Promise.resolve("retry-token");
+      });
+    harness.authManager.refreshAccessToken.mockImplementation(() => {
+      events.push("refresh");
+      return Promise.resolve(true);
+    });
+    harness.fetch.mockImplementation(() => {
+      fetchAttempt += 1;
+      events.push(`fetch:${fetchAttempt}`);
+      return Promise.resolve(fetchAttempt === 1 ? first.response : second.response);
+    });
+
+    const error = await rejectedError(harness.client.get("/me"));
+
+    expect(error).toEqual(
+      expect.objectContaining({
+        name: "AuthenticationError",
+        message: "Session expired. Please log in again.",
+      }),
+    );
+    expect(error.message).not.toContain(cancellationSecret);
+    expect(first.cancel).toHaveBeenCalledOnce();
+    expect(second.cancel).toHaveBeenCalledOnce();
+    expect(events.indexOf("cancel:first-401")).toBeLessThan(events.indexOf("refresh"));
+    expect(events.indexOf("cancel:first-401")).toBeLessThan(events.indexOf("token:retry"));
+    expect(events.indexOf("cancel:second-401")).toBeGreaterThan(events.indexOf("fetch:2"));
+  });
+
   test("handles a 429 to 401 transition with each retry policy used once", async () => {
     const harness = createHarness();
     harness.authManager.getValidAccessToken
@@ -437,9 +602,11 @@ describe("GraphClient", () => {
   test("stops on a repeated 429 after a 429 to 401 transition", async () => {
     const harness = createHarness();
     harness.fetch
-      .mockResolvedValueOnce(textResponse("slow down", 429))
+      .mockResolvedValueOnce(textResponse("slow down", 429, "text/plain", { "Retry-After": "1" }))
       .mockResolvedValueOnce(textResponse("unauthorized", 401))
-      .mockResolvedValueOnce(textResponse("slow down again", 429));
+      .mockResolvedValueOnce(
+        textResponse("slow down again", 429, "text/plain", { "Retry-After": "8" }),
+      );
 
     await expect(harness.client.get("/transition")).rejects.toEqual(
       expect.objectContaining({
@@ -450,7 +617,8 @@ describe("GraphClient", () => {
     );
 
     expect(harness.fetch).toHaveBeenCalledTimes(3);
-    expect(harness.handle429).toHaveBeenCalledOnce();
+    expect(harness.handle429.mock.calls).toEqual([[1], [8]]);
+    expect(harness.sleep).toHaveBeenCalledOnce();
     expect(harness.authManager.refreshAccessToken).toHaveBeenCalledOnce();
     expect(harness.resetBackoff).not.toHaveBeenCalled();
   });
@@ -484,6 +652,71 @@ describe("GraphClient", () => {
     expect(error.message).toMatch(/try again/i);
     expect(error.message).not.toContain(secretToken);
     expect(error.message).not.toMatch(/authorization|bearer/i);
+    expect(harness.resetBackoff).not.toHaveBeenCalled();
+  });
+
+  test("normalizes a response body timeout without leaking the stream error", async () => {
+    const secretToken = "body-timeout-secret-token";
+    const harness = createHarness(5);
+    harness.authManager.getValidAccessToken.mockResolvedValue(secretToken);
+    harness.fetch.mockImplementation((_input, init) => {
+      const signal = init?.signal;
+      if (signal === undefined || signal === null) {
+        return Promise.reject(new Error("Missing abort signal"));
+      }
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const failBody = () =>
+            controller.error(new Error(`body stream failed with Bearer ${secretToken}`));
+          if (signal.aborted) {
+            failBody();
+            return;
+          }
+          signal.addEventListener("abort", failBody, { once: true });
+        },
+      });
+      return Promise.resolve(
+        new Response(body, {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+
+    const error = await rejectedError(harness.client.get("/slow-body"));
+
+    expect(error).toBeInstanceOf(GraphMcpError);
+    expect(error.message).toBe(
+      "Microsoft Graph request timed out after 5 ms. Check your network connection and try again.",
+    );
+    expect(error.message).not.toContain(secretToken);
+    expect(error.message).not.toMatch(/authorization|bearer|body stream failed/i);
+    expect(harness.resetBackoff).not.toHaveBeenCalled();
+  });
+
+  test("normalizes a response body network failure without leaking the stream error", async () => {
+    const secretToken = "body-network-secret-token";
+    const harness = createHarness();
+    harness.authManager.getValidAccessToken.mockResolvedValue(secretToken);
+    harness.fetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error(`body read failed with Bearer ${secretToken}`));
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/plain" } },
+      ),
+    );
+
+    const error = await rejectedError(harness.client.get("/broken-body"));
+
+    expect(error).toBeInstanceOf(GraphMcpError);
+    expect(error.message).toBe(
+      "Microsoft Graph request failed. Check your network connection and try again.",
+    );
+    expect(error.message).not.toContain(secretToken);
+    expect(error.message).not.toMatch(/authorization|bearer|body read failed/i);
     expect(harness.resetBackoff).not.toHaveBeenCalled();
   });
 
