@@ -219,6 +219,16 @@ describe("GraphClient", () => {
     await expect(harness.client.get("/transcript")).resolves.toContain("WEBVTT");
   });
 
+  test("returns malformed successful JSON as text and resets backoff", async () => {
+    const harness = createHarness();
+    const malformedJson = '{"value":';
+    harness.fetch.mockResolvedValue(textResponse(malformedJson, 200, "application/json"));
+
+    await expect(harness.client.get("/malformed-json")).resolves.toBe(malformedJson);
+
+    expect(harness.resetBackoff).toHaveBeenCalledOnce();
+  });
+
   test("converts a nested Graph error message into GraphApiError", async () => {
     const harness = createHarness();
     harness.fetch.mockResolvedValue(
@@ -340,6 +350,30 @@ describe("GraphClient", () => {
     );
     expect(harness.fetch).toHaveBeenCalledOnce();
     expect(harness.authManager.getValidAccessToken).toHaveBeenCalledOnce();
+    expect(harness.resetBackoff).not.toHaveBeenCalled();
+  });
+
+  test("normalizes a rejected refresh without leaking its internal error", async () => {
+    const secret = "refresh-internal-secret";
+    const harness = createHarness();
+    harness.authManager.refreshAccessToken.mockRejectedValue(
+      new Error(`refresh provider failed with ${secret}`),
+    );
+    harness.fetch.mockResolvedValue(textResponse("unauthorized", 401));
+
+    const error = await rejectedError(harness.client.get("/me"));
+
+    expect(error).toEqual(
+      expect.objectContaining({
+        name: "AuthenticationError",
+        message: "Session expired. Please log in again.",
+      }),
+    );
+    expect(error.message).not.toContain(secret);
+    expect(error.message).not.toContain("refresh provider failed");
+    expect(harness.authManager.refreshAccessToken).toHaveBeenCalledOnce();
+    expect(harness.authManager.getValidAccessToken).toHaveBeenCalledOnce();
+    expect(harness.fetch).toHaveBeenCalledOnce();
     expect(harness.resetBackoff).not.toHaveBeenCalled();
   });
 

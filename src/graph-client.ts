@@ -115,7 +115,12 @@ export class GraphClient {
           throw sessionExpiredError();
         }
         retried401 = true;
-        const refreshed = await this.#authManager.refreshAccessToken();
+        let refreshed: boolean;
+        try {
+          refreshed = await this.#authManager.refreshAccessToken();
+        } catch {
+          throw sessionExpiredError();
+        }
         if (!refreshed) {
           throw sessionExpiredError();
         }
@@ -127,9 +132,8 @@ export class GraphClient {
         throw await this.#graphApiError(response);
       }
 
-      const result = await this.#parseSuccessfulResponse(response);
       this.#rateLimiter.resetBackoff();
-      return result;
+      return await this.#parseSuccessfulResponse(response);
     }
   }
 
@@ -226,6 +230,14 @@ export class GraphClient {
     }
 
     const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? "";
-    return contentType.includes("json") ? (JSON.parse(text) as unknown) : text;
+    if (!contentType.includes("json")) {
+      return text;
+    }
+
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return text;
+    }
   }
 }
