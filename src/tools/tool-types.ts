@@ -4,14 +4,14 @@ import type {
   ToolCallback,
 } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
-import type { ZodRawShape, ZodType } from "zod";
+import type { ZodRawShape } from "zod";
 
 import type { AuthManager } from "../auth/auth-manager.js";
 import { AuthenticationError, GraphApiError } from "../errors.js";
 import type { GraphClient } from "../graph-client.js";
 import { asToolResult, errorResponse } from "../responses.js";
 
-type ToolInputSchema = ZodRawShape | ZodType;
+type ToolInputSchema = ZodRawShape;
 
 export interface ToolDependencies {
   readonly authManager: Pick<

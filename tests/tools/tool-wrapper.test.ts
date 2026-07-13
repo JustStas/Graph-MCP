@@ -1,4 +1,6 @@
-import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { describe, expect, expectTypeOf, test } from "vitest";
@@ -69,6 +71,29 @@ function throwUnknown(value: unknown): never {
   throw value;
 }
 
+function assertOnlyObjectInputSchemas(server: Pick<McpServer, "registerTool">): void {
+  registerAuthenticatedTool(
+    server,
+    "graph_invalid_scalar",
+    {
+      // @ts-expect-error MCP tool arguments must be object-shaped
+      inputSchema: z.string(),
+    },
+    () => "",
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_invalid_array",
+    {
+      // @ts-expect-error MCP tool arguments must be object-shaped
+      inputSchema: z.array(z.string()),
+    },
+    () => "",
+  );
+}
+
+void assertOnlyObjectInputSchemas;
+
 describe("tool contracts", () => {
   test("toTextResult returns exactly one MCP text content item", () => {
     expect(toTextResult("hello")).toEqual({
@@ -98,6 +123,64 @@ describe("tool contracts", () => {
 });
 
 describe("registerAuthenticatedTool", () => {
+  test("registers and invokes an object-shaped tool through the real SDK boundary", async () => {
+    const server = new McpServer({ name: "tool-wrapper-test-server", version: "1.0.0" });
+    const client = new Client({ name: "tool-wrapper-test-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    let receivedArgs: unknown;
+
+    registerAuthenticatedTool(
+      server,
+      "graph_sdk_echo",
+      {
+        description: "Echo through the SDK",
+        inputSchema: { value: z.string() },
+      },
+      (handlerArgs) => {
+        expectTypeOf(handlerArgs).toEqualTypeOf<{ value: string }>();
+        receivedArgs = handlerArgs;
+        return `{"data":{"echo":${JSON.stringify(handlerArgs.value)}},"message":"success"}`;
+      },
+    );
+
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+
+      const listed = await client.listTools();
+      expect(listed.tools).toHaveLength(1);
+      expect(listed.tools[0]).toMatchObject({
+        name: "graph_sdk_echo",
+        description: "Echo through the SDK",
+        inputSchema: {
+          type: "object",
+          properties: {
+            value: { type: "string" },
+          },
+          required: ["value"],
+        },
+      });
+
+      const result = await client.callTool({
+        name: "graph_sdk_echo",
+        arguments: { value: "hello" },
+      });
+
+      expect(receivedArgs).toEqual({ value: "hello" });
+      expect(result).toEqual({
+        content: [
+          {
+            type: "text",
+            text: '{"data":{"echo":"hello"},"message":"success"}',
+          },
+        ],
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   test("forwards name, config, schema, callback arguments, and wraps serialized success", async () => {
     const recording = createRecordingServer();
     const inputSchema = { value: z.string() };
