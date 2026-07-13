@@ -482,8 +482,11 @@ export function parseTokenResponse(value: unknown): TokenResponse {
   if (typeof accessToken !== "string" || accessToken.length === 0) {
     throw new Error("Token response must contain a nonempty access token.");
   }
-  if (refreshToken !== undefined && typeof refreshToken !== "string") {
-    throw new Error("Token response refresh token must be a string.");
+  if (
+    refreshToken !== undefined &&
+    (typeof refreshToken !== "string" || refreshToken.trim().length === 0)
+  ) {
+    throw new Error("Token response refresh token must be a nonempty string.");
   }
   if (scope !== undefined && typeof scope !== "string") {
     throw new Error("Token response scope must be a string.");

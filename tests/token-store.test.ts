@@ -628,6 +628,8 @@ describe("TokenStore", () => {
       { access_token: "" },
       { access_token: 123 },
       { access_token: "invalid-refresh", refresh_token: 123 },
+      { access_token: "empty-refresh", refresh_token: "" },
+      { access_token: "blank-refresh", refresh_token: "   " },
       { access_token: "invalid-scope", scope: 123 },
       { access_token: "invalid-expiry", expires_in: 0 },
       { access_token: "invalid-expiry", expires_in: -1 },

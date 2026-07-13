@@ -12,6 +12,7 @@ const TOKEN_RESPONSE_ERROR_MESSAGE = "Token endpoint returned an invalid token r
 const EXPIRED_MESSAGE = "Device code expired. Start login again.";
 const DECLINED_MESSAGE = "Device-code login was declined.";
 const STORE_ERROR_MESSAGE = "Unable to store authentication tokens.";
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 export type DeviceCodeSettings = Pick<
   Settings,
@@ -49,12 +50,21 @@ export interface DeviceCodeLoginDependencies {
   readonly now?: () => number;
   readonly sleep?: DeviceCodeSleep;
   readonly signal?: AbortSignal;
+  readonly requestTimeoutMs?: number;
 }
 
 interface ParsedDeviceCodeResponse {
   readonly deviceCode: string;
+  readonly expiresAt: number;
   readonly details: DeviceCodeLoginDetails;
   readonly intervalMilliseconds: number;
+}
+
+interface ManagedAbort {
+  readonly signal: AbortSignal;
+  callerAborted(): boolean;
+  deadlineExpired(): boolean;
+  dispose(): void;
 }
 
 function authenticationError(message: string): AuthenticationError {
@@ -73,32 +83,83 @@ function positiveSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
-function throwIfAborted(signal: AbortSignal): void {
-  if (signal.aborted) {
-    throw authenticationError(CANCELLED_MESSAGE);
-  }
+function freezeDetails(details: DeviceCodeLoginDetails): DeviceCodeLoginDetails {
+  return Object.freeze({ ...details });
 }
 
 function rejectOnAbort<Value>(operation: Promise<Value>, signal: AbortSignal): Promise<Value> {
   return new Promise<Value>((resolve, reject) => {
-    const onAbort = () => reject(authenticationError(CANCELLED_MESSAGE));
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
-
+    let settled = false;
+    const finish = (operation: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      operation();
+    };
+    const onAbort = () => finish(() => reject(authenticationError(CANCELLED_MESSAGE)));
     signal.addEventListener("abort", onAbort, { once: true });
     void operation.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
+      (value) => finish(() => resolve(value)),
       (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error instanceof Error ? error : new Error("Device-code operation failed."));
+        finish(() =>
+          reject(error instanceof Error ? error : new Error("Device-code operation failed.")),
+        );
       },
     );
+    if (signal.aborted) {
+      onAbort();
+    }
   });
+}
+
+function createManagedAbort(
+  callerSignal: AbortSignal | undefined,
+  timeoutMilliseconds: number,
+): ManagedAbort {
+  const controller = new AbortController();
+  let wasCallerAborted = callerSignal?.aborted ?? false;
+  let wasDeadlineExpired = false;
+  const onCallerAbort = () => {
+    wasCallerAborted = true;
+    controller.abort();
+  };
+  if (wasCallerAborted) {
+    controller.abort();
+  } else {
+    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  }
+
+  const timeout = setTimeout(() => {
+    wasDeadlineExpired = true;
+    controller.abort();
+  }, timeoutMilliseconds);
+  timeout.unref?.();
+
+  return {
+    signal: controller.signal,
+    callerAborted: () => wasCallerAborted,
+    deadlineExpired: () => wasDeadlineExpired,
+    dispose() {
+      clearTimeout(timeout);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
+function managedFailure(
+  managed: ManagedAbort,
+  deadlineMessage: string,
+  fallbackMessage: string,
+): AuthenticationError {
+  if (managed.callerAborted()) {
+    return authenticationError(CANCELLED_MESSAGE);
+  }
+  if (managed.deadlineExpired()) {
+    return authenticationError(deadlineMessage);
+  }
+  return authenticationError(fallbackMessage);
 }
 
 function parseDeviceCodeResponse(value: unknown, now: number): ParsedDeviceCodeResponse {
@@ -138,13 +199,9 @@ function parseDeviceCodeResponse(value: unknown, now: number): ParsedDeviceCodeR
 
   return {
     deviceCode,
+    expiresAt,
     intervalMilliseconds,
-    details: {
-      userCode,
-      verificationUri,
-      expiresAt,
-      message,
-    },
+    details: freezeDetails({ userCode, verificationUri, expiresAt, message }),
   };
 }
 
@@ -167,33 +224,22 @@ function defaultSleep(milliseconds: number, signal: AbortSignal): Promise<void> 
   });
 }
 
-async function readJson(
-  response: DeviceCodeResponse,
-  signal: AbortSignal,
-  errorMessage: string,
-): Promise<unknown> {
-  try {
-    const payload = await rejectOnAbort(response.json(), signal);
-    throwIfAborted(signal);
-    return payload;
-  } catch (error: unknown) {
-    if (signal.aborted) {
-      throw authenticationError(CANCELLED_MESSAGE);
-    }
-    if (error instanceof AuthenticationError) {
-      throw error;
-    }
-    throw authenticationError(errorMessage);
-  }
+function readJson(response: DeviceCodeResponse, signal: AbortSignal): Promise<unknown> {
+  return rejectOnAbort(response.json(), signal);
 }
 
 async function requestDeviceCode(
   settings: DeviceCodeSettings,
   fetchDeviceCode: DeviceCodeFetch,
   now: () => number,
-  signal: AbortSignal,
+  callerSignal: AbortSignal | undefined,
+  requestTimeoutMs: number,
 ): Promise<ParsedDeviceCodeResponse> {
-  throwIfAborted(signal);
+  const managed = createManagedAbort(callerSignal, requestTimeoutMs);
+  if (managed.callerAborted()) {
+    managed.dispose();
+    throw authenticationError(CANCELLED_MESSAGE);
+  }
   let response: DeviceCodeResponse;
   try {
     response = await rejectOnAbort(
@@ -204,30 +250,39 @@ async function requestDeviceCode(
           client_id: settings.azureClientId,
           scope: settings.scopes.join(" "),
         }).toString(),
-        signal,
+        signal: managed.signal,
       }),
-      signal,
+      managed.signal,
     );
   } catch {
-    if (signal.aborted) {
-      throw authenticationError(CANCELLED_MESSAGE);
-    }
-    throw authenticationError(DEVICE_REQUEST_ERROR_MESSAGE);
+    managed.dispose();
+    throw managedFailure(managed, DEVICE_REQUEST_ERROR_MESSAGE, DEVICE_REQUEST_ERROR_MESSAGE);
   }
 
-  throwIfAborted(signal);
+  if (managed.callerAborted() || managed.deadlineExpired()) {
+    managed.dispose();
+    throw managedFailure(managed, DEVICE_REQUEST_ERROR_MESSAGE, DEVICE_REQUEST_ERROR_MESSAGE);
+  }
   if (!response.ok) {
+    managed.dispose();
     throw authenticationError(DEVICE_REQUEST_ERROR_MESSAGE);
   }
 
-  const payload = await readJson(response, signal, DEVICE_RESPONSE_ERROR_MESSAGE);
+  let payload: unknown;
+  try {
+    payload = await readJson(response, managed.signal);
+  } catch {
+    managed.dispose();
+    throw managedFailure(managed, DEVICE_REQUEST_ERROR_MESSAGE, DEVICE_RESPONSE_ERROR_MESSAGE);
+  }
+  managed.dispose();
   return parseDeviceCodeResponse(payload, now());
 }
 
 async function storeTokens(
   store: DeviceCodeTokenStore,
   payload: unknown,
-  signal: AbortSignal,
+  managed: ManagedAbort,
 ): Promise<void> {
   let tokens: TokenResponse;
   try {
@@ -236,16 +291,20 @@ async function storeTokens(
     throw authenticationError(TOKEN_RESPONSE_ERROR_MESSAGE);
   }
 
-  throwIfAborted(signal);
+  if (managed.signal.aborted) {
+    throw managedFailure(managed, EXPIRED_MESSAGE, STORE_ERROR_MESSAGE);
+  }
   try {
-    await rejectOnAbort(store.store(tokens), signal);
+    await store.store(tokens);
   } catch {
-    if (signal.aborted) {
-      throw authenticationError(CANCELLED_MESSAGE);
+    if (managed.signal.aborted) {
+      throw managedFailure(managed, EXPIRED_MESSAGE, STORE_ERROR_MESSAGE);
     }
     throw authenticationError(STORE_ERROR_MESSAGE);
   }
-  throwIfAborted(signal);
+  if (managed.signal.aborted) {
+    throw managedFailure(managed, EXPIRED_MESSAGE, STORE_ERROR_MESSAGE);
+  }
 }
 
 async function pollForTokens(
@@ -253,34 +312,36 @@ async function pollForTokens(
   store: DeviceCodeTokenStore,
   parsed: ParsedDeviceCodeResponse,
   dependencies: Required<Pick<DeviceCodeLoginDependencies, "fetch" | "now" | "sleep">> & {
-    signal: AbortSignal;
+    managed: ManagedAbort;
   },
 ): Promise<void> {
   let delayMilliseconds = parsed.intervalMilliseconds;
 
   while (true) {
-    throwIfAborted(dependencies.signal);
-    if (dependencies.now() >= parsed.details.expiresAt) {
+    if (dependencies.managed.signal.aborted) {
+      throw managedFailure(dependencies.managed, EXPIRED_MESSAGE, POLLING_ERROR_MESSAGE);
+    }
+    const remainingLifetime = parsed.expiresAt - dependencies.now();
+    if (!Number.isSafeInteger(remainingLifetime) || remainingLifetime <= 0) {
       throw authenticationError(EXPIRED_MESSAGE);
     }
 
     try {
       await rejectOnAbort(
-        dependencies.sleep(delayMilliseconds, dependencies.signal),
-        dependencies.signal,
+        dependencies.sleep(
+          Math.min(delayMilliseconds, remainingLifetime),
+          dependencies.managed.signal,
+        ),
+        dependencies.managed.signal,
       );
-    } catch (error: unknown) {
-      if (dependencies.signal.aborted) {
-        throw authenticationError(CANCELLED_MESSAGE);
-      }
-      if (error instanceof AuthenticationError) {
-        throw error;
-      }
-      throw authenticationError(POLLING_ERROR_MESSAGE);
+    } catch {
+      throw managedFailure(dependencies.managed, EXPIRED_MESSAGE, POLLING_ERROR_MESSAGE);
     }
 
-    throwIfAborted(dependencies.signal);
-    if (dependencies.now() >= parsed.details.expiresAt) {
+    if (dependencies.managed.signal.aborted) {
+      throw managedFailure(dependencies.managed, EXPIRED_MESSAGE, POLLING_ERROR_MESSAGE);
+    }
+    if (dependencies.now() >= parsed.expiresAt) {
       throw authenticationError(EXPIRED_MESSAGE);
     }
 
@@ -295,21 +356,25 @@ async function pollForTokens(
             client_id: settings.azureClientId,
             device_code: parsed.deviceCode,
           }).toString(),
-          signal: dependencies.signal,
+          signal: dependencies.managed.signal,
         }),
-        dependencies.signal,
+        dependencies.managed.signal,
       );
     } catch {
-      if (dependencies.signal.aborted) {
-        throw authenticationError(CANCELLED_MESSAGE);
-      }
-      throw authenticationError(POLLING_ERROR_MESSAGE);
+      throw managedFailure(dependencies.managed, EXPIRED_MESSAGE, POLLING_ERROR_MESSAGE);
     }
 
-    throwIfAborted(dependencies.signal);
-    const payload = await readJson(response, dependencies.signal, POLLING_ERROR_MESSAGE);
+    if (dependencies.managed.signal.aborted) {
+      throw managedFailure(dependencies.managed, EXPIRED_MESSAGE, POLLING_ERROR_MESSAGE);
+    }
+    let payload: unknown;
+    try {
+      payload = await readJson(response, dependencies.managed.signal);
+    } catch {
+      throw managedFailure(dependencies.managed, EXPIRED_MESSAGE, POLLING_ERROR_MESSAGE);
+    }
     if (response.ok) {
-      await storeTokens(store, payload, dependencies.signal);
+      await storeTokens(store, payload, dependencies.managed);
       return;
     }
     if (!isRecord(payload) || typeof payload.error !== "string") {
@@ -344,19 +409,37 @@ export async function startDeviceCodeLogin(
     dependencies.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const now = dependencies.now ?? Date.now;
   const sleep = dependencies.sleep ?? defaultSleep;
-  const signal = dependencies.signal ?? new AbortController().signal;
-  const parsed = await requestDeviceCode(settings, fetchDeviceCode, now, signal);
+  const requestTimeoutMs = dependencies.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
+    throw new Error("Device-code request timeout must be a positive safe integer.");
+  }
+  const parsed = await requestDeviceCode(
+    settings,
+    fetchDeviceCode,
+    now,
+    dependencies.signal,
+    requestTimeoutMs,
+  );
   let polling: Promise<void> | undefined;
+  const publicDetails = freezeDetails(parsed.details);
 
   return {
-    details: parsed.details,
+    details: publicDetails,
     poll() {
-      polling ??= pollForTokens(settings, store, parsed, {
-        fetch: fetchDeviceCode,
-        now,
-        sleep,
-        signal,
-      });
+      if (polling === undefined) {
+        const remainingLifetime = parsed.expiresAt - now();
+        if (!Number.isSafeInteger(remainingLifetime) || remainingLifetime <= 0) {
+          polling = Promise.reject(authenticationError(EXPIRED_MESSAGE));
+        } else {
+          const managed = createManagedAbort(dependencies.signal, remainingLifetime);
+          polling = pollForTokens(settings, store, parsed, {
+            fetch: fetchDeviceCode,
+            now,
+            sleep,
+            managed,
+          }).finally(() => managed.dispose());
+        }
+      }
       return polling;
     },
   };

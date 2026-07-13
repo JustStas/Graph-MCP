@@ -4,6 +4,7 @@ import { AuthenticationError } from "../../src/errors.js";
 import {
   startDeviceCodeLogin,
   type DeviceCodeFetch,
+  type DeviceCodeResponse,
   type DeviceCodeSettings,
 } from "../../src/auth/device-code-flow.js";
 import type { TokenResponse } from "../../src/token-store.js";
@@ -102,6 +103,11 @@ describe("startDeviceCodeLogin", () => {
       expiresAt: 910_000,
       message: "Open the verification page and enter the code.",
     });
+    expect(Object.isFrozen(session.details)).toBe(true);
+    expect(() => {
+      (session.details as { userCode: string }).userCode = "MUTATED";
+    }).toThrow(TypeError);
+    expect(session.details.userCode).toBe("ABCD-EFGH");
     expect(JSON.stringify(session)).not.toContain("private-device-code");
     expect(store).not.toHaveBeenCalled();
   });
@@ -205,6 +211,147 @@ describe("startDeviceCodeLogin", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  test("clamps polling sleep to the remaining device-code lifetime", async () => {
+    let now = 10_000;
+    const delays: number[] = [];
+    const fetch = sequenceFetch([response(200, deviceResponse({ expires_in: 1, interval: 2 }))]);
+    const session = await startDeviceCodeLogin(
+      settings,
+      { store: vi.fn() },
+      {
+        fetch,
+        now: () => now,
+        sleep: (milliseconds) => {
+          delays.push(milliseconds);
+          now += milliseconds;
+          return Promise.resolve();
+        },
+      },
+    );
+    expect(() => {
+      (session.details as { expiresAt: number }).expiresAt = Number.MAX_SAFE_INTEGER;
+    }).toThrow(TypeError);
+
+    await expectAuthenticationError(session.poll(), "Device code expired. Start login again.");
+
+    expect(delays).toEqual([1_000]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(["fetch", "json"] as const)(
+    "expires when polling %s ignores cancellation",
+    async (stage) => {
+      vi.useFakeTimers();
+      try {
+        let pollingSignal: AbortSignal | undefined;
+        const fetch = vi.fn<DeviceCodeFetch>((_input, init) => {
+          if (vi.mocked(fetch).mock.calls.length === 1) {
+            return Promise.resolve(response(200, deviceResponse({ expires_in: 1, interval: 1 })));
+          }
+          pollingSignal = init.signal ?? undefined;
+          if (stage === "fetch") {
+            return new Promise<DeviceCodeResponse>(() => undefined);
+          }
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => new Promise<unknown>(() => undefined),
+          });
+        });
+        const session = await startDeviceCodeLogin(
+          settings,
+          { store: vi.fn() },
+          { fetch, sleep: () => Promise.resolve(), now: () => 10_000 },
+        );
+
+        const polling = settlesPromptly(session.poll(), 1_500);
+        const assertion = expectAuthenticationError(
+          polling,
+          "Device code expired. Start login again.",
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        await assertion;
+        expect(pollingSignal?.aborted).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  test.each(["fetch", "json"] as const)(
+    "bounds initial device-code request %s when it ignores cancellation",
+    async (stage) => {
+      vi.useFakeTimers();
+      try {
+        let requestSignal: AbortSignal | undefined;
+        const fetch = vi.fn<DeviceCodeFetch>((_input, init) => {
+          requestSignal = init.signal ?? undefined;
+          if (stage === "fetch") {
+            return new Promise<DeviceCodeResponse>(() => undefined);
+          }
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => new Promise<unknown>(() => undefined),
+          });
+        });
+
+        const starting = settlesPromptly(
+          startDeviceCodeLogin(settings, { store: vi.fn() }, { fetch, requestTimeoutMs: 10 }),
+          100,
+        );
+        const assertion = expectAuthenticationError(starting, "Unable to request a device code.");
+        await vi.advanceTimersByTimeAsync(200);
+
+        await assertion;
+        expect(requestSignal?.aborted).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  test("distinguishes caller cancellation from the initial request deadline", async () => {
+    const alreadyCancelled = new AbortController();
+    alreadyCancelled.abort();
+    const unusedFetch = vi.fn<DeviceCodeFetch>();
+
+    await expectAuthenticationError(
+      startDeviceCodeLogin(
+        settings,
+        { store: vi.fn() },
+        {
+          fetch: unusedFetch,
+          signal: alreadyCancelled.signal,
+          requestTimeoutMs: 10_000,
+        },
+      ),
+      "Device-code login was cancelled.",
+    );
+    expect(unusedFetch).not.toHaveBeenCalled();
+
+    const controller = new AbortController();
+    let effectiveSignal: AbortSignal | undefined;
+    const ignoredFetch = vi.fn<DeviceCodeFetch>((_input, init) => {
+      effectiveSignal = init.signal ?? undefined;
+      return new Promise<DeviceCodeResponse>(() => undefined);
+    });
+    const starting = startDeviceCodeLogin(
+      settings,
+      { store: vi.fn() },
+      {
+        fetch: ignoredFetch,
+        signal: controller.signal,
+        requestTimeoutMs: 10_000,
+      },
+    );
+    controller.abort();
+
+    await expectAuthenticationError(settlesPromptly(starting), "Device-code login was cancelled.");
+    expect(effectiveSignal?.aborted).toBe(true);
+  });
+
   test.each([
     ["not an object", null],
     ["missing device code", deviceResponse({ device_code: undefined })],
@@ -270,6 +417,69 @@ describe("startDeviceCodeLogin", () => {
     expect(pollError.message).not.toContain("private-device-code");
   });
 
+  test("sanitizes AuthenticationError values from injected JSON, sleep, and token store", async () => {
+    const requestJsonFetch: DeviceCodeFetch = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.reject(new AuthenticationError("request private-device-code access-secret")),
+      }),
+    );
+    await expectAuthenticationError(
+      startDeviceCodeLogin(settings, { store: vi.fn() }, { fetch: requestJsonFetch }),
+      "Device-code endpoint returned an invalid response.",
+    );
+
+    const sleepSession = await startDeviceCodeLogin(
+      settings,
+      { store: vi.fn() },
+      {
+        fetch: sequenceFetch([response(200, deviceResponse())]),
+        sleep: () =>
+          Promise.reject(new AuthenticationError("sleep private-device-code access-secret")),
+        now: () => 10_000,
+      },
+    );
+    await expectAuthenticationError(sleepSession.poll(), "Device-code token polling failed.");
+
+    const pollJsonSession = await startDeviceCodeLogin(
+      settings,
+      { store: vi.fn() },
+      {
+        fetch: vi
+          .fn<DeviceCodeFetch>()
+          .mockResolvedValueOnce(response(200, deviceResponse()))
+          .mockResolvedValueOnce({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.reject(new AuthenticationError("poll private-device-code access-secret")),
+          }),
+        sleep: () => Promise.resolve(),
+        now: () => 10_000,
+      },
+    );
+    await expectAuthenticationError(pollJsonSession.poll(), "Device-code token polling failed.");
+
+    const storeSession = await startDeviceCodeLogin(
+      settings,
+      {
+        store: () =>
+          Promise.reject(new AuthenticationError("store private-device-code access-secret")),
+      },
+      {
+        fetch: sequenceFetch([
+          response(200, deviceResponse()),
+          response(200, { access_token: "access-secret" }),
+        ]),
+        sleep: () => Promise.resolve(),
+        now: () => 10_000,
+      },
+    );
+    await expectAuthenticationError(storeSession.poll(), "Unable to store authentication tokens.");
+  });
+
   test("sanitizes unknown provider polling errors", async () => {
     const fetch = sequenceFetch([
       response(200, deviceResponse()),
@@ -296,8 +506,9 @@ describe("startDeviceCodeLogin", () => {
   test("cancellation aborts prompt sleep and prevents token requests", async () => {
     const controller = new AbortController();
     const fetch = sequenceFetch([response(200, deviceResponse())]);
+    let effectiveSignal: AbortSignal | undefined;
     const sleep = vi.fn((_milliseconds: number, signal: AbortSignal) => {
-      expect(signal).toBe(controller.signal);
+      effectiveSignal = signal;
       return new Promise<void>((_resolve, reject) => {
         signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
       });
@@ -312,6 +523,8 @@ describe("startDeviceCodeLogin", () => {
     controller.abort();
 
     await expectAuthenticationError(polling, "Device-code login was cancelled.");
+    expect(effectiveSignal).not.toBe(controller.signal);
+    expect(effectiveSignal?.aborted).toBe(true);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
