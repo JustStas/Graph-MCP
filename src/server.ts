@@ -17,6 +17,23 @@ const sleep = (milliseconds: number): Promise<void> =>
     setTimeout(resolve, milliseconds);
   });
 
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function combineCloseErrors(closeError: unknown, disposeError: unknown): Error | undefined {
+  if (closeError === undefined) {
+    return disposeError === undefined ? undefined : asError(disposeError);
+  }
+  if (disposeError === undefined) {
+    return asError(closeError);
+  }
+  return new AggregateError(
+    [asError(closeError), asError(disposeError)],
+    "Graph MCP shutdown failed.",
+  );
+}
+
 interface DefaultDependencies {
   readonly toolDependencies: ToolDependencies;
   readonly authManager: AuthManager;
@@ -69,10 +86,22 @@ export async function createServer(dependencies?: ToolDependencies): Promise<Mcp
     server.close = (): Promise<void> => {
       if (closePromise === undefined) {
         closePromise = (async () => {
+          let closeError: unknown;
+          let disposeError: unknown;
           try {
-            await disposeAuthManager.dispose();
-          } finally {
             await closeServer();
+          } catch (error: unknown) {
+            closeError = error;
+          } finally {
+            try {
+              await disposeAuthManager.dispose();
+            } catch (error: unknown) {
+              disposeError = error;
+            }
+          }
+          const shutdownError = combineCloseErrors(closeError, disposeError);
+          if (shutdownError !== undefined) {
+            throw shutdownError;
           }
         })();
       }

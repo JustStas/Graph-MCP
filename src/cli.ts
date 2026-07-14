@@ -6,6 +6,7 @@ import { persistSetupConfig } from "./config.js";
 import { createServer } from "./server.js";
 
 const VERSION = "0.6.0";
+const PROTOCOL_ERROR_MESSAGE = "Graph MCP protocol error.";
 const HELP = `Graph MCP ${VERSION}
 
 Usage:
@@ -17,6 +18,16 @@ Usage:
 
 function messageFor(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error.";
+}
+
+function combineShutdownErrors(first: unknown, second: unknown): unknown {
+  if (first === undefined) {
+    return second;
+  }
+  if (second === undefined) {
+    return first;
+  }
+  return new AggregateError([first, second], "Graph MCP shutdown failed.");
 }
 
 async function runSetup(): Promise<void> {
@@ -39,15 +50,18 @@ async function runStdio(): Promise<void> {
   const transport = new StdioServerTransport();
   let closePromise: Promise<void> | undefined;
   let resolveShutdown: () => void = () => undefined;
-  const shutdownRequested = new Promise<void>((resolve) => {
+  let rejectShutdown: (error: unknown) => void = () => undefined;
+  const shutdownRequested = new Promise<void>((resolve, reject) => {
     resolveShutdown = resolve;
+    rejectShutdown = reject;
   });
+  let fatalError: Error | undefined;
 
   const onEnd = (): void => {
-    void close();
+    void close().catch(() => undefined);
   };
   const onSignal = (): void => {
-    void close();
+    void close().catch(() => undefined);
   };
   const removeListeners = (): void => {
     process.stdin.off("end", onEnd);
@@ -61,16 +75,36 @@ async function runStdio(): Promise<void> {
     closePromise = (async () => {
       try {
         await server.close();
-      } catch (error: unknown) {
-        process.stderr.write(`Graph MCP shutdown failed: ${messageFor(error)}\n`);
-        process.exitCode = 1;
       } finally {
         removeListeners();
-        resolveShutdown();
+        if (fatalError !== undefined) {
+          process.stdin.destroy();
+        }
       }
     })();
+    void closePromise.then(
+      () => {
+        if (fatalError === undefined) {
+          resolveShutdown();
+        } else {
+          rejectShutdown(fatalError);
+        }
+      },
+      (error: unknown) => {
+        rejectShutdown(combineShutdownErrors(fatalError, error));
+      },
+    );
     return closePromise;
   }
+
+  server.server.onerror = (): void => {
+    if (fatalError !== undefined) {
+      return;
+    }
+    fatalError = new Error(PROTOCOL_ERROR_MESSAGE);
+    process.stderr.write(`${PROTOCOL_ERROR_MESSAGE}\n`);
+    void close().catch(() => undefined);
+  };
 
   process.stdin.once("end", onEnd);
   process.once("SIGINT", onSignal);
@@ -84,7 +118,13 @@ async function runStdio(): Promise<void> {
       await shutdownRequested;
     }
   } catch (error: unknown) {
-    await close();
+    if (closePromise === undefined) {
+      try {
+        await close();
+      } catch (closeError: unknown) {
+        throw combineShutdownErrors(error, closeError);
+      }
+    }
     throw error;
   }
 }

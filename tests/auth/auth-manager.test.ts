@@ -2265,6 +2265,37 @@ describe("AuthManager dispose", () => {
     expect(store.getRefreshToken()).toBe("existing-refresh");
     expectStatus(manager, { state: "authenticated" });
   });
+
+  test("rejects all new authentication work after disposal without touching credentials", async () => {
+    const store = new MemoryTokenStore();
+    store.accessToken = "existing-access";
+    store.refreshToken = "existing-refresh";
+    store.expired = true;
+    store.actuallyExpired = true;
+    const runBrowserLogin = vi.fn<BrowserLoginRunner>(() =>
+      Promise.resolve({ access_token: "unexpected-access" }),
+    );
+    const fetch = vi.fn<OAuthFetch>(() =>
+      Promise.resolve(response(200, { access_token: "unexpected-refresh" })),
+    );
+    const manager = new AuthManager(settings, store, { runBrowserLogin, fetch });
+
+    await manager.dispose();
+
+    const expectedError = {
+      name: "AuthenticationError",
+      message: "Authentication manager is shutting down.",
+    };
+    await expect(manager.login()).rejects.toMatchObject(expectedError);
+    await expect(manager.refreshAccessToken()).rejects.toMatchObject(expectedError);
+    await expect(manager.getValidAccessToken()).rejects.toMatchObject(expectedError);
+    await expect(manager.logout()).rejects.toMatchObject(expectedError);
+    expect(runBrowserLogin).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(store.clear).not.toHaveBeenCalled();
+    expect(store.getAccessToken()).toBe("existing-access");
+    expect(store.getRefreshToken()).toBe("existing-refresh");
+  });
 });
 
 describe("AuthManager logout", () => {

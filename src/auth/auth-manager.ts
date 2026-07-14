@@ -34,6 +34,8 @@ const DEFAULT_STORAGE_TIMEOUT_MS = 30_000;
 const STORAGE_MUTATION_CANCELLED_MESSAGE = "Authentication storage operation was cancelled.";
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
+export const AUTH_MANAGER_SHUTDOWN_MESSAGE = "Authentication manager is shutting down.";
+
 export type LoginStatus =
   | { readonly state: "unauthenticated" }
   | {
@@ -346,6 +348,7 @@ export class AuthManager {
   #activeLogin: ActiveLogin | undefined;
   #activeRefresh: ActiveRefresh | undefined;
   #disposePromise: Promise<void> | undefined;
+  #disposeStarted = false;
   #authGeneration = 0;
   #logoutInProgress = false;
   #logoutPromise: Promise<void> | undefined;
@@ -398,6 +401,7 @@ export class AuthManager {
       return this.#disposePromise;
     }
 
+    this.#disposeStarted = true;
     this.#authGeneration += 1;
     const activeLogin = this.#activeLogin;
     const activeRefresh = this.#activeRefresh;
@@ -413,6 +417,7 @@ export class AuthManager {
   }
 
   async login(method: LoginMethod = "browser"): Promise<LoginStatus> {
+    this.#throwIfDisposed();
     this.#requireClientId();
     if (this.#logoutInProgress) {
       throw authenticationError(LOGOUT_IN_PROGRESS_MESSAGE);
@@ -452,6 +457,9 @@ export class AuthManager {
   }
 
   refreshAccessToken(): Promise<boolean> {
+    if (this.#disposeStarted) {
+      return Promise.reject(authenticationError(AUTH_MANAGER_SHUTDOWN_MESSAGE));
+    }
     if (this.#logoutInProgress) {
       return Promise.reject(authenticationError(LOGOUT_IN_PROGRESS_MESSAGE));
     }
@@ -507,6 +515,7 @@ export class AuthManager {
   }
 
   async getValidAccessToken(): Promise<string> {
+    this.#throwIfDisposed();
     if (this.#storageReadIsFenced()) {
       this.#requestReconciliation();
       if (this.#desiredAuthState?.kind === "clear") {
@@ -572,6 +581,9 @@ export class AuthManager {
   }
 
   logout(): Promise<void> {
+    if (this.#disposeStarted) {
+      return Promise.reject(authenticationError(AUTH_MANAGER_SHUTDOWN_MESSAGE));
+    }
     if (this.#logoutPromise !== undefined) {
       return this.#logoutPromise;
     }
@@ -1359,6 +1371,12 @@ export class AuthManager {
   #requireClientId(): void {
     if (this.#settings.azureClientId.trim().length === 0) {
       throw authenticationError(SETUP_MESSAGE);
+    }
+  }
+
+  #throwIfDisposed(): void {
+    if (this.#disposeStarted) {
+      throw authenticationError(AUTH_MANAGER_SHUTDOWN_MESSAGE);
     }
   }
 
