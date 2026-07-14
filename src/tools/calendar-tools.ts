@@ -88,7 +88,13 @@ export function registerCalendarTools(
     server,
     "graph_list_events",
     {
-      description: "List calendar events. Uses calendarView for date ranges, /events otherwise.",
+      description: `List calendar events. Uses calendarView for date ranges, /events otherwise.
+
+Args:
+    start_datetime: Start of date range (ISO 8601, e.g. "2025-01-01T00:00:00Z"). Required with end_datetime for date range queries.
+    end_datetime: End of date range (ISO 8601). Required with start_datetime.
+    calendar_id: Optional calendar ID. Defaults to primary calendar.
+    top: Maximum number of events to return (default 50).`,
       inputSchema: {
         start_datetime: z.string().default(""),
         end_datetime: z.string().default(""),
@@ -121,7 +127,10 @@ export function registerCalendarTools(
     server,
     "graph_get_event",
     {
-      description: "Get full details of a specific calendar event.",
+      description: `Get full details of a specific calendar event.
+
+Args:
+    event_id: The event ID.`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
       },
@@ -136,7 +145,18 @@ export function registerCalendarTools(
     server,
     "graph_create_event",
     {
-      description: "Create a new calendar event.",
+      description: `Create a new calendar event.
+
+Args:
+    subject: Event subject/title.
+    start_datetime: Start time in ISO 8601 (e.g. "2025-03-01T10:00:00").
+    end_datetime: End time in ISO 8601 (e.g. "2025-03-01T11:00:00").
+    timezone: Timezone (default "UTC"). Examples: "Pacific Standard Time", "Europe/London".
+    body: Optional event body/description.
+    location: Optional location name.
+    attendees: Optional list of attendee email addresses.
+    is_online_meeting: Whether to create a Teams online meeting (default false).
+    is_html: Whether the body is HTML (default: plain text).`,
       inputSchema: {
         subject: z.string(),
         start_datetime: z.string(),
@@ -194,7 +214,17 @@ export function registerCalendarTools(
     server,
     "graph_update_event",
     {
-      description: "Update an existing calendar event. Only provided fields are updated.",
+      description: `Update an existing calendar event. Only provided fields are updated.
+
+Args:
+    event_id: The event ID to update.
+    subject: New subject/title.
+    start_datetime: New start time (ISO 8601). Requires timezone.
+    end_datetime: New end time (ISO 8601). Requires timezone.
+    timezone: Timezone for start/end times.
+    body: New body/description.
+    location: New location name.
+    is_html: Whether the body is HTML (default: plain text).`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
         subject: z.string().default(""),
@@ -245,7 +275,10 @@ export function registerCalendarTools(
     server,
     "graph_delete_event",
     {
-      description: "Delete a calendar event.",
+      description: `Delete a calendar event.
+
+Args:
+    event_id: The event ID to delete.`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
       },

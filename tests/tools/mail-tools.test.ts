@@ -45,31 +45,70 @@ interface ToolHarness {
 const EXPECTED_MAIL_TOOLS = [
   {
     name: "graph_list_mail",
-    description: "List emails from a mail folder.",
+    description: `List emails from a mail folder.
+
+Args:
+    folder: Mail folder name (default "inbox"). Common: inbox, sentitems, drafts, deleteditems.
+    top: Maximum number of emails to return (default 25).
+    filter_query: Optional OData filter (e.g. "isRead eq false").`,
   },
   {
     name: "graph_read_mail",
-    description: "Read full details of a specific email.",
+    description: `Read full details of a specific email.
+
+Args:
+    message_id: The email message ID.`,
   },
   {
     name: "graph_search_mail",
-    description: "Search emails by keyword.",
+    description: `Search emails by keyword.
+
+Args:
+    query: Search query string.
+    top: Maximum number of results (default 25).`,
   },
   {
     name: "graph_send_mail",
-    description: "Send an email.",
+    description: `Send an email.
+
+Args:
+    to: List of recipient email addresses.
+    subject: Email subject.
+    body: Email body content. When \`is_html\` is true, send explicit
+        HTML; markdown is not converted.
+    cc: Optional list of CC email addresses.
+    is_html: Whether to send the email body as HTML content (default:
+        True). Use false for plain text.`,
   },
   {
     name: "graph_reply_mail",
-    description: "Reply to an email.",
+    description: `Reply to an email.
+
+Args:
+    message_id: The email message ID to reply to.
+    body: The reply body content. When \`is_html\` is true, send explicit
+        HTML; markdown is not converted.
+    reply_all: Whether to reply to all recipients (default: reply to sender only).
+    is_html: Whether to send the reply body as HTML content (default:
+        True). Use false for plain text.`,
   },
   {
     name: "graph_list_mail_attachments",
-    description: "List attachments on an email message.",
+    description: `List attachments on an email message.
+
+Args:
+    message_id: The email message ID.`,
   },
   {
     name: "graph_get_mail_attachment",
-    description: "Get a specific email attachment including its content.",
+    description: `Get a specific email attachment including its content.
+
+The attachment content is returned as base64-encoded data in the
+'contentBytes' field. For large attachments, only metadata is practical.
+
+Args:
+    message_id: The email message ID.
+    attachment_id: The attachment ID (from graph_list_mail_attachments).`,
   },
 ] as const;
 
@@ -233,7 +272,7 @@ function registerMailHarness(graphResponses: readonly unknown[] = []): {
 }
 
 describe("mail tool registration", () => {
-  test("registers exactly the seven legacy mail names and first-line descriptions", () => {
+  test("registers exactly the seven legacy mail names and complete descriptions", () => {
     const { harness } = registerMailHarness();
 
     expect(
