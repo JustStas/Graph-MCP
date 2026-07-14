@@ -70,7 +70,8 @@ Args:
     async ({ join_url }) => {
       const params: Record<string, string> = {};
       if (join_url !== "") {
-        params.$filter = `JoinWebUrl eq '${encodeURIComponent(join_url)}'`;
+        const escapedJoinUrl = join_url.replaceAll("'", "''");
+        params.$filter = `JoinWebUrl eq '${encodeURIComponent(escapedJoinUrl)}'`;
       }
       const result = await dependencies.graphClient.get("/me/onlineMeetings", params);
       return successResponse(collectionValue(result));

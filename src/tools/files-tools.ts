@@ -12,6 +12,7 @@ const INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
 const INVALID_BASE64_MESSAGE = "Invalid base64 content.";
 const FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_STANDARD_BASE64_LENGTH = 4 * Math.ceil(MAX_UPLOAD_BYTES / 3);
 const TEXT_MIME_PREFIXES = [
   "text/",
   "application/json",
@@ -257,6 +258,10 @@ Args:
       },
     },
     async ({ file_path, content_base64 }) => {
+      if (content_base64.length > MAX_STANDARD_BASE64_LENGTH) {
+        return successResponse({ error: "File too large. Maximum upload size is 4MB." }, "error");
+      }
+
       const fileBytes = decodeStrictBase64(content_base64);
       if (fileBytes.byteLength > MAX_UPLOAD_BYTES) {
         return successResponse({ error: "File too large. Maximum upload size is 4MB." }, "error");

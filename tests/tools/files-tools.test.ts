@@ -47,6 +47,8 @@ interface ToolHarness {
 
 const FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
 const BINARY_NOTE = "Binary file — use the downloadUrl to access content.";
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_STANDARD_BASE64_LENGTH = 4 * Math.ceil(MAX_UPLOAD_BYTES / 3);
 
 const EXPECTED_FILE_TOOLS = [
   {
@@ -640,6 +642,32 @@ describe("OneDrive uploads", () => {
       expect(JSON.stringify(result)).not.toContain(contentBase64);
     },
   );
+
+  test("rejects encoded input above the maximum before base64 decoding", async () => {
+    const contentBase64 = "A".repeat(MAX_STANDARD_BASE64_LENGTH + 4);
+    const { harness, graph } = registerFilesHarness();
+    const bufferFrom = vi.spyOn(Buffer, "from");
+
+    try {
+      const result = await harness.invoke("graph_upload_file", {
+        file_path: "large.bin",
+        content_base64: contentBase64,
+      });
+
+      expect(result).toEqual({
+        content: [
+          {
+            type: "text",
+            text: '{"data":{"error":"File too large. Maximum upload size is 4MB."},"message":"error"}',
+          },
+        ],
+      });
+      expect(bufferFrom).not.toHaveBeenCalled();
+      expect(graph.calls).toEqual([]);
+    } finally {
+      bufferFrom.mockRestore();
+    }
+  });
 
   test("returns the exact oversize error envelope without calling Graph", async () => {
     const contentBase64 = Buffer.alloc(4 * 1024 * 1024 + 1, 0x61).toString("base64");

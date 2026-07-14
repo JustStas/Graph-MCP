@@ -225,6 +225,30 @@ function dataFrom(result: CallToolResult): unknown {
   return payload.data;
 }
 
+function countODataStringLiterals(filter: string): number {
+  let literals = 0;
+  let insideLiteral = false;
+
+  for (let index = 0; index < filter.length; index += 1) {
+    if (filter[index] !== "'") {
+      continue;
+    }
+    if (insideLiteral && filter[index + 1] === "'") {
+      index += 1;
+      continue;
+    }
+    insideLiteral = !insideLiteral;
+    if (!insideLiteral) {
+      literals += 1;
+    }
+  }
+
+  if (insideLiteral) {
+    throw new Error("Expected a balanced OData string literal.");
+  }
+  return literals;
+}
+
 function registerMeetingHarness(graphResponses: readonly unknown[] = []): {
   readonly harness: ToolHarness;
   readonly graph: GraphFake;
@@ -343,6 +367,19 @@ describe("meeting list operations", () => {
         params: { $filter: `JoinWebUrl eq '${encodeURIComponent(joinUrl)}'` },
       },
     ]);
+  });
+
+  test("keeps apostrophes and an injected OR inside one encoded OData string literal", async () => {
+    const joinUrl = "https://teams.example/join/x' OR JoinWebUrl ne 'https://evil.example/";
+    const escapedJoinUrl = joinUrl.replaceAll("'", "''");
+    const { harness, graph } = registerMeetingHarness([{ value: [] }]);
+
+    await harness.invoke("graph_list_online_meetings", { join_url: joinUrl });
+
+    const filter = (graph.calls[0]?.params as Record<string, unknown> | undefined)?.$filter;
+    expect(filter).toBe(`JoinWebUrl eq '${encodeURIComponent(escapedJoinUrl)}'`);
+    expect(typeof filter).toBe("string");
+    expect(countODataStringLiterals(filter as string)).toBe(1);
   });
 
   test("lists transcript metadata from the exact encoded meeting path and select", async () => {
