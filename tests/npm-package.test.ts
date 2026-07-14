@@ -52,7 +52,10 @@ async function validatePackageResult(input: unknown): Promise<PackageValidationR
 describe("npm package contents", () => {
   beforeAll(async () => {
     await execFileAsync(process.execPath, ["scripts/clean.mjs"], { cwd: repositoryRoot });
-    await execFileAsync(process.execPath, ["scripts/build.mjs"], { cwd: repositoryRoot });
+    await execFileAsync(process.execPath, ["scripts/build.mjs"], {
+      cwd: repositoryRoot,
+      env: { ...process.env, GRAPH_MCP_SKIP_PLUGIN_SYNC: "1" },
+    });
   }, 30_000);
 
   test("contains the executable package files and excludes source/runtime artifacts", async () => {

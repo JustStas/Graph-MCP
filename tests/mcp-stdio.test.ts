@@ -22,7 +22,10 @@ const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 
 beforeAll(async () => {
   await rm(join(repositoryRoot, "dist"), { recursive: true, force: true });
-  await execFileAsync(process.execPath, ["scripts/build.mjs"], { cwd: repositoryRoot });
+  await execFileAsync(process.execPath, ["scripts/build.mjs"], {
+    cwd: repositoryRoot,
+    env: { ...process.env, GRAPH_MCP_SKIP_PLUGIN_SYNC: "1" },
+  });
 }, 30_000);
 
 type ClientToolResult = Awaited<ReturnType<Client["callTool"]>>;

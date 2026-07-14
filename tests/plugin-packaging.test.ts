@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -271,25 +271,57 @@ describe("Graph MCP plugin packaging", () => {
 
   test("the build keeps the root bundle behavior and synchronizes the plugin bundle and license", async () => {
     const buildScript = await readText("scripts/build.mjs");
+    const pluginBundleBeforeBuild = await readFile(join(pluginRoot, "dist/graph-mcp.js"));
+    const pluginMapBeforeBuild = await readFile(join(pluginRoot, "dist/cli.js.map"));
 
-    await execFileAsync(process.execPath, ["scripts/build.mjs"], { cwd: repositoryRoot });
-    expect(buildScript).toContain('outfile: "dist/cli.js"');
-    expect(buildScript).toContain("copyFile");
-    expect(buildScript).toContain("plugins/graph-mcp/dist/graph-mcp.js");
-    expect(buildScript).toContain("plugins/graph-mcp/LICENSE");
-    expect(buildScript).not.toContain('copyFile("README.md"');
-    expect(buildScript).not.toContain("replace(/[ \\t]+$/gm");
-    await expectFile("plugins/graph-mcp/dist/graph-mcp.js");
-    await expectFile("plugins/graph-mcp/dist/cli.js.map");
-    expect(await readFile(join(repositoryRoot, "dist/cli.js"))).toEqual(
-      await readFile(join(pluginRoot, "dist/graph-mcp.js")),
-    );
-    expect(await readFile(join(repositoryRoot, "dist/cli.js.map"))).toEqual(
-      await readFile(join(pluginRoot, "dist/cli.js.map")),
-    );
-    expect(buildScript).toContain("verifyPluginVersions");
-    expect(buildScript).toContain("plugins/graph-mcp/dist/cli.js.map");
-  });
+    try {
+      await execFileAsync(process.execPath, ["scripts/build.mjs"], { cwd: repositoryRoot });
+      expect(buildScript).toContain('outfile: "dist/cli.js"');
+      expect(buildScript).toContain("copyFile");
+      expect(buildScript).toContain("plugins/graph-mcp/dist/graph-mcp.js");
+      expect(buildScript).toContain("plugins/graph-mcp/LICENSE");
+      expect(buildScript).not.toContain('copyFile("README.md"');
+      expect(buildScript).not.toContain("replace(/[ \\t]+$/gm");
+      expect(buildScript).toContain("GRAPH_MCP_SKIP_PLUGIN_SYNC");
+      await expectFile("plugins/graph-mcp/dist/graph-mcp.js");
+      await expectFile("plugins/graph-mcp/dist/cli.js.map");
+      expect(await readFile(join(pluginRoot, "dist/graph-mcp.js"))).toEqual(
+        pluginBundleBeforeBuild,
+      );
+      expect(await readFile(join(pluginRoot, "dist/cli.js.map"))).toEqual(pluginMapBeforeBuild);
+      expect(await readFile(join(repositoryRoot, "dist/cli.js"))).toEqual(
+        await readFile(join(pluginRoot, "dist/graph-mcp.js")),
+      );
+      expect(await readFile(join(repositoryRoot, "dist/cli.js.map"))).toEqual(
+        await readFile(join(pluginRoot, "dist/cli.js.map")),
+      );
+      expect(buildScript).toContain("verifyPluginVersions");
+      expect(buildScript).toContain("plugins/graph-mcp/dist/cli.js.map");
+    } finally {
+      await writeFile(join(pluginRoot, "dist/graph-mcp.js"), pluginBundleBeforeBuild);
+      await writeFile(join(pluginRoot, "dist/cli.js.map"), pluginMapBeforeBuild);
+    }
+  }, 30_000);
+
+  test("root-only build opt-out leaves a plugin artifact sentinel untouched", async () => {
+    const pluginBundlePath = join(pluginRoot, "dist/graph-mcp.js");
+    const originalPluginBundle = await readFile(pluginBundlePath);
+    const sentinelPluginBundle = Buffer.concat([
+      originalPluginBundle,
+      Buffer.from("\n// stale-plugin-artifact-sentinel\n"),
+    ]);
+
+    await writeFile(pluginBundlePath, sentinelPluginBundle);
+    try {
+      await execFileAsync(process.execPath, ["scripts/build.mjs"], {
+        cwd: repositoryRoot,
+        env: { ...process.env, GRAPH_MCP_SKIP_PLUGIN_SYNC: "1" },
+      });
+      expect(await readFile(pluginBundlePath)).toEqual(sentinelPluginBundle);
+    } finally {
+      await writeFile(pluginBundlePath, originalPluginBundle);
+    }
+  }, 30_000);
 
   test("package and both plugin manifest versions are synchronized by the verifier", async () => {
     const packageJson = await readJson("package.json");
