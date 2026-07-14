@@ -17,7 +17,12 @@ const sleep = (milliseconds: number): Promise<void> =>
     setTimeout(resolve, milliseconds);
   });
 
-async function createDefaultDependencies(): Promise<ToolDependencies> {
+interface DefaultDependencies {
+  readonly toolDependencies: ToolDependencies;
+  readonly authManager: AuthManager;
+}
+
+async function createDefaultDependencies(): Promise<DefaultDependencies> {
   const settings = await loadSettings();
   const tokenStore = new TokenStore(settings);
   await tokenStore.initialize();
@@ -35,15 +40,45 @@ async function createDefaultDependencies(): Promise<ToolDependencies> {
     timeoutMs: GRAPH_TIMEOUT_MS,
   });
 
-  return { authManager, graphClient };
+  return {
+    toolDependencies: { authManager, graphClient },
+    authManager,
+  };
 }
 
 export async function createServer(dependencies?: ToolDependencies): Promise<McpServer> {
-  const resolvedDependencies = dependencies ?? (await createDefaultDependencies());
+  let resolvedDependencies: ToolDependencies;
+  let ownedAuthManager: AuthManager | undefined;
+  if (dependencies !== undefined) {
+    resolvedDependencies = dependencies;
+  } else {
+    const defaults = await createDefaultDependencies();
+    resolvedDependencies = defaults.toolDependencies;
+    ownedAuthManager = defaults.authManager;
+  }
   const server = new McpServer(
     { name: "Graph MCP", version: "0.6.0" },
     { instructions: SERVER_INSTRUCTIONS },
   );
   registerAllTools(server, resolvedDependencies);
+
+  if (ownedAuthManager !== undefined) {
+    const closeServer = server.close.bind(server);
+    let closePromise: Promise<void> | undefined;
+    const disposeAuthManager = ownedAuthManager;
+    server.close = (): Promise<void> => {
+      if (closePromise === undefined) {
+        closePromise = (async () => {
+          try {
+            await disposeAuthManager.dispose();
+          } finally {
+            await closeServer();
+          }
+        })();
+      }
+      return closePromise;
+    };
+  }
+
   return server;
 }

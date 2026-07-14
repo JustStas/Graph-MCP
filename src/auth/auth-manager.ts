@@ -345,6 +345,7 @@ export class AuthManager {
   #status: LoginStatus;
   #activeLogin: ActiveLogin | undefined;
   #activeRefresh: ActiveRefresh | undefined;
+  #disposePromise: Promise<void> | undefined;
   #authGeneration = 0;
   #logoutInProgress = false;
   #logoutPromise: Promise<void> | undefined;
@@ -390,6 +391,25 @@ export class AuthManager {
     this.#requestReconciliation();
     this.#setStatus(this.#reconcileStatus(this.#status));
     return this.#statusSnapshot();
+  }
+
+  dispose(): Promise<void> {
+    if (this.#disposePromise !== undefined) {
+      return this.#disposePromise;
+    }
+
+    this.#authGeneration += 1;
+    const activeLogin = this.#activeLogin;
+    const activeRefresh = this.#activeRefresh;
+    activeLogin?.controller.abort();
+    activeRefresh?.controller.abort();
+
+    const disposePromise = Promise.all([
+      activeLogin?.settlement.catch(() => undefined),
+      activeRefresh?.settlement.catch(() => false),
+    ]).then(() => undefined);
+    this.#disposePromise = disposePromise;
+    return disposePromise;
   }
 
   async login(method: LoginMethod = "browser"): Promise<LoginStatus> {

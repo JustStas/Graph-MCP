@@ -56,6 +56,10 @@ export function registerAuthTools(
             successResponse({
               authenticated: false,
               message: "Not authenticated",
+              action_required: {
+                setup_command: "graph-mcp setup",
+                login_tool: "graph_auth_login",
+              },
             }),
           );
         }

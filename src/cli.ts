@@ -37,22 +37,55 @@ async function runSetup(): Promise<void> {
 async function runStdio(): Promise<void> {
   const server = await createServer();
   const transport = new StdioServerTransport();
-  let closing = false;
-  const close = (): void => {
-    if (closing) {
-      return;
-    }
-    closing = true;
-    void server.close().catch((error: unknown) => {
-      process.stderr.write(`Graph MCP shutdown failed: ${messageFor(error)}\n`);
-      process.exitCode = 1;
-    });
-  };
+  let closePromise: Promise<void> | undefined;
+  let resolveShutdown: () => void = () => undefined;
+  const shutdownRequested = new Promise<void>((resolve) => {
+    resolveShutdown = resolve;
+  });
 
-  process.stdin.once("end", close);
-  await server.connect(transport);
-  if (process.stdin.readableEnded) {
-    close();
+  const onEnd = (): void => {
+    void close();
+  };
+  const onSignal = (): void => {
+    void close();
+  };
+  const removeListeners = (): void => {
+    process.stdin.off("end", onEnd);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  };
+  function close(): Promise<void> {
+    if (closePromise !== undefined) {
+      return closePromise;
+    }
+    closePromise = (async () => {
+      try {
+        await server.close();
+      } catch (error: unknown) {
+        process.stderr.write(`Graph MCP shutdown failed: ${messageFor(error)}\n`);
+        process.exitCode = 1;
+      } finally {
+        removeListeners();
+        resolveShutdown();
+      }
+    })();
+    return closePromise;
+  }
+
+  process.stdin.once("end", onEnd);
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+
+  try {
+    await server.connect(transport);
+    if (process.stdin.readableEnded) {
+      await close();
+    } else {
+      await shutdownRequested;
+    }
+  } catch (error: unknown) {
+    await close();
+    throw error;
   }
 }
 

@@ -2231,6 +2231,42 @@ describe("AuthManager storage mutation fencing", () => {
   });
 });
 
+describe("AuthManager dispose", () => {
+  test("aborts and awaits an active browser login without clearing persisted tokens", async () => {
+    const store = new MemoryTokenStore();
+    store.accessToken = "existing-access";
+    store.refreshToken = "existing-refresh";
+    store.expired = false;
+    store.actuallyExpired = false;
+    let browserSignal: AbortSignal | undefined;
+    const manager = new AuthManager(settings, store, {
+      runBrowserLogin: (_settings, dependencies) => {
+        browserSignal = dependencies?.signal;
+        return new Promise<TokenResponse>((_resolve, reject) => {
+          browserSignal?.addEventListener(
+            "abort",
+            () => reject(new AuthenticationError("Login timed out or was cancelled.")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const login = manager.login();
+
+    const firstDispose = manager.dispose();
+    const secondDispose = manager.dispose();
+
+    expect(secondDispose).toBe(firstDispose);
+    await expect(login).rejects.toBeInstanceOf(AuthenticationError);
+    await expect(firstDispose).resolves.toBeUndefined();
+    expect(browserSignal?.aborted).toBe(true);
+    expect(store.clear).not.toHaveBeenCalled();
+    expect(store.getAccessToken()).toBe("existing-access");
+    expect(store.getRefreshToken()).toBe("existing-refresh");
+    expectStatus(manager, { state: "authenticated" });
+  });
+});
+
 describe("AuthManager logout", () => {
   test("aborts an ignored refresh and prevents it from restoring credentials after logout", async () => {
     const store = new MemoryTokenStore();

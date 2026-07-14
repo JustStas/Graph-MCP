@@ -450,7 +450,7 @@ describe("authentication tools", () => {
       {
         status: { state: "unauthenticated" },
         expectedText:
-          '{"data":{"authenticated":false,"message":"Not authenticated"},"message":"success"}',
+          '{"data":{"authenticated":false,"message":"Not authenticated","action_required":{"setup_command":"graph-mcp setup","login_tool":"graph_auth_login"}},"message":"success"}',
       },
       {
         status: {
