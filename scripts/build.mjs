@@ -1,3 +1,4 @@
+import { builtinModules } from "node:module";
 import { chmod } from "node:fs/promises";
 
 import { build } from "esbuild";
@@ -9,6 +10,7 @@ await build({
   platform: "node",
   format: "esm",
   target: "node22",
+  external: ["node:*", ...builtinModules, ...builtinModules.map((moduleName) => `${moduleName}/*`)],
   sourcemap: true,
   banner: { js: "#!/usr/bin/env node" },
 });

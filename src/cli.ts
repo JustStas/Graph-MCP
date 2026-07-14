@@ -1,4 +1,7 @@
+import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
@@ -15,9 +18,45 @@ Usage:
   graph-mcp --help      Show this help
   graph-mcp --version   Show the version
 `;
+const SETUP_OUTPUT = `Graph MCP configuration saved.
+
+Manual MCP examples:
+
+Claude Code:
+  claude mcp add graph-mcp -- node /path/to/graph-mcp/dist/cli.js
+
+Codex:
+  codex mcp add graph-mcp -- node /path/to/graph-mcp/dist/cli.js
+`;
+
+export interface CliOutput {
+  readonly stdout: (text: string) => void;
+  readonly stderr: (text: string) => void;
+}
+
+export interface CliPrompt {
+  readonly question: (message: string) => Promise<string>;
+  readonly close: () => void | Promise<void>;
+}
+
+export interface CliDependencies {
+  readonly output?: CliOutput;
+  readonly prompt?: CliPrompt;
+  readonly persistSetupConfig?: typeof persistSetupConfig;
+  readonly stdio?: () => Promise<void>;
+}
+
+const defaultOutput: CliOutput = {
+  stdout: (text) => {
+    process.stdout.write(text);
+  },
+  stderr: (text) => {
+    process.stderr.write(text);
+  },
+};
 
 function messageFor(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown error.";
+  return error instanceof Error && error.message.trim() !== "" ? error.message : "Unknown error.";
 }
 
 function combineShutdownErrors(first: unknown, second: unknown): unknown {
@@ -30,22 +69,33 @@ function combineShutdownErrors(first: unknown, second: unknown): unknown {
   return new AggregateError([first, second], "Graph MCP shutdown failed.");
 }
 
-async function runSetup(): Promise<void> {
+function createDefaultPrompt(): CliPrompt {
   const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  return {
+    question: (message) => prompt.question(message),
+    close: () => {
+      prompt.close();
+    },
+  };
+}
+
+async function runSetup(dependencies: CliDependencies, output: CliOutput): Promise<void> {
+  const prompt = dependencies.prompt ?? createDefaultPrompt();
+  const persist = dependencies.persistSetupConfig ?? persistSetupConfig;
   try {
     const azureClientId = (await prompt.question("Azure Client ID: ")).trim();
     if (azureClientId === "") {
       throw new Error("Azure Client ID is required.");
     }
     const azureTenantId = (await prompt.question("Azure Tenant ID [common]: ")).trim() || "common";
-    await persistSetupConfig({ azureClientId, azureTenantId });
-    process.stdout.write("Graph MCP configuration saved.\n");
+    await persist({ azureClientId, azureTenantId });
+    output.stdout(SETUP_OUTPUT);
   } finally {
-    prompt.close();
+    await prompt.close();
   }
 }
 
-async function runStdio(): Promise<void> {
+async function runStdio(output: CliOutput): Promise<void> {
   const server = await createServer();
   const transport = new StdioServerTransport();
   let closePromise: Promise<void> | undefined;
@@ -102,7 +152,7 @@ async function runStdio(): Promise<void> {
       return;
     }
     fatalError = new Error(PROTOCOL_ERROR_MESSAGE);
-    process.stderr.write(`${PROTOCOL_ERROR_MESSAGE}\n`);
+    output.stderr(`${PROTOCOL_ERROR_MESSAGE}\n`);
     void close().catch(() => undefined);
   };
 
@@ -129,35 +179,68 @@ async function runStdio(): Promise<void> {
   }
 }
 
-export async function main(args: readonly string[] = process.argv.slice(2)): Promise<number> {
+export async function main(
+  args: readonly string[] = process.argv.slice(2),
+  dependencies: CliDependencies = {},
+): Promise<number> {
+  const output = dependencies.output ?? defaultOutput;
   const command = args[0];
   if (command === undefined) {
-    await runStdio();
+    await (dependencies.stdio ?? (() => runStdio(output)))();
     return 0;
   }
   if (args.length === 1 && command === "setup") {
-    await runSetup();
-    return 0;
+    try {
+      await runSetup(dependencies, output);
+      return 0;
+    } catch (error: unknown) {
+      output.stderr(`Graph MCP setup failed: ${messageFor(error)}\n`);
+      return 1;
+    }
   }
   if (args.length === 1 && (command === "--help" || command === "-h")) {
-    process.stdout.write(HELP);
+    output.stdout(HELP);
     return 0;
   }
   if (args.length === 1 && (command === "--version" || command === "-v")) {
-    process.stdout.write(`${VERSION}\n`);
+    output.stdout(`${VERSION}\n`);
     return 0;
   }
 
-  process.stderr.write(`Unknown arguments: ${args.join(" ")}\n${HELP}`);
+  output.stderr(`Unknown arguments: ${args.join(" ")}\n${HELP}`);
   return 1;
 }
 
-void main().then(
-  (exitCode) => {
-    process.exitCode = exitCode;
-  },
-  (error: unknown) => {
-    process.stderr.write(`Graph MCP failed: ${messageFor(error)}\n`);
-    process.exitCode = 1;
-  },
-);
+function isDirectEntry(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) {
+    return false;
+  }
+
+  const modulePath = realPathOrUndefined(fileURLToPath(import.meta.url));
+  const entryPath = realPathOrUndefined(resolve(entry));
+  return modulePath !== undefined && entryPath !== undefined && modulePath === entryPath;
+}
+
+function realPathOrUndefined(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch (error: unknown) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+if (isDirectEntry()) {
+  void main().then(
+    (exitCode) => {
+      process.exitCode = exitCode;
+    },
+    (error: unknown) => {
+      defaultOutput.stderr(`Graph MCP failed: ${messageFor(error)}\n`);
+      process.exitCode = 1;
+    },
+  );
+}
