@@ -25,5 +25,11 @@
       "Find the latest messages in a Teams chat."
     ]
   },
-  "mcpServers": "./.mcp.json"
+  "mcpServers": {
+    "graph": {
+      "command": "node",
+      "args": ["./dist/graph-mcp.js"],
+      "cwd": "."
+    }
+  }
 }

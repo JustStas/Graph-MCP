@@ -9,6 +9,14 @@ const manifestPaths = [
   "plugins/graph-mcp/.claude-plugin/plugin.json",
   "plugins/graph-mcp/.codex-plugin/plugin.json",
 ];
+const sourceVersionChecks = [
+  { path: "src/cli.ts", label: "CLI VERSION", pattern: /const VERSION = "([^"]+)";/ },
+  {
+    path: "src/server.ts",
+    label: "server metadata version",
+    pattern: /name: "Graph MCP", version: "([^"]+)"/,
+  },
+];
 
 /**
  * @param {string} path
@@ -24,6 +32,20 @@ async function readVersion(path) {
 }
 
 /**
+ * @param {{ path: string, label: string, pattern: RegExp }} check
+ * @returns {Promise<string>}
+ */
+async function readSourceVersion(check) {
+  const source = await readFile(join(repositoryRoot, check.path), "utf8");
+  const match = check.pattern.exec(source);
+  const version = match?.[1];
+  if (version === undefined || version.length === 0) {
+    throw new Error(`${check.path} does not contain a ${check.label}.`);
+  }
+  return version;
+}
+
+/**
  * @param {unknown} value
  * @returns {value is Record<string, unknown>}
  */
@@ -34,6 +56,14 @@ function isRecord(value) {
 export async function verifyPluginVersions() {
   const versions = await Promise.all(
     manifestPaths.map(async (path) => ({ path, version: await readVersion(path) })),
+  );
+  versions.push(
+    ...(await Promise.all(
+      sourceVersionChecks.map(async (check) => ({
+        path: check.path,
+        version: await readSourceVersion(check),
+      })),
+    )),
   );
   const expectedVersion = versions[0]?.version;
   if (expectedVersion === undefined) {

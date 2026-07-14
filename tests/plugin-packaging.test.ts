@@ -1,36 +1,23 @@
-import { access, readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import {
+  getDefaultEnvironment,
+  StdioClientTransport,
+} from "@modelcontextprotocol/sdk/client/stdio.js";
 import { describe, expect, test } from "vitest";
 
+import { loadSettings } from "../src/config.js";
+
+const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+const pluginRoot = join(repositoryRoot, "plugins/graph-mcp");
 const repositoryUrl = "https://github.com/JustStas/Graph-MCP";
-const expectedScopes = [
-  "offline_access",
-  "openid",
-  "profile",
-  "User.Read",
-  "User.ReadBasic.All",
-  "Chat.Read",
-  "Chat.ReadWrite",
-  "ChatMessage.Send",
-  "ChannelMessage.Read.All",
-  "ChannelMessage.Send",
-  "Team.ReadBasic.All",
-  "Channel.ReadBasic.All",
-  "ChannelMember.Read.All",
-  "Calendars.ReadWrite",
-  "Mail.Read",
-  "Mail.Send",
-  "Presence.Read",
-  "Presence.Read.All",
-  "Presence.ReadWrite",
-  "OnlineMeetings.Read",
-  "OnlineMeetingTranscript.Read.All",
-  "OnlineMeetingRecording.Read.All",
-  "Files.ReadWrite.All",
-];
 
 async function readText(path: string): Promise<string> {
   return readFile(join(repositoryRoot, path), "utf8");
@@ -51,7 +38,6 @@ function expectManifestMetadata(manifest: Record<string, unknown>): void {
     repository: repositoryUrl,
     license: "MIT",
     skills: "./skills/",
-    mcpServers: "./.mcp.json",
     author: {
       name: "JustStas",
       url: "https://github.com/JustStas",
@@ -67,6 +53,7 @@ describe("Graph MCP plugin packaging", () => {
     const codexManifest = await readJson("plugins/graph-mcp/.codex-plugin/plugin.json");
 
     expectManifestMetadata(claudeManifest);
+    expect(claudeManifest.mcpServers).toBe("./.mcp.json");
     expectManifestMetadata(codexManifest);
   });
 
@@ -96,6 +83,14 @@ describe("Graph MCP plugin packaging", () => {
       category: "Productivity",
       capabilities: ["Read", "Write", "Interactive"],
       websiteURL: repositoryUrl,
+    });
+
+    expect(manifest.mcpServers).toEqual({
+      graph: {
+        command: "node",
+        args: ["./dist/graph-mcp.js"],
+        cwd: ".",
+      },
     });
 
     const starterPrompts = userInterface.defaultPrompt;
@@ -136,7 +131,7 @@ describe("Graph MCP plugin packaging", () => {
     expect(marketplace).not.toHaveProperty("version");
   });
 
-  test("the shared MCP config launches the plugin-root-relative Node bundle", async () => {
+  test("the Claude MCP config uses the Claude plugin-root placeholder", async () => {
     const config = await readJson("plugins/graph-mcp/.mcp.json");
 
     expect(config).toEqual({
@@ -149,22 +144,78 @@ describe("Graph MCP plugin packaging", () => {
     });
   });
 
+  test("the Codex-relative MCP bundle launches from the installed plugin root", async () => {
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      ["./dist/graph-mcp.js", "--version"],
+      { cwd: pluginRoot },
+    );
+
+    expect(stdout).toBe("0.6.0\n");
+    expect(stderr).toBe("");
+  });
+
+  test("the Codex-relative MCP bundle serves tools/list from its plugin root", async () => {
+    const home = await mkdtemp(join(tmpdir(), "graph-mcp-plugin-smoke-"));
+    const client = new Client({ name: "graph-mcp-plugin-smoke", version: "1.0.0" });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["./dist/graph-mcp.js"],
+      cwd: pluginRoot,
+      env: {
+        ...getDefaultEnvironment(),
+        HOME: home,
+        USERPROFILE: home,
+        HOMEDRIVE: "",
+        HOMEPATH: "",
+      },
+      stderr: "pipe",
+    });
+
+    try {
+      await client.connect(transport);
+      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.6.0" });
+      const listed = await client.listTools();
+      expect(listed.tools).toHaveLength(44);
+    } finally {
+      await client.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   test("the setup skill has valid trigger-only frontmatter and exact delegated scopes", async () => {
     const skill = await readText("plugins/graph-mcp/skills/setup/SKILL.md");
     const frontmatter = skill.match(/^---\n([\s\S]*?)\n---/);
     expect(frontmatter?.[1]).toBeDefined();
     expect(frontmatter?.[1]).toMatch(/^name: [a-z0-9-]+$/m);
-    expect(frontmatter?.[1]).toMatch(/^description: Use when .+$/m);
-    expect(frontmatter?.[1]).not.toMatch(/description:.*(?:run|follow|step|guide|install)/i);
+    expect(frontmatter?.[1]).toContain(
+      "description: Use when installing Graph MCP, configuring Microsoft Graph permissions, handling permission or admin-consent errors, reauthentication, device-code fallback, or Graph authentication failures.",
+    );
+    expect(frontmatter?.[1]).not.toMatch(/description:.*(?:run|follow|step|guide|command)/i);
 
     const listedScopes = [...skill.matchAll(/^\s*-\s+`([^`]+)`\s*$/gm)].map((match) => match[1]);
-    expect(listedScopes).toEqual(expectedScopes);
-    expect(listedScopes).toHaveLength(23);
+    const settings = await loadSettings({ homeDir: repositoryRoot });
+    expect(listedScopes).toEqual(settings.scopes);
+    expect(listedScopes).toHaveLength(settings.scopes.length);
 
     expect(skill).toContain("public client");
     expect(skill).toContain("Mobile and desktop applications");
     expect(skill).toContain("http://localhost:3000/auth/callback");
     expect(skill).toContain('node "${CLAUDE_PLUGIN_ROOT}/dist/graph-mcp.js" setup');
+    expect(skill).toContain('node "./dist/graph-mcp.js" setup');
+    expect(skill).toContain(
+      "For Codex, resolve the installed plugin root as the parent directory of the loaded skills/setup/SKILL.md.",
+    );
+    expect(skill).toContain("AZURE_CLIENT_ID");
+    expect(skill).toContain("AZURE_TENANT_ID");
+    expect(skill).toContain("common");
+    expect(skill).toContain("Always use the bundled host-specific command.");
+    expect(skill).toContain(
+      "Quote the host-specific bundled command verbatim when responding; this skill is authoritative over legacy README commands.",
+    );
+    expect(skill).toContain(
+      "Never substitute generic graph-mcp setup, invent host-registration or TOML commands, or use undocumented env-registration commands.",
+    );
     expect(skill).toContain(
       "The setup command only persists the Client ID and Tenant ID; it does not perform login.",
     );
@@ -172,6 +223,10 @@ describe("Graph MCP plugin packaging", () => {
     expect(skill).toContain('method: "device_code"');
     expect(skill).toMatch(/`method: "device_code"` is the fallback\./);
     expect(skill).not.toMatch(/The setup command uses browser login by default\./);
+    expect(skill).toContain("tokens-v2.enc");
+    expect(skill).toContain(".key-v2");
+    expect(skill).not.toContain("tokens.enc");
+    expect(skill).not.toMatch(/~\/\.graph-mcp\/\.key(?:\b|[`.)])/);
   });
 
   test("the setup skill gives deterministic credential, token, and scope-safety guidance", async () => {
@@ -189,16 +244,22 @@ describe("Graph MCP plugin packaging", () => {
     expect(lowerSkill).toContain("least privilege");
     expect(lowerSkill).toContain("admin consent");
 
-    const unsafeInstructionLines = skill
-      .split("\n")
-      .filter((line) => !/never|do not|without/i.test(line));
-    expect(unsafeInstructionLines.join("\n")).not.toMatch(
-      /(?:ask|request|collect|enter|paste|provide|store|save)\s+(?:your\s+)?(?:client secret|access token|refresh token|authorization code|MFA(?: code)?|credentials)/i,
+    const safeSecuritySentences = [
+      "Client ID and Tenant ID are identifiers, not secrets.",
+      "Never request or store a client secret, access token, refresh token, authorization code, MFA code, or credentials in conversation.",
+    ];
+    const sentences = skill
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter((sentence) => sentence.length > 0 && !safeSecuritySentences.includes(sentence));
+    expect(sentences.join("\n")).not.toMatch(
+      /\b(?:ask|request|collect|enter|paste|provide|store|save)\s+(?:your\s+)?(?:client secret|access token|refresh token|authorization code|MFA(?: code)?|credentials)\b/i,
     );
   });
 
   test("the authored plugin documentation and copied release artifacts exist", async () => {
     await expectFile("plugins/graph-mcp/dist/graph-mcp.js");
+    await expectFile("plugins/graph-mcp/dist/cli.js.map");
     await expectFile("plugins/graph-mcp/README.md");
     await expectFile("plugins/graph-mcp/LICENSE");
 
@@ -211,12 +272,23 @@ describe("Graph MCP plugin packaging", () => {
   test("the build keeps the root bundle behavior and synchronizes the plugin bundle and license", async () => {
     const buildScript = await readText("scripts/build.mjs");
 
+    await execFileAsync(process.execPath, ["scripts/build.mjs"], { cwd: repositoryRoot });
     expect(buildScript).toContain('outfile: "dist/cli.js"');
     expect(buildScript).toContain("copyFile");
     expect(buildScript).toContain("plugins/graph-mcp/dist/graph-mcp.js");
     expect(buildScript).toContain("plugins/graph-mcp/LICENSE");
     expect(buildScript).not.toContain('copyFile("README.md"');
+    expect(buildScript).not.toContain("replace(/[ \\t]+$/gm");
     await expectFile("plugins/graph-mcp/dist/graph-mcp.js");
+    await expectFile("plugins/graph-mcp/dist/cli.js.map");
+    expect(await readFile(join(repositoryRoot, "dist/cli.js"))).toEqual(
+      await readFile(join(pluginRoot, "dist/graph-mcp.js")),
+    );
+    expect(await readFile(join(repositoryRoot, "dist/cli.js.map"))).toEqual(
+      await readFile(join(pluginRoot, "dist/cli.js.map")),
+    );
+    expect(buildScript).toContain("verifyPluginVersions");
+    expect(buildScript).toContain("plugins/graph-mcp/dist/cli.js.map");
   });
 
   test("package and both plugin manifest versions are synchronized by the verifier", async () => {
@@ -232,5 +304,9 @@ describe("Graph MCP plugin packaging", () => {
     expect(verifier).toContain("package.json");
     expect(verifier).toContain(".claude-plugin/plugin.json");
     expect(verifier).toContain(".codex-plugin/plugin.json");
+    expect(verifier).toContain("src/cli.ts");
+    expect(verifier).toContain("src/server.ts");
+    const { verifyPluginVersions } = await import("../scripts/verify-plugin-versions.mjs");
+    await expect(verifyPluginVersions()).resolves.toBe("0.6.0");
   });
 });
