@@ -1,0 +1,15 @@
+{
+  "name": "graph-mcp",
+  "version": "0.6.0",
+  "description": "Use Microsoft Graph from Claude through a local MCP server.",
+  "author": {
+    "name": "JustStas",
+    "url": "https://github.com/JustStas"
+  },
+  "homepage": "https://github.com/JustStas/Graph-MCP",
+  "repository": "https://github.com/JustStas/Graph-MCP",
+  "license": "MIT",
+  "keywords": ["Microsoft Graph", "Teams", "Outlook", "MCP"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

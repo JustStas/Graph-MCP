@@ -1,0 +1,16 @@
+{
+  "name": "graph-mcp",
+  "owner": {
+    "name": "JustStas",
+    "url": "https://github.com/JustStas"
+  },
+  "metadata": {
+    "description": "A local Microsoft Graph MCP plugin for Claude and Codex."
+  },
+  "plugins": [
+    {
+      "name": "graph-mcp",
+      "source": "./plugins/graph-mcp"
+    }
+  ]
+}
