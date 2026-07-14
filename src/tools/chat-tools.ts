@@ -45,7 +45,7 @@ function currentUserId(response: unknown): string {
 }
 
 function memberBinding(member: string): string {
-  const encodedMember = encodeURIComponent(member).replaceAll("'", "''");
+  const encodedMember = encodeURIComponent(member).replace(/%40/gi, "@").replaceAll("'", "''");
   return `https://graph.microsoft.com/v1.0/users('${encodedMember}')`;
 }
 

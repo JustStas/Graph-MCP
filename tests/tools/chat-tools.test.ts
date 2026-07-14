@@ -701,8 +701,8 @@ describe("chat creation", () => {
     expect(bindings).toEqual([
       `https://graph.microsoft.com/v1.0/users('${ordinaryGuid}')`,
       `https://graph.microsoft.com/v1.0/users('${ordinarySimpleId}')`,
-      "https://graph.microsoft.com/v1.0/users('ada.lovelace%40example.com')",
-      "https://graph.microsoft.com/v1.0/users('o''hara%23ops%2Fteam%3Fdomain%5Cuser%40example.com')",
+      "https://graph.microsoft.com/v1.0/users('ada.lovelace@example.com')",
+      "https://graph.microsoft.com/v1.0/users('o''hara%23ops%2Fteam%3Fdomain%5Cuser@example.com')",
     ]);
 
     for (const binding of bindings ?? []) {
