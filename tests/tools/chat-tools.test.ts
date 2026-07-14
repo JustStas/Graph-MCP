@@ -683,6 +683,81 @@ describe("chat creation", () => {
     ]);
   });
 
+  test("returns the full valid created chat response unchanged", async () => {
+    const createdChat = {
+      id: "group-created",
+      chatType: "group",
+      topic: "Release room",
+      createdDateTime: "2026-07-14T12:00:00Z",
+    };
+    const { harness } = registerChatHarness([createdChat]);
+
+    await expect(
+      harness.invoke("graph_create_chat", {
+        chat_type: "group",
+        members: ["user-1"],
+        topic: "Release room",
+      }),
+    ).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ data: createdChat, message: "success" }),
+        },
+      ],
+    });
+  });
+
+  test.each([
+    {
+      label: "null response",
+      response: null,
+    },
+    {
+      label: "text response",
+      response: "payload-secret-text-response",
+    },
+    {
+      label: "scalar response",
+      response: 42,
+    },
+    {
+      label: "array response",
+      response: [{ id: "payload-secret-array-id" }],
+    },
+    {
+      label: "missing id",
+      response: { topic: "payload-secret-missing-id" },
+    },
+    {
+      label: "null id",
+      response: { id: null, secret: "payload-secret-null-id" },
+    },
+    {
+      label: "numeric id",
+      response: { id: 42, secret: "payload-secret-numeric-id" },
+    },
+    {
+      label: "empty id",
+      response: { id: "", secret: "payload-secret-empty-id" },
+    },
+  ])("rejects malformed created chat responses without leakage: $label", async ({ response }) => {
+    const { harness, graph } = registerChatHarness([response]);
+
+    const result = await harness.invoke("graph_create_chat", {
+      chat_type: "group",
+      members: ["user-1"],
+    });
+
+    expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+    expect(graph.calls).toHaveLength(1);
+    expect(graph.calls[0]?.path).toBe("/chats");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("payload-secret");
+    expect(serialized).not.toContain("TypeError");
+    expect(serialized).not.toContain("Cannot read");
+  });
+
   test("preserves ordinary member bindings and contains apostrophes and URI-breaking member data", async () => {
     const { harness, graph } = registerChatHarness([{ id: "group-1" }]);
     const ordinaryGuid = "11111111-2222-3333-4444-555555555555";

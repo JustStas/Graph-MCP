@@ -20,6 +20,8 @@ const MENTIONS_SCHEMA = z
   .optional()
   .default(null);
 
+type GraphObjectWithId = Record<string, unknown> & { readonly id: string };
+
 function isNonArrayObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -37,11 +39,11 @@ function collectionValue(response: unknown): unknown[] {
   return response.value;
 }
 
-function currentUserId(response: unknown): string {
+function requireGraphObjectWithId(response: unknown): GraphObjectWithId {
   if (!isNonArrayObject(response) || typeof response.id !== "string" || response.id.length === 0) {
     throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
   }
-  return response.id;
+  return response as GraphObjectWithId;
 }
 
 function memberBinding(member: string): string {
@@ -128,7 +130,7 @@ export function registerChatTools(
 
       if (chat_type === "oneOnOne") {
         const me = await dependencies.graphClient.get("/me", { $select: "id" });
-        const myId = currentUserId(me);
+        const myId = requireGraphObjectWithId(me).id;
         if (!chatMembers.includes(myId)) {
           chatMembers.unshift(myId);
         }
@@ -147,7 +149,7 @@ export function registerChatTools(
       }
 
       const result = await dependencies.graphClient.post("/chats", body);
-      return successResponse(result);
+      return successResponse(requireGraphObjectWithId(result));
     },
   );
 
