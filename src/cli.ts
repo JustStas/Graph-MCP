@@ -28,6 +28,13 @@ Claude Code:
 Codex:
   codex mcp add graph-mcp -- node /path/to/graph-mcp/dist/cli.js
 `;
+const UNKNOWN_ARGUMENTS_MESSAGE = "Unknown arguments. Run graph-mcp --help for usage.\n";
+const EMPTY_CLIENT_ID_MESSAGE = "Azure Client ID is required.";
+const SETUP_INPUT_MESSAGE = "Unable to read setup input.";
+const SETUP_SAVE_MESSAGE = "Unable to save configuration.";
+const SETUP_CLOSE_MESSAGE = "Unable to close setup input.";
+const SETUP_SAVED_CLEANUP_MESSAGE = "Configuration saved but cleanup failed.";
+const SERVER_FAILURE_MESSAGE = "Graph MCP server failed.";
 
 export interface CliOutput {
   readonly stdout: (text: string) => void;
@@ -46,6 +53,16 @@ export interface CliDependencies {
   readonly stdio?: () => Promise<void>;
 }
 
+class CliFailure extends Error {
+  readonly publicMessage: string;
+
+  constructor(publicMessage: string) {
+    super(publicMessage);
+    this.name = "CliFailure";
+    this.publicMessage = publicMessage;
+  }
+}
+
 const defaultOutput: CliOutput = {
   stdout: (text) => {
     process.stdout.write(text);
@@ -55,8 +72,14 @@ const defaultOutput: CliOutput = {
   },
 };
 
-function messageFor(error: unknown): string {
-  return error instanceof Error && error.message.trim() !== "" ? error.message : "Unknown error.";
+function setupMessageFor(error: unknown): string {
+  return error instanceof CliFailure ? error.publicMessage : "Unexpected setup failure.";
+}
+
+function serverMessageFor(error: unknown): string {
+  return error instanceof Error && error.message === PROTOCOL_ERROR_MESSAGE
+    ? PROTOCOL_ERROR_MESSAGE
+    : SERVER_FAILURE_MESSAGE;
 }
 
 function combineShutdownErrors(first: unknown, second: unknown): unknown {
@@ -80,19 +103,60 @@ function createDefaultPrompt(): CliPrompt {
 }
 
 async function runSetup(dependencies: CliDependencies, output: CliOutput): Promise<void> {
-  const prompt = dependencies.prompt ?? createDefaultPrompt();
-  const persist = dependencies.persistSetupConfig ?? persistSetupConfig;
+  let prompt: CliPrompt;
   try {
-    const azureClientId = (await prompt.question("Azure Client ID: ")).trim();
-    if (azureClientId === "") {
-      throw new Error("Azure Client ID is required.");
-    }
-    const azureTenantId = (await prompt.question("Azure Tenant ID [common]: ")).trim() || "common";
-    await persist({ azureClientId, azureTenantId });
-    output.stdout(SETUP_OUTPUT);
-  } finally {
-    await prompt.close();
+    prompt = dependencies.prompt ?? createDefaultPrompt();
+  } catch {
+    throw new CliFailure(SETUP_INPUT_MESSAGE);
   }
+  const persist = dependencies.persistSetupConfig ?? persistSetupConfig;
+  let primaryFailure: CliFailure | undefined;
+  let azureClientId = "";
+  let azureTenantId = "common";
+  let saved = false;
+
+  try {
+    azureClientId = (await prompt.question("Azure Client ID: ")).trim();
+  } catch {
+    primaryFailure = new CliFailure(SETUP_INPUT_MESSAGE);
+  }
+
+  if (primaryFailure === undefined && azureClientId === "") {
+    primaryFailure = new CliFailure(EMPTY_CLIENT_ID_MESSAGE);
+  }
+
+  if (primaryFailure === undefined) {
+    try {
+      azureTenantId = (await prompt.question("Azure Tenant ID [common]: ")).trim() || "common";
+    } catch {
+      primaryFailure = new CliFailure(SETUP_INPUT_MESSAGE);
+    }
+  }
+
+  if (primaryFailure === undefined) {
+    try {
+      await persist({ azureClientId, azureTenantId });
+      saved = true;
+    } catch {
+      primaryFailure = new CliFailure(SETUP_SAVE_MESSAGE);
+    }
+  }
+
+  let cleanupFailed = false;
+  try {
+    await prompt.close();
+  } catch {
+    cleanupFailed = true;
+  }
+
+  if (primaryFailure !== undefined) {
+    throw primaryFailure;
+  }
+  if (cleanupFailed) {
+    throw new CliFailure(saved ? SETUP_SAVED_CLEANUP_MESSAGE : SETUP_CLOSE_MESSAGE);
+  }
+
+  output.stdout(SETUP_OUTPUT);
 }
 
 async function runStdio(output: CliOutput): Promise<void> {
@@ -186,15 +250,20 @@ export async function main(
   const output = dependencies.output ?? defaultOutput;
   const command = args[0];
   if (command === undefined) {
-    await (dependencies.stdio ?? (() => runStdio(output)))();
-    return 0;
+    try {
+      await (dependencies.stdio ?? (() => runStdio(output)))();
+      return 0;
+    } catch (error: unknown) {
+      output.stderr(`Graph MCP failed: ${serverMessageFor(error)}\n`);
+      return 1;
+    }
   }
   if (args.length === 1 && command === "setup") {
     try {
       await runSetup(dependencies, output);
       return 0;
     } catch (error: unknown) {
-      output.stderr(`Graph MCP setup failed: ${messageFor(error)}\n`);
+      output.stderr(`Graph MCP setup failed: ${setupMessageFor(error)}\n`);
       return 1;
     }
   }
@@ -207,7 +276,7 @@ export async function main(
     return 0;
   }
 
-  output.stderr(`Unknown arguments: ${args.join(" ")}\n${HELP}`);
+  output.stderr(UNKNOWN_ARGUMENTS_MESSAGE);
   return 1;
 }
 
@@ -217,16 +286,31 @@ function isDirectEntry(): boolean {
     return false;
   }
 
-  const modulePath = realPathOrUndefined(fileURLToPath(import.meta.url));
-  const entryPath = realPathOrUndefined(resolve(entry));
-  return modulePath !== undefined && entryPath !== undefined && modulePath === entryPath;
+  let candidatePath: string;
+  try {
+    candidatePath = resolve(entry);
+  } catch {
+    return false;
+  }
+
+  const modulePath = realpathSync(fileURLToPath(import.meta.url));
+  const entryPath = realPathOrUndefined(candidatePath);
+  return entryPath !== undefined && modulePath === entryPath;
 }
 
 function realPathOrUndefined(path: string): string | undefined {
   try {
     return realpathSync(path);
   } catch (error: unknown) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+    if (
+      error instanceof TypeError ||
+      (error instanceof Error &&
+        "code" in error &&
+        (error.code === "ENOENT" ||
+          error.code === "EACCES" ||
+          error.code === "ENOTDIR" ||
+          error.code === "ERR_INVALID_ARG_TYPE"))
+    ) {
       return undefined;
     }
     throw error;
@@ -239,7 +323,7 @@ if (isDirectEntry()) {
       process.exitCode = exitCode;
     },
     (error: unknown) => {
-      defaultOutput.stderr(`Graph MCP failed: ${messageFor(error)}\n`);
+      defaultOutput.stderr(`Graph MCP failed: ${serverMessageFor(error)}\n`);
       process.exitCode = 1;
     },
   );
