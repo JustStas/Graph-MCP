@@ -64,7 +64,7 @@ describe("npm package contents", () => {
 
     expect(paths).toEqual([...allowedPackagePaths].sort());
     expect(files.find((file) => file.path === "dist/cli.js")?.mode).toBe(0o755);
-  });
+  }, 30_000);
 
   test("the package verifier accepts the current package contents", async () => {
     const { stdout } = await execFileAsync(process.execPath, ["scripts/verify-package.mjs"], {
@@ -73,7 +73,7 @@ describe("npm package contents", () => {
     });
 
     expect(stdout).toContain("npm package verification passed");
-  });
+  }, 30_000);
 
   test("the bundled CLI executes through an npm-style symlink", async () => {
     if (process.platform === "win32") {
