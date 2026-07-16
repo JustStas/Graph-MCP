@@ -246,9 +246,9 @@ plugin manifest versions, changelog entry, and `v0.6.0` tag agree.
    git status --short
    ```
 
-4. Create or approve the `v0.6.0` tag through the Azure DevOps release process, then configure
-   npm authentication in the protected release job or local user configuration. Never commit
-   an npm token.
+4. After the pull request is merged, create the `v0.6.0` tag from the merged `main` commit and
+   create the matching GitHub release. Configure npm authentication in the release environment
+   or local user configuration. Never commit an npm token.
 5. Publish the public package and verify the registry version:
 
    ```bash
@@ -256,9 +256,9 @@ plugin manifest versions, changelog entry, and `v0.6.0` tag agree.
    npm view graph-mcp version
    ```
 
-An Azure DevOps release pipeline should run these same locked install, verification, validator,
-smoke, and publish commands from the protected version tag. Do not restore the removed GitHub
-Actions/PyPI workflow.
+There is no Python/PyPI publishing step in the Node release. Any future GitHub Actions npm
+publishing workflow should run these same locked install, verification, validator, smoke, and
+publish commands from the protected version tag.
 
 ## Architecture and runtime behavior
 
