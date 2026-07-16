@@ -141,6 +141,98 @@ def register_mail_tools(mcp):
 
     @mcp.tool()
     @require_auth
+    async def graph_create_draft(
+        to: list[str],
+        subject: str,
+        body: str,
+        cc: list[str] | None = None,
+        is_html: bool = True,
+    ) -> str:
+        """Create a draft email without sending it.
+
+        Args:
+            to: List of recipient email addresses.
+            subject: Email subject.
+            body: Email body content. When `is_html` is true, send explicit
+                HTML; markdown is not converted.
+            cc: Optional list of CC email addresses.
+            is_html: Whether the body is HTML content (default: True).
+        """
+        message: dict = {
+            "subject": subject,
+            "body": build_rich_text_body(
+                body,
+                is_html,
+                html_content_type="HTML",
+                text_content_type="Text",
+            ),
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in to
+            ],
+        }
+        if cc:
+            message["ccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in cc
+            ]
+        result = await graph_client.post("/me/messages", json_body=message)
+        return success_response(result)
+
+    @mcp.tool()
+    @require_auth
+    async def graph_update_draft(
+        message_id: str,
+        subject: str | None = None,
+        body: str | None = None,
+        to: list[str] | None = None,
+        cc: list[str] | None = None,
+        is_html: bool = True,
+    ) -> str:
+        """Update an existing draft email.
+
+        Args:
+            message_id: The draft message ID.
+            subject: New subject (omit to leave unchanged).
+            body: New body content (omit to leave unchanged).
+            to: New list of recipient email addresses (omit to leave unchanged).
+            cc: New list of CC email addresses (omit to leave unchanged).
+            is_html: Whether the body is HTML content (default: True).
+        """
+        updates: dict = {}
+        if subject is not None:
+            updates["subject"] = subject
+        if body is not None:
+            updates["body"] = build_rich_text_body(
+                body,
+                is_html,
+                html_content_type="HTML",
+                text_content_type="Text",
+            )
+        if to is not None:
+            updates["toRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in to
+            ]
+        if cc is not None:
+            updates["ccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in cc
+            ]
+        result = await graph_client.patch(
+            f"/me/messages/{message_id}", json_body=updates
+        )
+        return success_response(result)
+
+    @mcp.tool()
+    @require_auth
+    async def graph_send_draft(message_id: str) -> str:
+        """Send an existing draft email.
+
+        Args:
+            message_id: The draft message ID to send.
+        """
+        await graph_client.post(f"/me/messages/{message_id}/send")
+        return success_response({"status": "Draft sent"})
+
+    @mcp.tool()
+    @require_auth
     async def graph_list_mail_attachments(message_id: str) -> str:
         """List attachments on an email message.
 
