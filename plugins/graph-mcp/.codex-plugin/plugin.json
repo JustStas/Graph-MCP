@@ -1,0 +1,35 @@
+{
+  "name": "graph-mcp",
+  "version": "0.6.0",
+  "description": "Use Microsoft Graph from Codex through a local MCP server.",
+  "author": {
+    "name": "JustStas",
+    "url": "https://github.com/JustStas"
+  },
+  "homepage": "https://github.com/JustStas/Graph-MCP",
+  "repository": "https://github.com/JustStas/Graph-MCP",
+  "license": "MIT",
+  "keywords": ["Microsoft Graph", "Teams", "Outlook", "MCP"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Graph MCP",
+    "shortDescription": "Connect Codex to Microsoft Graph.",
+    "longDescription": "Read and act on approved Microsoft Graph data through a local MCP server.",
+    "developerName": "JustStas",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write", "Interactive"],
+    "websiteURL": "https://github.com/JustStas/Graph-MCP",
+    "defaultPrompt": [
+      "List my upcoming calendar events.",
+      "Summarize my unread mail.",
+      "Find the latest messages in a Teams chat."
+    ]
+  },
+  "mcpServers": {
+    "graph": {
+      "command": "node",
+      "args": ["./dist/graph-mcp.js"],
+      "cwd": "."
+    }
+  }
+}
