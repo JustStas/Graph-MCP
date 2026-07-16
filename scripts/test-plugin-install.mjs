@@ -169,20 +169,28 @@ function errorValue(value) {
   return value instanceof Error ? value : new Error(stringValue(value));
 }
 
-/** @param {unknown} value @param {string} tempRoot */
-function sanitize(value, tempRoot) {
+/**
+ * @param {unknown} value
+ * @param {string} tempRoot
+ * @param {readonly string[]} [sensitiveValues]
+ */
+function sanitize(value, tempRoot, sensitiveValues = activeSensitiveValues) {
   let result = stringValue(value)
     .replaceAll(repositoryRoot, "<source-repo>")
     .replaceAll(tempRoot, "<temp-root>")
     .replaceAll(String.fromCharCode(27), "")
     .replace(/\s+/g, " ");
 
-  for (const sensitiveValue of activeSensitiveValues) {
+  for (const sensitiveValue of sensitiveValues) {
     if (sensitiveValue.length > 3) result = result.replaceAll(sensitiveValue, "<redacted>");
   }
 
   return result
     .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer <redacted>")
+    .replace(
+      /("(?:access|refresh)[_-]?token"|"authorization(?:[_-]?code)?"|"code[_-]?verifier"|"pkce[_-]?verifier"|"client[_-]?secret"|"encryption[_-]?key")\s*:\s*"[^"]*"/gi,
+      (match) => `${match.slice(0, match.indexOf(":") + 1)}"<redacted>"`,
+    )
     .replace(
       /((?:access|refresh)[_-]?token|authorization(?:[_-]?code)?|code[_-]?verifier|pkce[_-]?verifier|client[_-]?secret|encryption[_-]?key)\s*[=:]\s*[^\s;,]+/gi,
       "$1=<redacted>",
@@ -447,12 +455,19 @@ async function runCaptured(
   });
 }
 
-/** @param {EnvironmentOptions} options @returns {Environment} */
-function environmentFor({ home, claudeConfigDir, codexHome, tempRoot, pluginRoot }) {
+/**
+ * @param {EnvironmentOptions} options
+ * @param {NodeJS.ProcessEnv} [inheritedEnvironment]
+ * @returns {Environment}
+ */
+function environmentFor(
+  { home, claudeConfigDir, codexHome, tempRoot, pluginRoot },
+  inheritedEnvironment = process.env,
+) {
   /** @type {Environment} */
   const environment = {};
   for (const key of ALLOWLISTED_ENV_KEYS) {
-    const value = process.env[key];
+    const value = inheritedEnvironment[key];
     if (value !== undefined) environment[key] = value;
   }
 
@@ -628,9 +643,35 @@ async function resolveServer(pluginRoot, server, label) {
   return { command, args, cwd, entrypoint };
 }
 
-/** @param {string} label @param {string} path @param {string} stagedPluginRoot @param {string} sourceRoot */
-async function assertInstalledAuthenticity(label, path, stagedPluginRoot, sourceRoot) {
-  const installedPluginRoot = await assertEntrypointInside(path, activeTempRoot, `${label} plugin`);
+/**
+ * @param {string} label
+ * @param {string} path
+ * @param {string} expectedInstallRoot
+ * @param {string} tempRoot
+ * @param {string} stagedPluginRoot
+ * @param {string} sourceRoot
+ */
+async function assertInstalledAuthenticity(
+  label,
+  path,
+  expectedInstallRoot,
+  tempRoot,
+  stagedPluginRoot,
+  sourceRoot,
+) {
+  const installedPluginRoot = await assertEntrypointInside(path, tempRoot, `${label} plugin`);
+  const canonicalExpectedRoot = await assertEntrypointInside(
+    expectedInstallRoot,
+    tempRoot,
+    `${label} expected host cache`,
+  );
+  if (installedPluginRoot !== canonicalExpectedRoot) {
+    throw new Error(`${label} installed plugin did not resolve to the expected host cache path.`);
+  }
+  const canonicalStagedRoot = await realpath(stagedPluginRoot);
+  if (await pathIsInside(installedPluginRoot, canonicalStagedRoot)) {
+    throw new Error(`${label} installed plugin resolved to the staged plugin.`);
+  }
   const realSourceRoot = await realpath(sourceRoot);
   if (await pathIsInside(installedPluginRoot, realSourceRoot)) {
     throw new Error(`${label} installed plugin resolved to the source repository.`);
@@ -935,6 +976,7 @@ async function main() {
       );
       const claudeInstalled = await resolveInstalledPath(
         claudePluginRoot,
+        expectedClaudeInstall,
         tempRoot,
         "Claude",
         stagedPluginRoot,
@@ -1027,6 +1069,7 @@ async function main() {
       );
       const codexInstalled = await resolveInstalledPath(
         codexPluginRoot,
+        expectedCodexInstall,
         tempRoot,
         "Codex",
         stagedPluginRoot,
@@ -1085,11 +1128,27 @@ async function relativeToTempRoot(root, path) {
   return relative(realRoot, realPath);
 }
 
-/** @param {string} path @param {string} tempRoot @param {string} label @param {string} stagedPluginRoot @param {string} sourceRoot */
-async function resolveInstalledPath(path, tempRoot, label, stagedPluginRoot, sourceRoot) {
+/**
+ * @param {string} path
+ * @param {string} expectedInstallRoot
+ * @param {string} tempRoot
+ * @param {string} label
+ * @param {string} stagedPluginRoot
+ * @param {string} sourceRoot
+ */
+async function resolveInstalledPath(
+  path,
+  expectedInstallRoot,
+  tempRoot,
+  label,
+  stagedPluginRoot,
+  sourceRoot,
+) {
   const { installedPluginRoot } = await assertInstalledAuthenticity(
     label,
     path,
+    expectedInstallRoot,
+    tempRoot,
     stagedPluginRoot,
     sourceRoot,
   );
@@ -1119,7 +1178,17 @@ function assertMcpFidelity(label, actual, baseline) {
   assertDeepEqual(actual.tools, baseline.tools, `${label} tools/list metadata`);
 }
 
-export { assertCanonicalInside };
+export {
+  assertCanonicalInside,
+  assertFileHashEqual,
+  assertInstalledAuthenticity,
+  assertMcpFidelity,
+  environmentFor,
+  runCaptured,
+  sanitize,
+  withDependencyBoundary,
+  withTempWorkspace,
+};
 
 const modulePath = fileURLToPath(import.meta.url);
 if (process.argv[1] && resolve(process.argv[1]) === modulePath) {
