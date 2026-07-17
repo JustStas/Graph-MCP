@@ -213,8 +213,10 @@ bound each job so a stalled registry or runner cannot hold the deployment indefi
 - Keep the package lock committed and install with `npm ci`.
 - Publish a previously prepared tarball rather than rebuilding in the privileged job.
 - Store no npm automation token in GitHub.
-- After OIDC succeeds, set npm publishing access to "Require two-factor authentication and
-  disallow tokens" and revoke any unused publish-capable tokens.
+- After the trust relationship is saved and its identity fields are verified, set npm
+  publishing access to "Require two-factor authentication and disallow tokens" and revoke any
+  unused publish-capable tokens. The first actual OIDC exchange is verified by the next new
+  version published through the workflow.
 - Preserve the exact `repository.url` association and automatic provenance on future
   OIDC-published versions.
 
@@ -252,7 +254,7 @@ trusted publisher for a package that does not yet exist.
     it succeeds only if the registry integrity matches.
 14. Verify registry metadata, global installation, `graph-mcp --version`, and a clean MCP
     startup from the installed package. Record that `0.6.1` is the manual bootstrap exception;
-    provenance is expected starting with the first version actually published by OIDC.
+    both the first real OIDC publish test and provenance check are deferred to `0.6.2`.
 
 The maintainer is expected to interact only for npm's 2FA/passkey challenges and any npm
 website setting that lacks a safe CLI equivalent.
@@ -321,7 +323,8 @@ graph-mcp --version
 The installed executable must report `0.6.1`. A clean temporary MCP host launch must discover
 all 44 tools from the installed package. The trusted-publisher configuration must match
 `JustStas/Graph-MCP`, `publish.yml`, and environment `npm`. Provenance is not expected on the
-manual bootstrap version and must be checked on the first later version published by OIDC.
+manual bootstrap version. The no-op `0.6.1` release run does not exercise npm's OIDC exchange;
+both OIDC authentication and provenance must be checked on `0.6.2`.
 
 ## Documentation Changes
 
