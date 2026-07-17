@@ -1,10 +1,10 @@
 {
-  "name": "graph-mcp",
-  "version": "0.6.0",
+  "name": "@juststas/graph-mcp",
+  "version": "0.6.1",
   "description": "MCP server for Microsoft Teams, Outlook Calendar, Mail, and OneDrive via Microsoft Graph",
   "type": "module",
   "bin": {
-    "graph-mcp": "./dist/cli.js"
+    "graph-mcp": "dist/cli.js"
   },
   "files": [
     "dist/",
@@ -25,7 +25,13 @@
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build && npm run validate:versions && npm run validate:package",
     "prepublishOnly": "npm run verify"
   },
-  "repository": "git+https://github.com/JustStas/Graph-MCP.git",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JustStas/Graph-MCP.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=22"

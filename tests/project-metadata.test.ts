@@ -6,10 +6,15 @@ describe("package metadata", () => {
     const packageJsonUrl = new URL("../package.json", import.meta.url);
     const pkg: unknown = JSON.parse(await readFile(packageJsonUrl, "utf8"));
     expect(pkg).toMatchObject({
-      name: "graph-mcp",
-      version: "0.6.0",
+      name: "@juststas/graph-mcp",
+      version: "0.6.1",
       type: "module",
-      bin: { "graph-mcp": "./dist/cli.js" },
+      bin: { "graph-mcp": "dist/cli.js" },
+      repository: {
+        type: "git",
+        url: "git+https://github.com/JustStas/Graph-MCP.git",
+      },
+      publishConfig: { access: "public" },
       engines: { node: ">=22" },
     });
   });

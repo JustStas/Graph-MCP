@@ -102,7 +102,7 @@ describe("Graph MCP tool contract", () => {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
 
-      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.6.0" });
+      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.6.1" });
       expect(client.getInstructions()).toBe(
         "Microsoft Teams, Outlook Calendar, Mail, meetings, users, presence, and OneDrive integration via Microsoft Graph API",
       );
