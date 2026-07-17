@@ -26,6 +26,7 @@ const EXPECTED_REGISTRY = "https://registry.npmjs.org/";
 const READBACK_ATTEMPTS = 3;
 const READBACK_DELAY_MS = 1_000;
 const VERSION_PATTERN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+const TAG_PATTERN = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 
 /** @typedef {{ name: string, version: string, tag: string }} ReleaseIdentity */
 /** @typedef {ReleaseIdentity & { filename: string, integrity: string, shasum: string }} PackageMetadata */
@@ -305,6 +306,52 @@ function verifyTarballDigests(metadata, bytes) {
   }
 }
 
+/** @param {string} snapshotPath @param {boolean} dryRun */
+function publishArguments(snapshotPath, dryRun) {
+  return [
+    "publish",
+    snapshotPath,
+    ...(dryRun ? ["--dry-run", "--json"] : []),
+    "--access",
+    "public",
+    "--tag",
+    "latest",
+    "--ignore-scripts",
+    "--registry",
+    EXPECTED_REGISTRY,
+  ];
+}
+
+/** @param {string} stdout @param {PackageMetadata} metadata */
+function validateDryRunManifest(stdout, metadata) {
+  /** @type {unknown} */
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error("npm publish dry-run returned malformed JSON.");
+  }
+  const manifest = requireRecord(parsed, "npm publish dry-run result");
+  /** @type {readonly (readonly [string, string])[]} */
+  const fields = [
+    ["name", metadata.name],
+    ["version", metadata.version],
+    ["filename", metadata.filename],
+    ["shasum", metadata.shasum],
+    ["integrity", metadata.integrity],
+  ];
+  for (const [field, expected] of fields) {
+    const actual = requireString(manifest, field, "npm publish dry-run " + field);
+    if (actual !== expected) {
+      throw new Error("npm publish dry-run " + field + " does not match package metadata.");
+    }
+  }
+  const id = requireString(manifest, "id", "npm publish dry-run id");
+  if (id !== metadata.name + "@" + metadata.version) {
+    throw new Error("npm publish dry-run id does not match package metadata.");
+  }
+}
+
 /** @param {Buffer} bytes */
 async function createPrivateSnapshot(bytes) {
   const directory = await mkdtemp(join(tmpdir(), "graph-mcp-release-"));
@@ -343,16 +390,23 @@ async function pollForPublishedMetadata(metadata, runFile, wait) {
 
 /**
  * @param {string} metadataPath
+ * @param {string} expectedTag
  * @param {PublishOptions} [options]
  * @returns {Promise<PublishResult>}
  */
-export async function publishRelease(metadataPath, options = {}) {
+export async function publishRelease(metadataPath, expectedTag, options = {}) {
+  if (typeof expectedTag !== "string" || !TAG_PATTERN.test(expectedTag)) {
+    throw new Error("expected release tag must match stable vMAJOR.MINOR.PATCH.");
+  }
   const runFile = options.execFile ?? execFileAsync;
   const wait = options.delay ?? delay;
   const resolvedMetadata = resolve(metadataPath);
   /** @type {unknown} */
   const parsedMetadata = JSON.parse(await readFile(resolvedMetadata, "utf8"));
   const metadata = validateArtifactMetadata(parsedMetadata);
+  if (metadata.tag !== expectedTag) {
+    throw new Error("expected release tag does not match package metadata.");
+  }
   const metadataDirectory = dirname(resolvedMetadata);
   const tarball = resolve(metadataDirectory, metadata.filename);
   if (dirname(tarball) !== metadataDirectory) {
@@ -371,27 +425,21 @@ export async function publishRelease(metadataPath, options = {}) {
   verifyTarballDigests(metadata, tarballBytes);
   const snapshot = await createPrivateSnapshot(tarballBytes);
   try {
+    const { stdout: dryRunStdout } = await runFile("npm", publishArguments(snapshot.path, true), {
+      encoding: "utf8",
+      maxBuffer: 2_000_000,
+    });
+    validateDryRunManifest(dryRunStdout, metadata);
     const remote = await readRegistryMetadata(metadata.name, metadata.version, runFile);
     const state = classifyRegistryState(remote, metadata);
     /** @type {Error | undefined} */
     let publishError;
     if (state === "publish") {
       try {
-        await runFile(
-          "npm",
-          [
-            "publish",
-            snapshot.path,
-            "--access",
-            "public",
-            "--tag",
-            "latest",
-            "--ignore-scripts",
-            "--registry",
-            EXPECTED_REGISTRY,
-          ],
-          { encoding: "utf8", maxBuffer: 2_000_000 },
-        );
+        await runFile("npm", publishArguments(snapshot.path, false), {
+          encoding: "utf8",
+          maxBuffer: 2_000_000,
+        });
       } catch (error) {
         publishError = error instanceof Error ? error : new Error(String(error));
       }
@@ -413,19 +461,19 @@ export async function publishRelease(metadataPath, options = {}) {
 
 /** @param {readonly string[]} args */
 async function main(args) {
-  const [command, first, second] = args;
-  if (command === "prepare" && first !== undefined && second !== undefined) {
+  const [command, first, second, third] = args;
+  if (command === "prepare" && first !== undefined && second !== undefined && third === undefined) {
     const metadata = await prepareRelease(first, second);
     process.stdout.write(JSON.stringify(metadata, null, 2) + "\n");
     return;
   }
-  if (command === "publish" && first !== undefined && second === undefined) {
-    const result = await publishRelease(first);
+  if (command === "publish" && first !== undefined && second !== undefined && third === undefined) {
+    const result = await publishRelease(first, second);
     process.stdout.write(JSON.stringify(result) + "\n");
     return;
   }
   throw new Error(
-    "Usage: release-package.mjs prepare <tag> <output-directory> | publish <metadata-json>",
+    "Usage: release-package.mjs prepare <tag> <output-directory> | publish <metadata-json> <expected-tag>",
   );
 }
 
