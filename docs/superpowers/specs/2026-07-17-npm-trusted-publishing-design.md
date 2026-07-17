@@ -13,8 +13,9 @@ GitHub Actions release workflow that uses npm Trusted Publishing through OpenID 
 The first scoped release must be bootstrapped manually because npm requires a package to
 exist before a trusted publisher can be configured. After `0.6.1` is published with the
 maintainer's two-factor authentication, npm will trust one GitHub-hosted workflow bound to
-this repository, workflow filename, and deployment environment. Future GitHub Releases can
-publish without stored npm tokens while receiving automatic npm provenance.
+this repository, workflow filename, and deployment environment. The bootstrap `0.6.1`
+version will not have provenance because npm cannot add it retroactively. Versions published
+through OIDC beginning with `0.6.2` will receive automatic npm provenance.
 
 ## Current State and Constraints
 
@@ -29,8 +30,8 @@ publish without stored npm tokens while receiving automatic npm provenance.
   22.14.0 or later. The workflow will use Node 24.
 - `npm trust` additionally requires npm 11.15.0 or later, package write access, account-level
   2FA, and an already-existing npm package.
-- The repository and package are public, so trusted publishing will generate provenance
-  automatically.
+- The repository and package are public, so future versions actually published through
+  Trusted Publishing will generate provenance automatically.
 
 ## Goals
 
@@ -43,7 +44,7 @@ publish without stored npm tokens while receiving automatic npm provenance.
   preparation without publication.
 - Keep OIDC permission out of dependency installation, tests, and package construction.
 - Make reruns safe without accepting a different tarball for an existing package version.
-- Generate npm provenance automatically.
+- Generate npm provenance automatically for OIDC-published versions beginning with `0.6.2`.
 - Update installation and release documentation for the scoped package and automated flow.
 - Verify the installed npm package still exposes `graph-mcp` and reports version `0.6.1`.
 
@@ -193,8 +194,9 @@ workflow artifacts and request an OIDC token. It will:
 
 The job will not define `NODE_AUTH_TOKEN` or any npm publish secret. npm CLI will detect the
 GitHub OIDC environment and exchange the workflow identity for a short-lived publish token.
-Trusted Publishing generates provenance automatically, so the command does not need a
-`--provenance` flag.
+Trusted Publishing generates provenance automatically when this job performs a new publish,
+so the command does not need a `--provenance` flag. An integrity-matched no-op does not add
+provenance to an existing version.
 
 One non-canceling concurrency group will serialize npm publication attempts. A timeout will
 bound each job so a stalled registry or runner cannot hold the deployment indefinitely.
@@ -213,7 +215,8 @@ bound each job so a stalled registry or runner cannot hold the deployment indefi
 - Store no npm automation token in GitHub.
 - After OIDC succeeds, set npm publishing access to "Require two-factor authentication and
   disallow tokens" and revoke any unused publish-capable tokens.
-- Preserve package provenance and the exact `repository.url` association.
+- Preserve the exact `repository.url` association and automatic provenance on future
+  OIDC-published versions.
 
 Repository tag protection or a release ruleset is recommended as a separate repository
 administration step. It is not required to complete the package publication work and will not
@@ -247,8 +250,9 @@ trusted publisher for a package that does not yet exist.
 12. Create the GitHub Release for `v0.6.1`.
 13. The release workflow rebuilds and verifies the tarball. Because `0.6.1` already exists,
     it succeeds only if the registry integrity matches.
-14. Verify npm provenance, registry metadata, global installation, `graph-mcp --version`, and
-    a clean MCP startup from the installed package.
+14. Verify registry metadata, global installation, `graph-mcp --version`, and a clean MCP
+    startup from the installed package. Record that `0.6.1` is the manual bootstrap exception;
+    provenance is expected starting with the first version actually published by OIDC.
 
 The maintainer is expected to interact only for npm's 2FA/passkey challenges and any npm
 website setting that lacks a safe CLI equivalent.
@@ -315,8 +319,9 @@ graph-mcp --version
 ```
 
 The installed executable must report `0.6.1`. A clean temporary MCP host launch must discover
-all 44 tools from the installed package. npm's package page must show provenance associated
-with `JustStas/Graph-MCP`.
+all 44 tools from the installed package. The trusted-publisher configuration must match
+`JustStas/Graph-MCP`, `publish.yml`, and environment `npm`. Provenance is not expected on the
+manual bootstrap version and must be checked on the first later version published by OIDC.
 
 ## Documentation Changes
 
@@ -327,7 +332,8 @@ with `JustStas/Graph-MCP`.
   flow.
 - Keep a clearly marked one-time bootstrap procedure for a brand-new npm package.
 - Document the `npm` GitHub environment, trusted-publisher identity fields, 2FA/token setting,
-  automatic provenance, integrity-safe reruns, and recovery process.
+  the `0.6.1` provenance exception, automatic provenance for future versions,
+  integrity-safe reruns, and recovery process.
 - Add a `0.6.1` changelog entry covering the scoped package and secure release automation.
 
 ## Authoritative References
