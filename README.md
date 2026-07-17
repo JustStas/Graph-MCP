@@ -84,15 +84,15 @@ The Codex manifest launches `./dist/graph-mcp.js` relative to the installed plug
 
 ### npm
 
-Install the CLI globally:
+Install the public scoped package globally:
 
 ```bash
-npm install --global graph-mcp
+npm install --global @juststas/graph-mcp
 graph-mcp setup
 ```
 
-The `graph-mcp` executable starts the MCP server when invoked without arguments. Register
-that executable with your MCP host using its normal MCP-server configuration.
+The npm package is scoped to JustStas, but the installed executable remains graph-mcp.
+Invoking graph-mcp without arguments starts the MCP server over stdio.
 
 ### Source checkout
 
@@ -227,38 +227,81 @@ npm pack --json --dry-run
 
 The Codex validator is release tooling supplied by Codex's `plugin-creator` skill; Python is
 not required to build, test, or run Graph MCP itself. Before publishing, verify that package,
-Claude manifest, and Codex manifest versions are all `0.6.0`, the committed plugin bundle is
-current, both installed plugins expose exactly 44 tools, and the working tree is clean.
+Claude manifest, and Codex manifest versions match the target release, the committed plugin
+bundle is current, both installed plugins expose exactly 44 tools, and the working tree is clean.
 
 ### Release procedure
 
-Graph MCP 0.6.0 is released as an npm package. The obsolete Python/PyPI publishing workflow
-has been removed. Publish only from an approved release commit whose package version, both
-plugin manifest versions, changelog entry, and `v0.6.0` tag agree.
+Graph MCP releases use the public npm package `@juststas/graph-mcp`; there is no Python/PyPI
+release step. Version 0.6.0 completed the Node migration but was not published to npm because
+npm rejected the unscoped `graph-mcp@0.6.0` name as too similar to the existing `graphmcp`
+package. Version 0.6.1 is the first scoped npm release.
 
-1. Update the version in `package.json`, `package-lock.json`, and both plugin manifests, update
-   `CHANGELOG.md`, and rebuild the committed plugin artifact.
-2. Run the complete verification and plugin validation commands above from a clean checkout.
-3. Inspect the exact npm payload and confirm the repository is clean:
+#### Normal releases
 
-   ```bash
-   npm pack --json --dry-run
-   git status --short
-   ```
+1. Update `package.json`, `package-lock.json`, both plugin manifests, runtime metadata,
+   `CHANGELOG.md`, and the committed plugin bundle to one version.
+2. Run `npm ci`, `npm run verify`, `node scripts/test-plugin-install.mjs`, and
+   `npm pack --json --dry-run` from a clean worktree.
+3. Merge the reviewed pull request to `main`. A repository administrator then creates the
+   annotated `v<version>` tag on the merged commit through the mandatory release-tag authority
+   ruleset; the separate no-bypass immutability ruleset blocks later update or deletion.
+4. Publish the matching GitHub Release. The workflow trigger is `release: types: [published]`.
+5. The package job installs locked dependencies, runs `npm run verify`, and prepares the exact
+   tarball without OIDC permission.
+6. The publish job runs in the `npm` GitHub environment and is the only job that receives OIDC
+   permission. It downloads a data-only artifact containing the tarball and metadata, checks
+   out its trusted helper at `github.workflow_sha`, binds the expected tag directly to the
+   release event, validates npm's JSON dry-run manifest for the exact private snapshot, and
+   uses npm Trusted Publishing. It has no `NODE_AUTH_TOKEN` or npm secret.
+7. Verify the workflow, npm version, `dist.integrity`, installed CLI version, and 44-tool MCP
+   inventory.
 
-4. After the pull request is merged, create the `v0.6.0` tag from the merged `main` commit and
-   create the matching GitHub release. Configure npm authentication in the release environment
-   or local user configuration. Never commit an npm token.
-5. Publish the public package and verify the registry version:
+Workflow reruns are idempotent. If the version already exists, the workflow succeeds only
+when npm's dist.integrity equals the prepared tarball. A different integrity fails and
+requires a new patch version.
 
-   ```bash
-   npm publish --access public
-   npm view graph-mcp version
-   ```
+#### First scoped-package bootstrap
 
-There is no Python/PyPI publishing step in the Node release. Any future GitHub Actions npm
-publishing workflow should run these same locked install, verification, validator, smoke, and
-publish commands from the protected version tag.
+npm requires a package to exist before Trusted Publishing can be configured. Bootstrap the first
+scoped release in this order:
+
+1. Verify merged `main`, then activate the administrator-authority `v*` ruleset.
+2. Audit the exact historical tag inventory and ancestry, require the exact allowlisted
+   historical PyPI workflow blob where expected, and require the new release helper to be absent
+   everywhere.
+3. Activate the separate no-bypass immutability ruleset.
+4. Create the annotated `v0.6.1` tag only after those gates pass.
+5. Run `publish.yml` from `main` with `prepare_only` enabled and inspect its prepared artifact.
+6. Publish that artifact once with the maintainer's interactive 2FA, then verify its registry
+   version and integrity.
+7. Reverify both release-tag rulesets.
+8. Create the `npm` GitHub environment.
+9. Add separate typed environment policies for branch `main` and tag `v*`.
+10. Verify both rulesets and both typed environment policies.
+11. Configure npm Trusted Publishing:
+
+```bash
+npx --yes npm@11.15.0 trust github @juststas/graph-mcp \
+  --file publish.yml \
+  --repo JustStas/Graph-MCP \
+  --env npm \
+  --allow-publish
+```
+
+Verify the saved repository, workflow filename, environment, and publish permission, then
+set npm publishing access to require 2FA and disallow traditional tokens.
+
+The manual 0.6.1 bootstrap uses neither OIDC nor provenance, and its integrity-matched release
+workflow is a no-op that does not test the OIDC exchange. Version 0.6.2 is the first real OIDC
+publish and provenance check.
+
+#### Recovery
+
+Use `workflow_dispatch` from `main` with an existing protected tag to rerun publication. Use
+`prepare_only` when only the verified tarball is needed. The release-tag rulesets prohibit
+moving or deleting published `v*` tags. Never overwrite an npm version; recover from a bad
+publication with a new patch release.
 
 ## Architecture and runtime behavior
 

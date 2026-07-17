@@ -2,6 +2,24 @@
 
 All notable changes to Graph MCP are documented in this file.
 
+## 0.6.1 - 2026-07-17
+
+### Changed
+
+- Changed the npm package identity to @juststas/graph-mcp while preserving the graph-mcp
+  executable and Claude/Codex plugin names. npm rejected the unscoped graph-mcp@0.6.0 name as
+  too similar to the existing graphmcp package, so 0.6.1 is the first scoped npm release.
+- Normalized npm bin and repository metadata and synchronized all runtime and plugin versions.
+- Updated installation and release documentation for the scoped package.
+
+### Added
+
+- A GitHub Release workflow with separate package and OIDC publish jobs, immutable action pins,
+  disabled release caching, integrity-safe reruns, and a non-publishing bootstrap mode.
+- A documented npm Trusted Publishing bootstrap and verification procedure for tokenless
+  releases after the manual 0.6.1 bootstrap. Version 0.6.2 is the first planned OIDC publish
+  with npm provenance.
+
 ## 0.6.0 - 2026-07-16
 
 ### Changed

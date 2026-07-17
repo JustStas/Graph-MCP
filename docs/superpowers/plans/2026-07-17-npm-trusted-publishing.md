@@ -2453,19 +2453,69 @@ git commit -m "ci: add npm trusted publishing workflow"
 
 - [ ] **Step 1: Add a failing README contract**
 
-Add this test to tests/project-metadata.test.ts:
+Add `sectionBetween` and whitespace-normalizing `expectMarkersInOrder` helpers, then add a
+README/changelog contract that parses the release subsections instead of checking disconnected
+substrings:
 
 ```typescript
 test("documents the scoped package while preserving the graph-mcp command", async () => {
-  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+  const [readme, changelog] = await Promise.all([
+    readFile(new URL("../README.md", import.meta.url), "utf8"),
+    readFile(new URL("../CHANGELOG.md", import.meta.url), "utf8"),
+  ]);
+  const releaseProcedure = sectionBetween(
+    readme,
+    "### Release procedure",
+    "## Architecture and runtime behavior",
+  );
+  const normalRelease = sectionBetween(
+    releaseProcedure,
+    "#### Normal releases",
+    "#### First scoped-package bootstrap",
+  );
+  const bootstrap = sectionBetween(
+    releaseProcedure,
+    "#### First scoped-package bootstrap",
+    "#### Recovery",
+  );
+  const normalizedBootstrap = bootstrap.replace(/\s+/g, " ");
+
   expect(readme).toContain("npm install --global @juststas/graph-mcp");
   expect(readme).toContain("graph-mcp setup");
-  expect(readme).toContain("release: types: [published]");
-  expect(readme).toContain("release-tag rulesets");
-  expect(readme).toContain("typed environment policies");
-  expect(readme).toContain("0.6.1");
-  expect(readme).toContain("provenance starts with 0.6.2");
-  expect(readme).not.toMatch(/npm install --global graph-mcp(?:\s|$)/);
+  expectMarkersInOrder(normalRelease, [
+    "Merge the reviewed pull request",
+    "release-tag authority",
+    "no-bypass immutability",
+    "Publish the matching GitHub Release",
+    "The package job",
+    "without OIDC permission",
+    "The publish job",
+    "only job that receives OIDC permission",
+    "data-only artifact containing the tarball and metadata",
+    "npm Trusted Publishing",
+  ]);
+  expectMarkersInOrder(bootstrap, [
+    "activate the administrator-authority `v*` ruleset",
+    "Audit the exact historical tag inventory",
+    "Activate the separate no-bypass immutability ruleset",
+    "Create the annotated `v0.6.1` tag",
+    "with `prepare_only` enabled",
+    "interactive 2FA",
+    "Reverify both release-tag rulesets",
+    "Create the `npm` GitHub environment",
+    "Add separate typed environment policies",
+    "Verify both rulesets and both typed environment policies",
+    "Configure npm Trusted Publishing",
+  ]);
+  expect(normalizedBootstrap).toContain("manual 0.6.1 bootstrap uses neither OIDC nor provenance");
+  expect(normalizedBootstrap).toContain("Version 0.6.2 is the first real OIDC publish");
+  expect(changelog).not.toContain("- Published the npm distribution");
+  expect(readme).not.toMatch(/^npm install --global graph-mcp(?:\s|$)/m);
+  expect(readme).not.toMatch(/^npm (?:publish|view) graph-mcp(?:@|\s|$)/m);
+  expect(readme).not.toMatch(/^npm publish(?:\s+--access public|\s+\.)/m);
+  expect(readme).not.toMatch(
+    /^(?:python(?:3)? -m build|twine upload|poetry publish|pip install graph-mcp)\b/m,
+  );
 });
 ```
 
@@ -2504,28 +2554,29 @@ Replace the existing README release procedure with:
 ````markdown
 ### Release procedure
 
-Graph MCP is published to npm as the public package @juststas/graph-mcp. There is no
-Python/PyPI release step.
+Graph MCP releases use the public npm package `@juststas/graph-mcp`; there is no Python/PyPI
+release step. Version 0.6.0 completed the Node migration but was not published to npm because
+npm rejected the unscoped `graph-mcp@0.6.0` name as too similar to the existing `graphmcp`
+package. Version 0.6.1 is the first scoped npm release.
 
 #### Normal releases
 
-1. Update package.json, package-lock.json, both plugin manifests, runtime metadata,
-   CHANGELOG.md, and the committed plugin bundle to one version.
-2. Run npm ci, npm run verify, node scripts/test-plugin-install.mjs, and
-   npm pack --json --dry-run from a clean worktree.
-3. Merge the reviewed pull request to main. A repository administrator then creates the
-   annotated v<version> tag on the merged commit through the mandatory release-tag authority
+1. Update `package.json`, `package-lock.json`, both plugin manifests, runtime metadata,
+   `CHANGELOG.md`, and the committed plugin bundle to one version.
+2. Run `npm ci`, `npm run verify`, `node scripts/test-plugin-install.mjs`, and
+   `npm pack --json --dry-run` from a clean worktree.
+3. Merge the reviewed pull request to `main`. A repository administrator then creates the
+   annotated `v<version>` tag on the merged commit through the mandatory release-tag authority
    ruleset; the separate no-bypass immutability ruleset blocks later update or deletion.
-4. Publish the matching GitHub Release. The trusted workflow uses
-   release: types: [published].
-5. The package job installs locked dependencies, runs all verification, and prepares the
-   exact tarball without OIDC permission.
-6. The publish job runs in the npm GitHub environment, downloads only the prepared tarball
-   and metadata data artifact, checks out its trusted helper at github.workflow_sha, binds the
-   expected tag directly to the release event, validates npm's JSON dry-run manifest for the
-   exact private snapshot, and uses npm Trusted Publishing. It has no NODE_AUTH_TOKEN or npm
-   secret.
-7. Verify the workflow, npm version, dist.integrity, installed CLI version, and 44-tool MCP
+4. Publish the matching GitHub Release. The workflow trigger is `release: types: [published]`.
+5. The package job installs locked dependencies, runs `npm run verify`, and prepares the exact
+   tarball without OIDC permission.
+6. The publish job runs in the `npm` GitHub environment and is the only job that receives OIDC
+   permission. It downloads a data-only artifact containing the tarball and metadata, checks
+   out its trusted helper at `github.workflow_sha`, binds the expected tag directly to the
+   release event, validates npm's JSON dry-run manifest for the exact private snapshot, and
+   uses npm Trusted Publishing. It has no `NODE_AUTH_TOKEN` or npm secret.
+7. Verify the workflow, npm version, `dist.integrity`, installed CLI version, and 44-tool MCP
    inventory.
 
 Workflow reruns are idempotent. If the version already exists, the workflow succeeds only
@@ -2534,15 +2585,23 @@ requires a new patch version.
 
 #### First scoped-package bootstrap
 
-npm requires a package to exist before Trusted Publishing can be configured. Immediately after
-merged main is verified, activate the administrator-authority v* ruleset, audit the exact
-historical tag inventory and ancestry, require the exact allowlisted historical PyPI workflow
-blob where expected, and require the new release helper absent everywhere. Then activate the
-separate no-bypass immutability ruleset. Only after those gates pass, create the annotated v0.6.1
-tag. Prepare it through publish.yml with prepare_only enabled and publish the artifact once with
-the maintainer's interactive 2FA. Reverify both rulesets, then create the npm GitHub environment
-and add separate typed environment policies for branch main and tag v*. Verify both rulesets and
-both environment policies before configuring trust:
+npm requires a package to exist before Trusted Publishing can be configured. Bootstrap the first
+scoped release in this order:
+
+1. Verify merged `main`, then activate the administrator-authority `v*` ruleset.
+2. Audit the exact historical tag inventory and ancestry, require the exact allowlisted
+   historical PyPI workflow blob where expected, and require the new release helper to be absent
+   everywhere.
+3. Activate the separate no-bypass immutability ruleset.
+4. Create the annotated `v0.6.1` tag only after those gates pass.
+5. Run `publish.yml` from `main` with `prepare_only` enabled and inspect its prepared artifact.
+6. Publish that artifact once with the maintainer's interactive 2FA, then verify its registry
+   version and integrity.
+7. Reverify both release-tag rulesets.
+8. Create the `npm` GitHub environment.
+9. Add separate typed environment policies for branch `main` and tag `v*`.
+10. Verify both rulesets and both typed environment policies.
+11. Configure npm Trusted Publishing:
 
 ```bash
 npx --yes npm@11.15.0 trust github @juststas/graph-mcp \
@@ -2555,16 +2614,16 @@ npx --yes npm@11.15.0 trust github @juststas/graph-mcp \
 Verify the saved repository, workflow filename, environment, and publish permission, then
 set npm publishing access to require 2FA and disallow traditional tokens.
 
-The manual 0.6.1 bootstrap has no provenance, and its integrity-matched release workflow is
-a no-op that does not test the OIDC exchange. The first real OIDC publish and provenance
-check occur with 0.6.2.
+The manual 0.6.1 bootstrap uses neither OIDC nor provenance, and its integrity-matched release
+workflow is a no-op that does not test the OIDC exchange. Version 0.6.2 is the first real OIDC
+publish and provenance check.
 
 #### Recovery
 
-Use workflow_dispatch from main with an existing protected tag to rerun publication. Use
-prepare_only when only the verified tarball is needed. The release-tag rulesets prohibit
-moving or deleting published v* tags. Never overwrite an npm version; use a new patch release
-after a bad publication.
+Use `workflow_dispatch` from `main` with an existing protected tag to rerun publication. Use
+`prepare_only` when only the verified tarball is needed. The release-tag rulesets prohibit
+moving or deleting published `v*` tags. Never overwrite an npm version; recover from a bad
+publication with a new patch release.
 ````
 
 - [ ] **Step 5: Add the 0.6.1 changelog entry**
@@ -2576,8 +2635,9 @@ Insert above 0.6.0:
 
 ### Changed
 
-- Published the npm distribution as @juststas/graph-mcp while preserving the graph-mcp
-  executable and Claude/Codex plugin names.
+- Changed the npm package identity to @juststas/graph-mcp while preserving the graph-mcp
+  executable and Claude/Codex plugin names. npm rejected the unscoped graph-mcp@0.6.0 name as
+  too similar to the existing graphmcp package, so 0.6.1 is the first scoped npm release.
 - Normalized npm bin and repository metadata and synchronized all runtime and plugin versions.
 - Updated installation and release documentation for the scoped package.
 
@@ -2585,8 +2645,9 @@ Insert above 0.6.0:
 
 - A GitHub Release workflow with separate package and OIDC publish jobs, immutable action pins,
   disabled release caching, integrity-safe reruns, and a non-publishing bootstrap mode.
-- npm Trusted Publishing setup for tokenless releases beginning after the manual 0.6.1
-  bootstrap. OIDC-published versions beginning with 0.6.2 receive npm provenance.
+- A documented npm Trusted Publishing bootstrap and verification procedure for tokenless
+  releases after the manual 0.6.1 bootstrap. Version 0.6.2 is the first planned OIDC publish
+  with npm provenance.
 ```
 
 - [ ] **Step 6: Run documentation tests and formatting**
