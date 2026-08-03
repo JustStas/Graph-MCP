@@ -24,6 +24,11 @@ temp.md
 .graph-mcp/
 *.tokens.enc
 
+# Internal planning and design notes. Useful locally, not part of the published
+# project: they are point-in-time records that go stale and are never read by the
+# build, the tests, or the runtime.
+docs/superpowers/
+
 # Editors and operating systems
 .DS_Store
 Thumbs.db
