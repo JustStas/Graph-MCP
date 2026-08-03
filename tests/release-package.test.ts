@@ -637,6 +637,80 @@ describe("release publication", () => {
     expect(actualPublishCalls).toBe(1);
   });
 
+  test("reports npm publish output when the version never appears on npm", async () => {
+    const artifact = await createReleaseArtifact();
+    const execFile: ExecFileFunction = (file, args) => {
+      if (isDryRunPublish(args)) {
+        return Promise.resolve({ stdout: dryRunManifestJson(artifact.metadata), stderr: "" });
+      }
+      if (args[0] === "view") {
+        return Promise.reject(missingVersionFailure(artifact.metadata.version));
+      }
+      if (isActualPublish(args)) {
+        return Promise.resolve({
+          stdout: "",
+          stderr: "npm warn publish  Skipping\n  registry refused\n",
+        });
+      }
+      return Promise.reject(new Error("unexpected subprocess call"));
+    };
+
+    await expect(
+      publishRelease(artifact.metadataPath, artifact.metadata.tag, {
+        execFile,
+        delay: () => Promise.resolve(),
+      }),
+    ).rejects.toThrow(
+      "could not be read back from npm after 3 attempts. npm publish reported: npm warn publish Skipping registry refused",
+    );
+  });
+
+  test("reports no output when npm publish stays silent and the version never appears", async () => {
+    const artifact = await createReleaseArtifact();
+    const execFile: ExecFileFunction = (file, args) => {
+      if (isDryRunPublish(args)) {
+        return Promise.resolve({ stdout: dryRunManifestJson(artifact.metadata), stderr: "" });
+      }
+      if (args[0] === "view") {
+        return Promise.reject(missingVersionFailure(artifact.metadata.version));
+      }
+      if (isActualPublish(args)) {
+        return Promise.resolve({ stdout: "   ", stderr: "" });
+      }
+      return Promise.reject(new Error("unexpected subprocess call"));
+    };
+
+    await expect(
+      publishRelease(artifact.metadataPath, artifact.metadata.tag, {
+        execFile,
+        delay: () => Promise.resolve(),
+      }),
+    ).rejects.toThrow("npm publish reported: no output.");
+  });
+
+  test("prefers the npm publish failure over the readback failure", async () => {
+    const artifact = await createReleaseArtifact();
+    const execFile: ExecFileFunction = (file, args) => {
+      if (isDryRunPublish(args)) {
+        return Promise.resolve({ stdout: dryRunManifestJson(artifact.metadata), stderr: "" });
+      }
+      if (args[0] === "view") {
+        return Promise.reject(missingVersionFailure(artifact.metadata.version));
+      }
+      if (isActualPublish(args)) {
+        return Promise.reject(new Error("npm ERR! code E403"));
+      }
+      return Promise.reject(new Error("unexpected subprocess call"));
+    };
+
+    await expect(
+      publishRelease(artifact.metadataPath, artifact.metadata.tag, {
+        execFile,
+        delay: () => Promise.resolve(),
+      }),
+    ).rejects.toThrow("E403");
+  });
+
   test("rejects a nested npm publish dry-run manifest that is not an object", async () => {
     const artifact = await createReleaseArtifact();
     let actualPublishCalls = 0;
