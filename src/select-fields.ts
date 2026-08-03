@@ -8,6 +8,9 @@ export const TEAM_FIELDS = "id,displayName,description";
 export const CHANNEL_FIELDS = "id,displayName,description,membershipType";
 
 export const MAIL_LIST_FIELDS =
-  "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,importance,flag";
+  "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,importance,flag,webLink,conversationId,parentFolderId";
+
+export const MAIL_FOLDER_FIELDS =
+  "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
 
 export const USER_PROFILE_FIELDS = "id,displayName,mail,jobTitle,department,officeLocation";

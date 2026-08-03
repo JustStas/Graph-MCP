@@ -14,9 +14,18 @@ export interface RichTextBodyOptions {
   readonly textContentType?: string;
 }
 
+export type ChatMessageImportance = "normal" | "high" | "urgent";
+
+export interface ChatMessageOptions {
+  readonly importance?: ChatMessageImportance;
+  readonly subject?: string;
+}
+
 export interface ChatMessagePayload {
   readonly body: RichTextBody;
   readonly mentions?: GraphMention[];
+  readonly importance?: ChatMessageImportance;
+  readonly subject?: string;
 }
 
 export function normalizeMentions(
@@ -90,18 +99,16 @@ export function buildChatMessagePayload(
   message: string,
   isHtml = true,
   mentions: readonly MentionInput[] | null | undefined = undefined,
+  options: ChatMessageOptions = {},
 ): ChatMessagePayload {
-  const payload: ChatMessagePayload = {
-    body: buildRichTextBody(message, isHtml),
-  };
   const normalizedMentions = normalizeMentions(mentions);
+  const importance = options.importance ?? "normal";
+  const subject = options.subject ?? "";
 
-  if (normalizedMentions.length > 0) {
-    return {
-      ...payload,
-      mentions: normalizedMentions,
-    };
-  }
-
-  return payload;
+  return {
+    body: buildRichTextBody(message, isHtml),
+    ...(normalizedMentions.length > 0 ? { mentions: normalizedMentions } : {}),
+    ...(importance === "normal" ? {} : { importance }),
+    ...(subject === "" ? {} : { subject }),
+  };
 }

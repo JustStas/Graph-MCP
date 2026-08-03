@@ -17,24 +17,42 @@ Add these exact delegated Microsoft Graph permissions:
 - `profile`
 - `User.Read`
 - `User.ReadBasic.All`
+- `User.Read.All`
 - `Chat.Read`
 - `Chat.ReadWrite`
+- `ChatMember.ReadWrite`
 - `ChatMessage.Send`
 - `ChannelMessage.Read.All`
 - `ChannelMessage.Send`
+- `ChannelMessage.ReadWrite`
+- `Channel.Create`
+- `TeamMember.Read.All`
 - `Team.ReadBasic.All`
 - `Channel.ReadBasic.All`
 - `ChannelMember.Read.All`
 - `Calendars.ReadWrite`
+- `Calendars.Read.Shared`
+- `Calendars.ReadWrite.Shared`
+- `Place.Read.All`
 - `Mail.Read`
+- `Mail.ReadWrite`
 - `Mail.Send`
+- `MailboxSettings.ReadWrite`
+- `Mail.ReadWrite.Shared`
+- `Mail.Send.Shared`
 - `Presence.Read`
 - `Presence.Read.All`
 - `Presence.ReadWrite`
 - `OnlineMeetings.Read`
+- `OnlineMeetings.ReadWrite`
+- `OnlineMeetingArtifact.Read.All`
 - `OnlineMeetingTranscript.Read.All`
 - `OnlineMeetingRecording.Read.All`
 - `Files.ReadWrite.All`
+- `Sites.Read.All`
+- `People.Read`
+- `Contacts.ReadWrite`
+- `Tasks.ReadWrite`
 
 As an environment alternative, provide AZURE_CLIENT_ID and AZURE_TENANT_ID to the
 server process. AZURE_TENANT_ID defaults to common when unset or blank. These values

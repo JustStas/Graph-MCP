@@ -35,6 +35,15 @@ const TOP_SCHEMA = z.number().int().default(25);
 const FILE_PATH_SCHEMA = z.string().refine(isSafeDestinationPath, {
   message: "File path must be relative and contain no empty, '.' or '..' segments.",
 });
+const FOLDER_NAME_SCHEMA = z
+  .string()
+  .refine((value) => value !== "" && value !== "." && value !== "..", {
+    message: "Folder names must not be empty, '.' or '..'.",
+  });
+const MISSING_MOVE_TARGET_MESSAGE = "At least one of new_parent_folder_id or new_name is required.";
+
+const MISSING_VALUES_MESSAGE = "values must contain at least one row.";
+const DRIVE_ID_ARGS_DOC = `    drive_id: Drive ID to act on. Empty targets your own OneDrive.`;
 
 type GraphObject = Record<string, unknown>;
 
@@ -141,6 +150,27 @@ function decodeStrictBase64(contentBase64: string): Uint8Array {
   }
 
   return new Uint8Array(decoded);
+}
+
+function driveRoot(driveId: string): string {
+  return driveId === "" ? "/me/drive" : `/drives/${encodeURIComponent(driveId)}`;
+}
+
+function driveItemPath(driveId: string, itemId: string): string {
+  return `${driveRoot(driveId)}/items/${encodeURIComponent(itemId)}`;
+}
+
+function worksheetPath(driveId: string, itemId: string, worksheet: string): string {
+  return `${driveItemPath(driveId, itemId)}/workbook/worksheets/${encodeURIComponent(worksheet)}`;
+}
+
+function encodeSharingUrl(shareUrl: string): string {
+  const base64 = Buffer.from(shareUrl, "utf8").toString("base64");
+  return `u!${base64.replaceAll("/", "_").replaceAll("+", "-").replace(/=+$/, "")}`;
+}
+
+function escapedRangeAddress(address: string): string {
+  return address.replaceAll("'", "''");
 }
 
 export function registerFilesTools(
@@ -297,6 +327,484 @@ Args:
       const result = await dependencies.graphClient.post(
         `/me/drive/items/${encodeURIComponent(file_id)}/createLink`,
         { type: share_type, scope },
+      );
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_create_folder",
+    {
+      description: `Create a folder in OneDrive.
+
+Args:
+    folder_name: Name of the new folder.
+    parent_folder_id: Parent folder ID. Empty for the drive root.`,
+      inputSchema: {
+        folder_name: FOLDER_NAME_SCHEMA,
+        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ folder_name, parent_folder_id }) => {
+      const path =
+        parent_folder_id === ""
+          ? "/me/drive/root/children"
+          : `/me/drive/items/${encodeURIComponent(parent_folder_id)}/children`;
+      const result = await dependencies.graphClient.post(path, {
+        name: folder_name,
+        folder: {},
+        "@microsoft.graph.conflictBehavior": "rename",
+      });
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_file",
+    {
+      description: `Delete a file or folder from OneDrive.
+
+The item is moved to the OneDrive recycle bin.
+
+Args:
+    item_id: The file or folder ID to delete.`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id }) => {
+      await dependencies.graphClient.delete(`/me/drive/items/${encodeURIComponent(item_id)}`);
+      return successResponse({ status: "Item deleted" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_move_file",
+    {
+      description: `Move and/or rename a file or folder in OneDrive.
+
+At least one of new_parent_folder_id or new_name must be provided.
+
+Args:
+    item_id: The file or folder ID to move.
+    new_parent_folder_id: Destination folder ID. Empty to keep the current parent.
+    new_name: New name for the item. Empty to keep the current name.`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        new_parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+        new_name: z.string().default(""),
+      },
+    },
+    async ({ item_id, new_parent_folder_id, new_name }) => {
+      if (new_parent_folder_id === "" && new_name === "") {
+        return successResponse({ error: MISSING_MOVE_TARGET_MESSAGE }, "error");
+      }
+
+      const updates: GraphObject = {};
+      if (new_parent_folder_id !== "") {
+        updates.parentReference = { id: new_parent_folder_id };
+      }
+      if (new_name !== "") {
+        updates.name = new_name;
+      }
+
+      const result = await dependencies.graphClient.patch(
+        `/me/drive/items/${encodeURIComponent(item_id)}`,
+        updates,
+      );
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_shared_files",
+    {
+      description: `List files other people have shared with the user.
+
+Only $top is passed because sharedWithMe does not support $select reliably.
+
+Args:
+    top: Maximum number of items to return (default 25).`,
+      inputSchema: {
+        top: TOP_SCHEMA,
+      },
+    },
+    async ({ top }) => {
+      const result = await dependencies.graphClient.get("/me/drive/sharedWithMe", {
+        $top: String(Math.min(top, 50)),
+      });
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_copy_file",
+    {
+      description: `Copy a file or folder in OneDrive.
+
+The copy is asynchronous: Graph returns 202 with a monitor URL rather than the
+finished item, so the new item may not exist yet when this call returns.
+
+Args:
+    item_id: The file or folder ID to copy.
+    destination_folder_id: Destination folder ID. Empty to copy into the current parent.
+    new_name: Name for the copy. Empty to keep the current name.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        destination_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+        new_name: z.string().default(""),
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id, destination_folder_id, new_name, drive_id }) => {
+      const body: GraphObject = {};
+      if (new_name !== "") {
+        body.name = new_name;
+      }
+      if (destination_folder_id !== "") {
+        body.parentReference = { id: destination_folder_id };
+      }
+
+      await dependencies.graphClient.post(`${driveItemPath(drive_id, item_id)}/copy`, body);
+      return successResponse({ status: "Copy accepted" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_file_permissions",
+    {
+      description: `List who currently has access to a file or folder.
+
+Args:
+    item_id: The file or folder ID.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id, drive_id }) => {
+      const result = await dependencies.graphClient.get(
+        `${driveItemPath(drive_id, item_id)}/permissions`,
+      );
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_file_permission",
+    {
+      description: `Revoke a sharing link or a person's access to a file or folder.
+
+Args:
+    item_id: The file or folder ID.
+    permission_id: The permission ID (from graph_list_file_permissions).
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        permission_id: RESOURCE_ID_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id, permission_id, drive_id }) => {
+      await dependencies.graphClient.delete(
+        `${driveItemPath(drive_id, item_id)}/permissions/${encodeURIComponent(permission_id)}`,
+      );
+      return successResponse({ status: "Permission deleted" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_invite_to_file",
+    {
+      description: `Invite people to a file or folder by email.
+
+Args:
+    item_id: The file or folder ID to share.
+    emails: Email addresses of the people to invite.
+    role: Access to grant: "read" or "write" (default "read").
+    send_email: Whether Graph should email the invitation (default false).
+    message: Optional message to include with the invitation.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        emails: z.array(z.string()),
+        role: z.enum(["read", "write"]).default("read"),
+        send_email: z.boolean().default(false),
+        message: z.string().default(""),
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id, emails, role, send_email, message, drive_id }) => {
+      const body: GraphObject = {
+        recipients: emails.map((email) => ({ email })),
+        roles: [role],
+        requireSignIn: true,
+        sendInvitation: send_email,
+      };
+      if (message !== "") {
+        body.message = message;
+      }
+
+      const result = await dependencies.graphClient.post(
+        `${driveItemPath(drive_id, item_id)}/invite`,
+        body,
+      );
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_file_versions",
+    {
+      description: `List the stored versions of a file.
+
+Args:
+    item_id: The file ID.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id, drive_id }) => {
+      const result = await dependencies.graphClient.get(
+        `${driveItemPath(drive_id, item_id)}/versions`,
+      );
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_restore_file_version",
+    {
+      description: `Restore a file to an earlier version.
+
+Args:
+    item_id: The file ID.
+    version_id: The version ID (from graph_list_file_versions).
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        version_id: RESOURCE_ID_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id, version_id, drive_id }) => {
+      await dependencies.graphClient.post(
+        `${driveItemPath(drive_id, item_id)}/versions/${encodeURIComponent(
+          version_id,
+        )}/restoreVersion`,
+      );
+      return successResponse({ status: "Version restored" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_recent_files",
+    {
+      description: `List what the user worked on recently across their OneDrive.
+
+Args:
+    top: Maximum number of items to return (default 25, maximum 50).`,
+      inputSchema: {
+        top: TOP_SCHEMA,
+      },
+    },
+    async ({ top }) => {
+      const result = await dependencies.graphClient.get("/me/drive/recent", {
+        $top: String(Math.min(top, 50)),
+      });
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_drives",
+    {
+      description: `List the drives the user can reach, including their OneDrive and followed document libraries.`,
+      inputSchema: {},
+    },
+    async () => {
+      const result = await dependencies.graphClient.get("/me/drives", {
+        $select: "id,name,driveType,owner,quota",
+      });
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_resolve_share_link",
+    {
+      description: `Resolve a sharing link to the file or folder it points to.
+
+Args:
+    share_url: The sharing URL to resolve.`,
+      inputSchema: {
+        share_url: z.string(),
+      },
+    },
+    async ({ share_url }) => {
+      const result = await dependencies.graphClient.get(
+        `/shares/${encodeSharingUrl(share_url)}/driveItem`,
+        { $select: DRIVE_ITEM_FIELDS },
+      );
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_search_sites",
+    {
+      description: `Search SharePoint sites by keyword.
+
+Needs the Sites.Read.All permission, which requires admin consent. Listing every
+site without a search term is application-only, so a query is always sent.
+
+Args:
+    query: Search query string.
+    top: Maximum number of results (default 25, maximum 50).`,
+      inputSchema: {
+        query: z.string(),
+        top: TOP_SCHEMA,
+      },
+    },
+    async ({ query, top }) => {
+      const result = await dependencies.graphClient.get("/sites", {
+        search: query,
+        $select: "id,name,displayName,webUrl",
+        $top: String(Math.min(top, 50)),
+      });
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_site_drives",
+    {
+      description: `List the document libraries of a SharePoint site.
+
+Args:
+    site_id: The SharePoint site ID (from graph_search_sites).`,
+      inputSchema: {
+        site_id: RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ site_id }) => {
+      const result = await dependencies.graphClient.get(
+        `/sites/${encodeURIComponent(site_id)}/drives`,
+        { $select: "id,name,driveType,webUrl" },
+      );
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_worksheets",
+    {
+      description: `List the worksheets in an Excel workbook.
+
+Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx files.
+
+Args:
+    item_id: The workbook file ID.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id, drive_id }) => {
+      const result = await dependencies.graphClient.get(
+        `${driveItemPath(drive_id, item_id)}/workbook/worksheets`,
+        { $select: "id,name,position,visibility" },
+      );
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_get_worksheet_range",
+    {
+      description: `Read cell values from a worksheet range.
+
+The response \`values\` array holds the cell values, one inner array per row.
+Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx files.
+
+Args:
+    item_id: The workbook file ID.
+    worksheet: Worksheet ID or name.
+    address: Range address (e.g. "A1:D10"). Empty reads the used range.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        worksheet: RESOURCE_ID_SCHEMA,
+        address: z.string().default(""),
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id, worksheet, address, drive_id }) => {
+      const base = worksheetPath(drive_id, item_id, worksheet);
+      const path =
+        address === ""
+          ? `${base}/usedRange`
+          : `${base}/range(address='${escapedRangeAddress(address)}')`;
+      const result = await dependencies.graphClient.get(path);
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_update_worksheet_range",
+    {
+      description: `Write cell values to a worksheet range.
+
+Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx files.
+
+Args:
+    item_id: The workbook file ID.
+    worksheet: Worksheet ID or name.
+    address: Range address to write (e.g. "A1:D10"). Its shape must match values.
+    values: Cell values as a 2D array, one inner array per row. Cells may be
+        strings, numbers, booleans, or null.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        worksheet: RESOURCE_ID_SCHEMA,
+        address: z.string(),
+        values: z.array(z.array(z.union([z.string(), z.number(), z.boolean(), z.null()]))),
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id, worksheet, address, values, drive_id }) => {
+      if (values.length === 0) {
+        return successResponse({ error: MISSING_VALUES_MESSAGE }, "error");
+      }
+
+      const result = await dependencies.graphClient.patch(
+        `${worksheetPath(drive_id, item_id, worksheet)}/range(address='${escapedRangeAddress(
+          address,
+        )}')`,
+        { values },
       );
       return successResponse(requireGraphObject(result));
     },

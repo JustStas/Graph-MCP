@@ -18,11 +18,55 @@ const OPTIONAL_RESOURCE_ID_SCHEMA = z
     message: "Resource IDs must not be '.' or '..'.",
   })
   .default("");
+const USER_SCHEMA = OPTIONAL_RESOURCE_ID_SCHEMA;
+const USER_ARGS_DOC = `    user: Shared or delegated calendar owner address or user ID to act on. Empty
+        targets your own calendar. Requires the delegated Calendars.Read.Shared or
+        Calendars.ReadWrite.Shared permissions.`;
 const TOP_SCHEMA = z.number().int().default(50);
 const ATTENDEES_SCHEMA = z.array(z.string()).nullable().optional().default(null);
+const SHOW_AS_SCHEMA = z
+  .enum(["free", "tentative", "busy", "oof", "workingElsewhere", "unknown"])
+  .default("busy");
+const SENSITIVITY_SCHEMA = z
+  .enum(["normal", "personal", "private", "confidential"])
+  .default("normal");
+const REMINDER_SCHEMA = z.number().int().default(-1);
+const CATEGORIES_SCHEMA = z.array(z.string()).default([]);
+const REPEAT_SCHEMA = z.enum(["none", "daily", "weekly", "monthly", "yearly"]).default("none");
+const MISSING_INSTANCE_WINDOW_MESSAGE =
+  "start_datetime and end_datetime are required to list event instances.";
+const MISSING_REPEAT_DAYS_MESSAGE = "repeat_days is required when repeat is weekly.";
+const CONFLICTING_REPEAT_END_MESSAGE = "Provide either repeat_until or repeat_count, not both.";
+
+const RECURRENCE_PATTERN_TYPES = {
+  daily: "daily",
+  weekly: "weekly",
+  monthly: "absoluteMonthly",
+  yearly: "absoluteYearly",
+} as const;
+
+type RepeatKind = keyof typeof RECURRENCE_PATTERN_TYPES;
 
 type GraphObject = Record<string, unknown>;
 type GraphObjectWithId = GraphObject & { readonly id: string };
+
+interface RichEventFields {
+  readonly is_all_day: boolean;
+  readonly show_as: z.infer<typeof SHOW_AS_SCHEMA>;
+  readonly sensitivity: z.infer<typeof SENSITIVITY_SCHEMA>;
+  readonly reminder_minutes_before_start: number;
+  readonly categories: readonly string[];
+  readonly allow_new_time_proposals: boolean;
+  readonly response_requested: boolean;
+}
+
+interface RecurrenceFields {
+  readonly repeat: z.infer<typeof REPEAT_SCHEMA>;
+  readonly repeat_interval: number;
+  readonly repeat_days: readonly string[];
+  readonly repeat_until: string;
+  readonly repeat_count: number;
+}
 
 function isNonArrayObject(value: unknown): value is GraphObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -55,14 +99,128 @@ function requireGraphObjectWithId(response: unknown): GraphObjectWithId {
   return response as GraphObjectWithId;
 }
 
-function eventPath(eventId: string): string {
-  return `/me/events/${encodeURIComponent(eventId)}`;
+function calendarRoot(user: string): string {
+  return user === "" ? "/me" : `/users/${encodeURIComponent(user)}`;
 }
 
-function calendarCollectionPath(calendarId: string, collection: "calendarView" | "events"): string {
+function eventPath(user: string, eventId: string): string {
+  return `${calendarRoot(user)}/events/${encodeURIComponent(eventId)}`;
+}
+
+const EVENT_RESPONSE_ACTIONS = {
+  accept: { action: "accept", status: "Event accepted" },
+  decline: { action: "decline", status: "Event declined" },
+  tentative: { action: "tentativelyAccept", status: "Event tentatively accepted" },
+} as const;
+
+function calendarCollectionPath(
+  user: string,
+  calendarId: string,
+  collection: "calendarView" | "events",
+): string {
+  const root = calendarRoot(user);
   return calendarId === ""
-    ? `/me/${collection}`
-    : `/me/calendars/${encodeURIComponent(calendarId)}/${collection}`;
+    ? `${root}/${collection}`
+    : `${root}/calendars/${encodeURIComponent(calendarId)}/${collection}`;
+}
+
+function attendee(address: string, type: "required" | "optional"): GraphObject {
+  return { emailAddress: { address }, type };
+}
+
+function attendeeList(
+  required: readonly string[] | null | undefined,
+  optional: readonly string[] | null | undefined,
+): GraphObject[] {
+  return [
+    ...(required ?? []).map((address) => attendee(address, "required")),
+    ...(optional ?? []).map((address) => attendee(address, "optional")),
+  ];
+}
+
+function applyRichEventFields(event: GraphObject, fields: RichEventFields): void {
+  if (fields.is_all_day) {
+    event.isAllDay = true;
+  }
+  if (fields.show_as !== "busy") {
+    event.showAs = fields.show_as;
+  }
+  if (fields.sensitivity !== "normal") {
+    event.sensitivity = fields.sensitivity;
+  }
+  if (fields.reminder_minutes_before_start >= 0) {
+    event.reminderMinutesBeforeStart = fields.reminder_minutes_before_start;
+    event.isReminderOn = true;
+  }
+  if (fields.categories.length > 0) {
+    event.categories = [...fields.categories];
+  }
+  if (!fields.allow_new_time_proposals) {
+    event.allowNewTimeProposals = false;
+  }
+  if (!fields.response_requested) {
+    event.responseRequested = false;
+  }
+}
+
+function datePart(dateTime: string): string {
+  return dateTime.split("T")[0] ?? dateTime;
+}
+
+function recurrenceRange(fields: RecurrenceFields, startDate: string): GraphObject {
+  if (fields.repeat_until !== "") {
+    return { type: "endDate", startDate, endDate: fields.repeat_until };
+  }
+  if (fields.repeat_count > 0) {
+    return { type: "numbered", startDate, numberOfOccurrences: fields.repeat_count };
+  }
+  return { type: "noEnd", startDate };
+}
+
+function recurrencePattern(
+  repeat: RepeatKind,
+  fields: RecurrenceFields,
+  startDate: string,
+): GraphObject {
+  const pattern: GraphObject = {
+    type: RECURRENCE_PATTERN_TYPES[repeat],
+    interval: fields.repeat_interval,
+  };
+  if (repeat === "weekly") {
+    pattern.daysOfWeek = [...fields.repeat_days];
+  }
+  if (repeat === "monthly" || repeat === "yearly") {
+    pattern.dayOfMonth = Number(startDate.slice(8, 10));
+  }
+  if (repeat === "yearly") {
+    pattern.month = Number(startDate.slice(5, 7));
+  }
+  return pattern;
+}
+
+function recurrenceError(fields: RecurrenceFields): string | null {
+  if (fields.repeat === "none") {
+    return null;
+  }
+  if (fields.repeat === "weekly" && fields.repeat_days.length === 0) {
+    return MISSING_REPEAT_DAYS_MESSAGE;
+  }
+  if (fields.repeat_until !== "" && fields.repeat_count > 0) {
+    return CONFLICTING_REPEAT_END_MESSAGE;
+  }
+  return null;
+}
+
+function buildRecurrence(
+  repeat: RepeatKind,
+  fields: RecurrenceFields,
+  startDateTime: string,
+): GraphObject {
+  const startDate = datePart(startDateTime);
+  return {
+    pattern: recurrencePattern(repeat, fields, startDate),
+    range: recurrenceRange(fields, startDate),
+  };
 }
 
 export function registerCalendarTools(
@@ -73,11 +231,16 @@ export function registerCalendarTools(
     server,
     "graph_list_calendars",
     {
-      description: "List the authenticated user's calendars.",
-      inputSchema: {},
+      description: `List the authenticated user's calendars.
+
+Args:
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        user: USER_SCHEMA,
+      },
     },
-    async () => {
-      const result = await dependencies.graphClient.get("/me/calendars", {
+    async ({ user }) => {
+      const result = await dependencies.graphClient.get(`${calendarRoot(user)}/calendars`, {
         $select: "id,name,color,isDefaultCalendar",
       });
       return successResponse(collectionValue(result));
@@ -94,15 +257,17 @@ Args:
     start_datetime: Start of date range (ISO 8601, e.g. "2025-01-01T00:00:00Z"). Required with end_datetime for date range queries.
     end_datetime: End of date range (ISO 8601). Required with start_datetime.
     calendar_id: Optional calendar ID. Defaults to primary calendar.
-    top: Maximum number of events to return (default 50).`,
+    top: Maximum number of events to return (default 50).
+${USER_ARGS_DOC}`,
       inputSchema: {
         start_datetime: z.string().default(""),
         end_datetime: z.string().default(""),
         calendar_id: OPTIONAL_RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
+        user: USER_SCHEMA,
       },
     },
-    async ({ start_datetime, end_datetime, calendar_id, top }) => {
+    async ({ start_datetime, end_datetime, calendar_id, top, user }) => {
       const params: Record<string, string> = {
         $select: EVENT_LIST_FIELDS,
         $top: String(Math.min(top, 50)),
@@ -112,10 +277,10 @@ Args:
       if (start_datetime !== "" && end_datetime !== "") {
         params.startDateTime = start_datetime;
         params.endDateTime = end_datetime;
-        path = calendarCollectionPath(calendar_id, "calendarView");
+        path = calendarCollectionPath(user, calendar_id, "calendarView");
       } else {
         params.$orderby = "start/dateTime desc";
-        path = calendarCollectionPath(calendar_id, "events");
+        path = calendarCollectionPath(user, calendar_id, "events");
       }
 
       const result = await dependencies.graphClient.get(path, params);
@@ -130,13 +295,15 @@ Args:
       description: `Get full details of a specific calendar event.
 
 Args:
-    event_id: The event ID.`,
+    event_id: The event ID.
+${USER_ARGS_DOC}`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
+        user: USER_SCHEMA,
       },
     },
-    async ({ event_id }) => {
-      const result = await dependencies.graphClient.get(eventPath(event_id));
+    async ({ event_id, user }) => {
+      const result = await dependencies.graphClient.get(eventPath(user, event_id));
       return successResponse(requireGraphObject(result));
     },
   );
@@ -154,9 +321,30 @@ Args:
     timezone: Timezone (default "UTC"). Examples: "Pacific Standard Time", "Europe/London".
     body: Optional event body/description.
     location: Optional location name.
-    attendees: Optional list of attendee email addresses.
+    attendees: Optional list of required attendee email addresses.
     is_online_meeting: Whether to create a Teams online meeting (default false).
-    is_html: Whether the body is HTML (default: plain text).`,
+    is_html: Whether the body is HTML (default: plain text).
+    is_all_day: Whether the event lasts all day (default false). Graph expects
+        midnight start and end times for all-day events.
+    show_as: Free/busy status: "free", "tentative", "busy", "oof",
+        "workingElsewhere", or "unknown" (default "busy").
+    sensitivity: Sensitivity: "normal", "personal", "private", or "confidential"
+        (default "normal").
+    reminder_minutes_before_start: Reminder lead time in minutes. Negative keeps
+        the mailbox default (default -1).
+    optional_attendees: Optional list of optional attendee email addresses.
+    categories: Outlook category names to tag the event with.
+    allow_new_time_proposals: Whether attendees may propose new times (default true).
+    response_requested: Whether attendees are asked to respond (default true).
+    repeat: Recurrence pattern: "none", "daily", "weekly", "monthly", or "yearly"
+        (default "none").
+    repeat_interval: Interval between occurrences (default 1).
+    repeat_days: Weekday names for weekly recurrence, e.g. ["monday", "thursday"].
+        Required when repeat is "weekly".
+    repeat_until: Last date of the recurrence (YYYY-MM-DD). Mutually exclusive
+        with repeat_count.
+    repeat_count: Number of occurrences. Mutually exclusive with repeat_until.
+${USER_ARGS_DOC}`,
       inputSchema: {
         subject: z.string(),
         start_datetime: z.string(),
@@ -167,19 +355,43 @@ Args:
         attendees: ATTENDEES_SCHEMA,
         is_online_meeting: z.boolean().default(false),
         is_html: z.boolean().default(false),
+        is_all_day: z.boolean().default(false),
+        show_as: SHOW_AS_SCHEMA,
+        sensitivity: SENSITIVITY_SCHEMA,
+        reminder_minutes_before_start: REMINDER_SCHEMA,
+        optional_attendees: ATTENDEES_SCHEMA,
+        categories: CATEGORIES_SCHEMA,
+        allow_new_time_proposals: z.boolean().default(true),
+        response_requested: z.boolean().default(true),
+        repeat: REPEAT_SCHEMA,
+        repeat_interval: z.number().int().default(1),
+        repeat_days: z.array(z.string()).default([]),
+        repeat_until: z.string().default(""),
+        repeat_count: z.number().int().default(0),
+        user: USER_SCHEMA,
       },
     },
-    async ({
-      subject,
-      start_datetime,
-      end_datetime,
-      timezone,
-      body,
-      location,
-      attendees,
-      is_online_meeting,
-      is_html,
-    }) => {
+    async (args) => {
+      const {
+        subject,
+        start_datetime,
+        end_datetime,
+        timezone,
+        body,
+        location,
+        attendees,
+        is_online_meeting,
+        is_html,
+        optional_attendees,
+        repeat,
+        user,
+      } = args;
+
+      const invalidRecurrence = recurrenceError(args);
+      if (invalidRecurrence !== null) {
+        return successResponse({ error: invalidRecurrence }, "error");
+      }
+
       const event: GraphObject = {
         subject,
         start: { dateTime: start_datetime, timeZone: timezone },
@@ -194,18 +406,20 @@ Args:
       if (location !== "") {
         event.location = { displayName: location };
       }
-      if (attendees !== null && attendees.length > 0) {
-        event.attendees = attendees.map((address) => ({
-          emailAddress: { address },
-          type: "required",
-        }));
+      const eventAttendees = attendeeList(attendees, optional_attendees);
+      if (eventAttendees.length > 0) {
+        event.attendees = eventAttendees;
       }
       if (is_online_meeting) {
         event.isOnlineMeeting = true;
         event.onlineMeetingProvider = "teamsForBusiness";
       }
+      applyRichEventFields(event, args);
+      if (repeat !== "none") {
+        event.recurrence = buildRecurrence(repeat, args, start_datetime);
+      }
 
-      const result = await dependencies.graphClient.post("/me/events", event);
+      const result = await dependencies.graphClient.post(`${calendarRoot(user)}/events`, event);
       return successResponse(requireGraphObjectWithId(result));
     },
   );
@@ -224,7 +438,22 @@ Args:
     timezone: Timezone for start/end times.
     body: New body/description.
     location: New location name.
-    is_html: Whether the body is HTML (default: plain text).`,
+    attendees: New list of required attendee email addresses.
+    is_html: Whether the body is HTML (default: plain text).
+    is_all_day: Whether the event lasts all day (default false). Graph expects
+        midnight start and end times for all-day events.
+    show_as: Free/busy status: "free", "tentative", "busy", "oof",
+        "workingElsewhere", or "unknown" (default "busy").
+    sensitivity: Sensitivity: "normal", "personal", "private", or "confidential"
+        (default "normal").
+    reminder_minutes_before_start: Reminder lead time in minutes. Negative leaves
+        the reminder unchanged (default -1).
+    optional_attendees: New list of optional attendee email addresses, merged with
+        attendees.
+    categories: Outlook category names to tag the event with.
+    allow_new_time_proposals: Whether attendees may propose new times (default true).
+    response_requested: Whether attendees are asked to respond (default true).
+${USER_ARGS_DOC}`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
         subject: z.string().default(""),
@@ -233,19 +462,34 @@ Args:
         timezone: z.string().default(""),
         body: z.string().default(""),
         location: z.string().default(""),
+        attendees: ATTENDEES_SCHEMA,
         is_html: z.boolean().default(false),
+        is_all_day: z.boolean().default(false),
+        show_as: SHOW_AS_SCHEMA,
+        sensitivity: SENSITIVITY_SCHEMA,
+        reminder_minutes_before_start: REMINDER_SCHEMA,
+        optional_attendees: ATTENDEES_SCHEMA,
+        categories: CATEGORIES_SCHEMA,
+        allow_new_time_proposals: z.boolean().default(true),
+        response_requested: z.boolean().default(true),
+        user: USER_SCHEMA,
       },
     },
-    async ({
-      event_id,
-      subject,
-      start_datetime,
-      end_datetime,
-      timezone,
-      body,
-      location,
-      is_html,
-    }) => {
+    async (args) => {
+      const {
+        event_id,
+        subject,
+        start_datetime,
+        end_datetime,
+        timezone,
+        body,
+        location,
+        attendees,
+        is_html,
+        optional_attendees,
+        user,
+      } = args;
+
       const updates: GraphObject = {};
       if (subject !== "") {
         updates.subject = subject;
@@ -265,8 +509,13 @@ Args:
       if (location !== "") {
         updates.location = { displayName: location };
       }
+      const updatedAttendees = attendeeList(attendees, optional_attendees);
+      if (updatedAttendees.length > 0) {
+        updates.attendees = updatedAttendees;
+      }
+      applyRichEventFields(updates, args);
 
-      const result = await dependencies.graphClient.patch(eventPath(event_id), updates);
+      const result = await dependencies.graphClient.patch(eventPath(user, event_id), updates);
       return successResponse(requireGraphObject(result));
     },
   );
@@ -278,14 +527,261 @@ Args:
       description: `Delete a calendar event.
 
 Args:
-    event_id: The event ID to delete.`,
+    event_id: The event ID to delete.
+${USER_ARGS_DOC}`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
+        user: USER_SCHEMA,
       },
     },
-    async ({ event_id }) => {
-      await dependencies.graphClient.delete(eventPath(event_id));
+    async ({ event_id, user }) => {
+      await dependencies.graphClient.delete(eventPath(user, event_id));
       return successResponse({ status: "Event deleted" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_respond_to_event",
+    {
+      description: `RSVP to a meeting invite.
+
+Args:
+    event_id: The event ID to respond to.
+    response: Response type: "accept", "decline", or "tentative".
+    comment: Optional comment to send with the response.
+    send_response: Whether to send the response to the organizer (default true).
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        event_id: RESOURCE_ID_SCHEMA,
+        response: z.enum(["accept", "decline", "tentative"]),
+        comment: z.string().default(""),
+        send_response: z.boolean().default(true),
+        user: USER_SCHEMA,
+      },
+    },
+    async ({ event_id, response, comment, send_response, user }) => {
+      const { action, status } = EVENT_RESPONSE_ACTIONS[response];
+      const payload: GraphObject = {};
+      if (comment !== "") {
+        payload.comment = comment;
+      }
+      payload.sendResponse = send_response;
+
+      await dependencies.graphClient.post(`${eventPath(user, event_id)}/${action}`, payload);
+      return successResponse({ status });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_get_schedule",
+    {
+      description: `Get free/busy availability for people or rooms.
+
+Args:
+    schedules: List of SMTP addresses (users or rooms) to look up.
+    start_datetime: Start of the lookup window (ISO 8601, e.g. "2025-03-01T09:00:00").
+    end_datetime: End of the lookup window (ISO 8601).
+    timezone: Timezone for the window (default "UTC").
+    availability_view_interval: Availability view interval in minutes (default 30).
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        schedules: z.array(z.string()),
+        start_datetime: z.string(),
+        end_datetime: z.string(),
+        timezone: z.string().default("UTC"),
+        availability_view_interval: z.number().int().default(30),
+        user: USER_SCHEMA,
+      },
+    },
+    async ({
+      schedules,
+      start_datetime,
+      end_datetime,
+      timezone,
+      availability_view_interval,
+      user,
+    }) => {
+      const result = await dependencies.graphClient.post(
+        `${calendarRoot(user)}/calendar/getSchedule`,
+        {
+          schedules,
+          startTime: { dateTime: start_datetime, timeZone: timezone },
+          endTime: { dateTime: end_datetime, timeZone: timezone },
+          availabilityViewInterval: availability_view_interval,
+        },
+      );
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_find_meeting_times",
+    {
+      description: `Suggest meeting times that work for the attendees.
+
+Graph scores candidate slots from the attendees' free/busy data, so use this to
+pick a time and graph_create_event to book it.
+
+Args:
+    attendees: Attendee email addresses to fit the meeting around.
+    duration_minutes: Meeting length in minutes (default 30).
+    start_datetime: Start of the search window (ISO 8601). Empty lets Graph choose.
+    end_datetime: End of the search window (ISO 8601). Empty lets Graph choose.
+        The window is only sent when both ends are supplied.
+    timezone: Timezone for the search window (default "UTC").
+    minimum_attendee_percentage: Minimum percentage of attendees that must be
+        free (default 100).
+    max_candidates: Maximum number of suggestions to return (default 10).
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        attendees: z.array(z.string()),
+        duration_minutes: z.number().int().default(30),
+        start_datetime: z.string().default(""),
+        end_datetime: z.string().default(""),
+        timezone: z.string().default("UTC"),
+        minimum_attendee_percentage: z.number().default(100),
+        max_candidates: z.number().int().default(10),
+        user: USER_SCHEMA,
+      },
+    },
+    async ({
+      attendees,
+      duration_minutes,
+      start_datetime,
+      end_datetime,
+      timezone,
+      minimum_attendee_percentage,
+      max_candidates,
+      user,
+    }) => {
+      const payload: GraphObject = {
+        attendees: attendees.map((address) => attendee(address, "required")),
+        meetingDuration: `PT${String(duration_minutes)}M`,
+        maxCandidates: max_candidates,
+        minimumAttendeePercentage: minimum_attendee_percentage,
+        isOrganizerOptional: false,
+      };
+      if (start_datetime !== "" && end_datetime !== "") {
+        payload.timeConstraint = {
+          activityDomain: "work",
+          timeSlots: [
+            {
+              start: { dateTime: start_datetime, timeZone: timezone },
+              end: { dateTime: end_datetime, timeZone: timezone },
+            },
+          ],
+        };
+      }
+
+      const result = await dependencies.graphClient.post(
+        `${calendarRoot(user)}/findMeetingTimes`,
+        payload,
+      );
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_cancel_event",
+    {
+      description: `Cancel a meeting you organize and notify the attendees.
+
+Unlike graph_delete_event, which removes the event without telling anyone,
+cancelling sends a cancellation notice to every attendee. Only the organizer can
+cancel a meeting; attendees should decline with graph_respond_to_event instead.
+
+Args:
+    event_id: The event ID to cancel.
+    comment: Optional note to include in the cancellation notice.
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        event_id: RESOURCE_ID_SCHEMA,
+        comment: z.string().default(""),
+        user: USER_SCHEMA,
+      },
+    },
+    async ({ event_id, comment, user }) => {
+      const payload: GraphObject = {};
+      if (comment !== "") {
+        payload.comment = comment;
+      }
+
+      await dependencies.graphClient.post(`${eventPath(user, event_id)}/cancel`, payload);
+      return successResponse({ status: "Event cancelled" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_event_instances",
+    {
+      description: `List the occurrences of a recurring event in a date range.
+
+Pass the series master event ID from graph_list_events, then use the returned
+occurrence IDs to update or cancel a single occurrence.
+
+Args:
+    event_id: The recurring series master event ID.
+    start_datetime: Start of the occurrence window (ISO 8601). Required by Graph.
+    end_datetime: End of the occurrence window (ISO 8601). Required by Graph.
+    top: Maximum number of occurrences to return (default 50, maximum 50).
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        event_id: RESOURCE_ID_SCHEMA,
+        start_datetime: z.string(),
+        end_datetime: z.string(),
+        top: TOP_SCHEMA,
+        user: USER_SCHEMA,
+      },
+    },
+    async ({ event_id, start_datetime, end_datetime, top, user }) => {
+      if (start_datetime === "" || end_datetime === "") {
+        return successResponse({ error: MISSING_INSTANCE_WINDOW_MESSAGE }, "error");
+      }
+
+      const result = await dependencies.graphClient.get(`${eventPath(user, event_id)}/instances`, {
+        startDateTime: start_datetime,
+        endDateTime: end_datetime,
+        $select: EVENT_LIST_FIELDS,
+        $top: String(Math.min(top, 50)),
+      });
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_rooms",
+    {
+      description: `List bookable meeting rooms in the tenant.
+
+Requires the delegated Place.Read.All permission. Use the returned email
+addresses with graph_get_schedule to check availability, or as attendees on
+graph_create_event to book a room.
+
+Args:
+    room_list: Room list email address to list rooms from. Empty lists every
+        room in the tenant.
+    top: Maximum number of rooms to return (default 50, maximum 50).`,
+      inputSchema: {
+        room_list: OPTIONAL_RESOURCE_ID_SCHEMA,
+        top: TOP_SCHEMA,
+      },
+    },
+    async ({ room_list, top }) => {
+      const path =
+        room_list === ""
+          ? "/places/microsoft.graph.room"
+          : `/places/${encodeURIComponent(room_list)}/microsoft.graph.roomlist/rooms`;
+
+      const result = await dependencies.graphClient.get(path, {
+        $top: String(Math.min(top, 50)),
+      });
+      return successResponse(collectionValue(result));
     },
   );
 }

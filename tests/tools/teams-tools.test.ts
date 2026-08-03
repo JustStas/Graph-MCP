@@ -5,7 +5,6 @@ import { describe, expect, test } from "vitest";
 
 import { AuthenticationError, GraphApiError } from "../../src/errors.js";
 import { CHANNEL_FIELDS, TEAM_FIELDS } from "../../src/select-fields.js";
-import { registerChatTools } from "../../src/tools/chat-tools.js";
 import { registerTeamsTools } from "../../src/tools/teams-tools.js";
 import type { ToolDependencies } from "../../src/tools/tool-types.js";
 
@@ -43,27 +42,7 @@ interface ToolHarness {
   invokeRaw(name: string, args: unknown): Promise<CallToolResult>;
 }
 
-const EXPECTED_CHAT_AND_TEAMS_TOOLS = [
-  {
-    name: "graph_list_chats",
-    description: "List recent Microsoft Teams chats.",
-  },
-  {
-    name: "graph_get_chat_messages",
-    description: "Get messages from a specific chat.",
-  },
-  {
-    name: "graph_send_chat_message",
-    description: "Send a message to a chat.",
-  },
-  {
-    name: "graph_create_chat",
-    description: "Create a new chat (one-on-one or group).",
-  },
-  {
-    name: "graph_list_chat_members",
-    description: "List members of a chat.",
-  },
+const EXPECTED_TEAMS_TOOLS = [
   {
     name: "graph_list_teams",
     description: "List Microsoft Teams that the authenticated user has joined.",
@@ -91,6 +70,87 @@ const EXPECTED_CHAT_AND_TEAMS_TOOLS = [
   {
     name: "graph_reply_to_channel_message",
     description: "Reply to a channel message.",
+  },
+  {
+    name: "graph_list_team_members",
+    description: `List members of a team.
+
+Needs the TeamMember.Read.All permission, which requires admin consent.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    top: Maximum number of members to return (default 50, maximum 50).`,
+  },
+  {
+    name: "graph_get_team",
+    description: `Get a team's details, including whether it is archived.
+
+Args:
+    team_id: The team ID (from graph_list_teams).`,
+  },
+  {
+    name: "graph_get_primary_channel",
+    description: `Get a team's primary channel, the one named General.
+
+Use this as a shortcut for the default channel instead of listing every
+channel in the team.
+
+Args:
+    team_id: The team ID (from graph_list_teams).`,
+  },
+  {
+    name: "graph_create_channel",
+    description: `Create a channel in a team.
+
+Needs the Channel.Create permission.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    display_name: Name of the new channel.
+    description: Optional channel description.
+    membership_type: Channel type: "standard", "private", or "shared"
+        (default "standard").`,
+  },
+  {
+    name: "graph_get_channel_files_folder",
+    description: `Get the SharePoint folder that stores a channel's files.
+
+This is the bridge from a channel to its SharePoint folder: the returned
+folder ID works with the OneDrive file tools. Needs the Files.Read.All
+permission.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    include_children: Whether to also list the folder contents (default
+        false). When true the result is {"folder": ..., "children": [...]}.
+    top: Maximum number of children to return (default 50, maximum 50).`,
+  },
+  {
+    name: "graph_update_channel_message",
+    description: `Edit a channel message you posted.
+
+Only your own messages can be edited; editing anyone else's message fails.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    message_id: The message ID to edit (from graph_get_channel_messages).
+    message: Replacement message content. When \`is_html\` is true, send
+        explicit HTML; markdown is not converted.
+    is_html: Whether the message is HTML content (default: True). Use false
+        for plain text.`,
+  },
+  {
+    name: "graph_delete_channel_message",
+    description: `Soft-delete a channel message, or restore one you deleted.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    message_id: The message ID to delete (from graph_get_channel_messages).
+    restore: Whether to restore a previously soft-deleted message
+        (default false).`,
   },
 ] as const;
 
@@ -283,20 +343,16 @@ function registerTeamsHarness(graphResponses: readonly unknown[] = []): {
   return { harness, graph };
 }
 
-describe("chat and Teams tool registration", () => {
-  test("registers exactly the twelve legacy names and first-line descriptions", () => {
-    const harness = createToolHarness();
-    const { dependencies } = createDependencies();
-
-    registerChatTools(harness.server, dependencies);
-    registerTeamsTools(harness.server, dependencies);
+describe("Teams tool registration", () => {
+  test("registers exactly the fourteen Teams names with complete descriptions", () => {
+    const { harness } = registerTeamsHarness();
 
     expect(
       harness.registrations.map(({ name, config }) => ({
         name,
         description: config.description,
       })),
-    ).toEqual(EXPECTED_CHAT_AND_TEAMS_TOOLS);
+    ).toEqual(EXPECTED_TEAMS_TOOLS);
   });
 
   test("exposes exact public snake_case Teams schemas, defaults, and required fields", () => {
@@ -955,5 +1011,498 @@ describe("Teams authenticated wrapper errors", () => {
     const { harness } = registerTeamsHarness([new GraphApiError("403: Access denied", 403)]);
 
     await expect(harness.invoke(name, args)).resolves.toEqual(GRAPH_API_ERROR_RESULT);
+  });
+});
+
+describe("Teams team and channel metadata operations", () => {
+  test("exposes exact schemas, defaults, and required fields for the new Teams tools", () => {
+    const { harness } = registerTeamsHarness();
+
+    const membersShape = schemaFor(harness, "graph_list_team_members");
+    expect(Object.keys(membersShape)).toEqual(["team_id", "top"]);
+    expect(z.object(membersShape).parse({ team_id: "team-1" })).toEqual({
+      team_id: "team-1",
+      top: 50,
+    });
+
+    const teamShape = schemaFor(harness, "graph_get_team");
+    expect(Object.keys(teamShape)).toEqual(["team_id"]);
+    expect(z.object(teamShape).safeParse({}).success).toBe(false);
+
+    const primaryShape = schemaFor(harness, "graph_get_primary_channel");
+    expect(Object.keys(primaryShape)).toEqual(["team_id"]);
+    expect(z.object(primaryShape).safeParse({}).success).toBe(false);
+
+    const createShape = schemaFor(harness, "graph_create_channel");
+    expect(Object.keys(createShape)).toEqual([
+      "team_id",
+      "display_name",
+      "description",
+      "membership_type",
+    ]);
+    const createSchema = z.object(createShape);
+    expect(createSchema.parse({ team_id: "team-1", display_name: "Launch" })).toEqual({
+      team_id: "team-1",
+      display_name: "Launch",
+      description: "",
+      membership_type: "standard",
+    });
+    expect(
+      createSchema.safeParse({
+        team_id: "team-1",
+        display_name: "Launch",
+        membership_type: "public",
+      }).success,
+    ).toBe(false);
+    for (const membershipType of ["standard", "private", "shared"]) {
+      expect(
+        createSchema.safeParse({
+          team_id: "team-1",
+          display_name: "Launch",
+          membership_type: membershipType,
+        }).success,
+      ).toBe(true);
+    }
+
+    const filesShape = schemaFor(harness, "graph_get_channel_files_folder");
+    expect(Object.keys(filesShape)).toEqual(["team_id", "channel_id", "include_children", "top"]);
+    expect(z.object(filesShape).parse({ team_id: "team-1", channel_id: "channel-1" })).toEqual({
+      team_id: "team-1",
+      channel_id: "channel-1",
+      include_children: false,
+      top: 50,
+    });
+
+    const updateShape = schemaFor(harness, "graph_update_channel_message");
+    expect(Object.keys(updateShape)).toEqual([
+      "team_id",
+      "channel_id",
+      "message_id",
+      "message",
+      "is_html",
+    ]);
+    expect(
+      z.object(updateShape).parse({
+        team_id: "team-1",
+        channel_id: "channel-1",
+        message_id: "message-1",
+        message: "edited",
+      }),
+    ).toEqual({
+      team_id: "team-1",
+      channel_id: "channel-1",
+      message_id: "message-1",
+      message: "edited",
+      is_html: true,
+    });
+
+    const deleteShape = schemaFor(harness, "graph_delete_channel_message");
+    expect(Object.keys(deleteShape)).toEqual(["team_id", "channel_id", "message_id", "restore"]);
+    expect(
+      z.object(deleteShape).parse({
+        team_id: "team-1",
+        channel_id: "channel-1",
+        message_id: "message-1",
+      }),
+    ).toEqual({
+      team_id: "team-1",
+      channel_id: "channel-1",
+      message_id: "message-1",
+      restore: false,
+    });
+  });
+
+  test("rejects empty and dot-segment IDs in every new Teams schema", () => {
+    const { harness } = registerTeamsHarness();
+    const cases = [
+      { name: "graph_list_team_members", ids: ["team_id"], base: {} },
+      { name: "graph_get_team", ids: ["team_id"], base: {} },
+      { name: "graph_get_primary_channel", ids: ["team_id"], base: {} },
+      {
+        name: "graph_create_channel",
+        ids: ["team_id", "display_name"],
+        base: { display_name: "Launch" },
+      },
+      {
+        name: "graph_get_channel_files_folder",
+        ids: ["team_id", "channel_id"],
+        base: {},
+      },
+      {
+        name: "graph_update_channel_message",
+        ids: ["team_id", "channel_id", "message_id"],
+        base: { message: "edited" },
+      },
+      {
+        name: "graph_delete_channel_message",
+        ids: ["team_id", "channel_id", "message_id"],
+        base: {},
+      },
+    ] as const;
+
+    for (const { name, ids, base } of cases) {
+      const schema = z.object(schemaFor(harness, name));
+      const validIds = {
+        team_id: "team-1",
+        channel_id: "channel-1",
+        message_id: "message-1",
+      };
+      for (const idName of ids) {
+        for (const invalidValue of ["", ".", ".."]) {
+          expect(schema.safeParse({ ...base, ...validIds, [idName]: invalidValue }).success).toBe(
+            false,
+          );
+        }
+      }
+    }
+  });
+
+  test("lists team members with the encoded team path and capped string top", async () => {
+    const teamId = "team/../id#fragment";
+    const { harness, graph } = registerTeamsHarness([
+      { value: [{ id: "member-1" }] },
+      { value: [{ id: "member-2" }] },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_list_team_members", { team_id: teamId }))).toEqual([
+      { id: "member-1" },
+    ]);
+    expect(
+      dataFrom(await harness.invoke("graph_list_team_members", { team_id: teamId, top: 500 })),
+    ).toEqual([{ id: "member-2" }]);
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/teams/${encodeURIComponent(teamId)}/members`,
+        params: { $top: "50" },
+      },
+      {
+        method: "GET",
+        path: `/teams/${encodeURIComponent(teamId)}/members`,
+        params: { $top: "50" },
+      },
+    ]);
+  });
+
+  test("gets a team and its primary channel with the exact selects and encoded paths", async () => {
+    const teamId = "../team/path?query=value";
+    const team = { id: "team-1", displayName: "R&D", isArchived: false };
+    const channel = { id: "channel-1", displayName: "General" };
+    const { harness, graph } = registerTeamsHarness([team, channel]);
+
+    expect(dataFrom(await harness.invoke("graph_get_team", { team_id: teamId }))).toEqual(team);
+    expect(
+      dataFrom(await harness.invoke("graph_get_primary_channel", { team_id: teamId })),
+    ).toEqual(channel);
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/teams/${encodeURIComponent(teamId)}`,
+        params: { $select: "id,displayName,description,isArchived,visibility,webUrl" },
+      },
+      {
+        method: "GET",
+        path: `/teams/${encodeURIComponent(teamId)}/primaryChannel`,
+        params: { $select: CHANNEL_FIELDS },
+      },
+    ]);
+  });
+
+  test("creates a channel with the exact body at defaults and with overrides", async () => {
+    const { harness, graph } = registerTeamsHarness([{ id: "channel-1" }, { id: "channel-2" }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_create_channel", {
+          team_id: "team-1",
+          display_name: "Launch",
+        }),
+      ),
+    ).toEqual({ id: "channel-1" });
+    await harness.invoke("graph_create_channel", {
+      team_id: "team-1",
+      display_name: "Launch",
+      description: "Launch coordination",
+      membership_type: "private",
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/teams/team-1/channels",
+        body: {
+          displayName: "Launch",
+          description: "",
+          membershipType: "standard",
+        },
+      },
+      {
+        method: "POST",
+        path: "/teams/team-1/channels",
+        body: {
+          displayName: "Launch",
+          description: "Launch coordination",
+          membershipType: "private",
+        },
+      },
+    ]);
+  });
+
+  test("returns only the files folder when include_children is false", async () => {
+    const folder = { id: "folder-1", name: "General", parentReference: { driveId: "drive-1" } };
+    const { harness, graph } = registerTeamsHarness([folder]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_channel_files_folder", {
+          team_id: "team-1",
+          channel_id: "channel-1",
+        }),
+      ),
+    ).toEqual(folder);
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/teams/team-1/channels/channel-1/filesFolder",
+      },
+    ]);
+  });
+
+  test("makes two calls and returns folder with children when include_children is true", async () => {
+    const teamId = "team/../id";
+    const channelId = "channel/../id";
+    const folder = { id: "folder-1", name: "General" };
+    const { harness, graph } = registerTeamsHarness([folder, { value: [{ id: "item-1" }] }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_channel_files_folder", {
+          team_id: teamId,
+          channel_id: channelId,
+          include_children: true,
+          top: 500,
+        }),
+      ),
+    ).toEqual({ folder, children: [{ id: "item-1" }] });
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(channelId)}/filesFolder`,
+      },
+      {
+        method: "GET",
+        path: `/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(channelId)}/filesFolder/children`,
+        params: { $top: "50" },
+      },
+    ]);
+  });
+
+  test("treats a missing children value property as an empty list", async () => {
+    const { harness } = registerTeamsHarness([{ id: "folder-1" }, {}]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_channel_files_folder", {
+          team_id: "team-1",
+          channel_id: "channel-1",
+          include_children: true,
+        }),
+      ),
+    ).toEqual({ folder: { id: "folder-1" }, children: [] });
+  });
+
+  test.each([null, [], "payload-secret", 42])(
+    "rejects malformed files folder metadata %# without leakage",
+    async (response) => {
+      const { harness, graph } = registerTeamsHarness([response]);
+      const result = await harness.invoke("graph_get_channel_files_folder", {
+        team_id: "team-1",
+        channel_id: "channel-1",
+        include_children: true,
+      });
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(graph.calls).toHaveLength(1);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+
+  test.each([null, [], "payload-secret", 42])(
+    "rejects malformed team and channel objects %# without leakage",
+    async (response) => {
+      for (const name of ["graph_get_team", "graph_get_primary_channel"]) {
+        const { harness } = registerTeamsHarness([response]);
+        const result = await harness.invoke(name, { team_id: "team-1" });
+
+        expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+        expect(JSON.stringify(result)).not.toContain("payload-secret");
+        expect(JSON.stringify(result)).not.toContain("TypeError");
+      }
+    },
+  );
+});
+
+describe("Teams message lifecycle operations", () => {
+  test("patches an edited message body with html and text content types", async () => {
+    const messageId = "message/../id#fragment";
+    const { harness, graph } = registerTeamsHarness([{ id: "message-1" }, { id: "message-1" }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_update_channel_message", {
+          team_id: "team-1",
+          channel_id: "channel-1",
+          message_id: messageId,
+          message: "<p>edited</p>",
+        }),
+      ),
+    ).toEqual({ status: "Message updated" });
+    await harness.invoke("graph_update_channel_message", {
+      team_id: "team-1",
+      channel_id: "channel-1",
+      message_id: messageId,
+      message: "edited",
+      is_html: false,
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: `/teams/team-1/channels/channel-1/messages/${encodeURIComponent(messageId)}`,
+        body: { body: { contentType: "html", content: "<p>edited</p>" } },
+      },
+      {
+        method: "PATCH",
+        path: `/teams/team-1/channels/channel-1/messages/${encodeURIComponent(messageId)}`,
+        body: { body: { contentType: "text", content: "edited" } },
+      },
+    ]);
+  });
+
+  test("posts softDelete by default and undoSoftDelete when restoring", async () => {
+    const { harness, graph } = registerTeamsHarness([{}, {}]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_delete_channel_message", {
+          team_id: "team-1",
+          channel_id: "channel-1",
+          message_id: "message-1",
+        }),
+      ),
+    ).toEqual({ status: "Message deleted" });
+    expect(
+      dataFrom(
+        await harness.invoke("graph_delete_channel_message", {
+          team_id: "team-1",
+          channel_id: "channel-1",
+          message_id: "message-1",
+          restore: true,
+        }),
+      ),
+    ).toEqual({ status: "Message restored" });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/teams/team-1/channels/channel-1/messages/message-1/softDelete",
+      },
+      {
+        method: "POST",
+        path: "/teams/team-1/channels/channel-1/messages/message-1/undoSoftDelete",
+      },
+    ]);
+  });
+
+  test.each([
+    {
+      name: "graph_list_team_members",
+      args: (id: string) => ({ team_id: id }),
+      path: (id: string) => `/teams/${id}/members`,
+      response: { value: [] },
+    },
+    {
+      name: "graph_get_team",
+      args: (id: string) => ({ team_id: id }),
+      path: (id: string) => `/teams/${id}`,
+      response: { id: "team-1" },
+    },
+    {
+      name: "graph_get_primary_channel",
+      args: (id: string) => ({ team_id: id }),
+      path: (id: string) => `/teams/${id}/primaryChannel`,
+      response: { id: "channel-1" },
+    },
+    {
+      name: "graph_create_channel",
+      args: (id: string) => ({ team_id: id, display_name: "Launch" }),
+      path: (id: string) => `/teams/${id}/channels`,
+      response: { id: "channel-1" },
+    },
+    {
+      name: "graph_get_channel_files_folder",
+      args: (id: string) => ({ team_id: id, channel_id: id }),
+      path: (id: string) => `/teams/${id}/channels/${id}/filesFolder`,
+      response: { id: "folder-1" },
+    },
+    {
+      name: "graph_update_channel_message",
+      args: (id: string) => ({
+        team_id: id,
+        channel_id: id,
+        message_id: id,
+        message: "edited",
+      }),
+      path: (id: string) => `/teams/${id}/channels/${id}/messages/${id}`,
+      response: {},
+    },
+    {
+      name: "graph_delete_channel_message",
+      args: (id: string) => ({ team_id: id, channel_id: id, message_id: id }),
+      path: (id: string) => `/teams/${id}/channels/${id}/messages/${id}/softDelete`,
+      response: {},
+    },
+  ])("encodes every dynamic ID in the $name route", async ({ name, args, path, response }) => {
+    const hostileId = "../path\\name#fragment?query=:value%";
+    const encodedId = encodeURIComponent(hostileId);
+    const { harness, graph } = registerTeamsHarness([response]);
+
+    await harness.invoke(name, args(hostileId));
+
+    expect(graph.calls[0]?.path).toBe(path(encodedId));
+  });
+
+  test.each([
+    { name: "graph_list_team_members", args: { team_id: "team-1" } },
+    { name: "graph_get_team", args: { team_id: "team-1" } },
+    { name: "graph_get_primary_channel", args: { team_id: "team-1" } },
+    {
+      name: "graph_create_channel",
+      args: { team_id: "team-1", display_name: "Launch" },
+    },
+    {
+      name: "graph_get_channel_files_folder",
+      args: { team_id: "team-1", channel_id: "channel-1" },
+    },
+    {
+      name: "graph_update_channel_message",
+      args: {
+        team_id: "team-1",
+        channel_id: "channel-1",
+        message_id: "message-1",
+        message: "edited",
+      },
+    },
+    {
+      name: "graph_delete_channel_message",
+      args: { team_id: "team-1", channel_id: "channel-1", message_id: "message-1" },
+    },
+  ])("$name returns the stable error envelopes", async ({ name, args }) => {
+    const auth = registerTeamsHarness([new AuthenticationError("Not authenticated.")]);
+    await expect(auth.harness.invoke(name, args)).resolves.toEqual(AUTHENTICATION_ERROR_RESULT);
+
+    const graphError = registerTeamsHarness([new GraphApiError("403: Access denied", 403)]);
+    await expect(graphError.harness.invoke(name, args)).resolves.toEqual(GRAPH_API_ERROR_RESULT);
   });
 });

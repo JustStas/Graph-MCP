@@ -123,8 +123,8 @@ describe("CLI", () => {
   });
 
   test.each([
-    ["--help", "Graph MCP 0.6.1"],
-    ["--version", "0.6.1"],
+    ["--help", "Graph MCP 0.7.0"],
+    ["--version", "0.7.0"],
   ])("%s returns code 0 without starting stdio", async (argument, expectedOutput) => {
     const output = capturedOutput();
     const stdio = vi.fn(() => Promise.reject(new Error("stdio must not start")));

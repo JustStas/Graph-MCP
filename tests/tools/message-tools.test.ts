@@ -4,6 +4,7 @@ import {
   CHANNEL_FIELDS,
   CHAT_FIELDS,
   EVENT_LIST_FIELDS,
+  MAIL_FOLDER_FIELDS,
   MAIL_LIST_FIELDS,
   TEAM_FIELDS,
   USER_PROFILE_FIELDS,
@@ -26,7 +27,10 @@ describe("select field constants", () => {
     expect(TEAM_FIELDS).toBe("id,displayName,description");
     expect(CHANNEL_FIELDS).toBe("id,displayName,description,membershipType");
     expect(MAIL_LIST_FIELDS).toBe(
-      "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,importance,flag",
+      "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,importance,flag,webLink,conversationId,parentFolderId",
+    );
+    expect(MAIL_FOLDER_FIELDS).toBe(
+      "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount",
     );
     expect(USER_PROFILE_FIELDS).toBe("id,displayName,mail,jobTitle,department,officeLocation");
   });
@@ -282,5 +286,71 @@ describe("buildChatMessagePayload", () => {
       ],
     });
     expect(payload.mentions).not.toBe(mentions);
+  });
+});
+
+describe("buildChatMessagePayload importance and subject options", () => {
+  test("stays identical to the three-argument form when options are omitted", () => {
+    const mentions = [{ name: "Jane Smith", user_id: "user-1" }];
+
+    expect(buildChatMessagePayload("Hello", true, mentions)).toEqual(
+      buildChatMessagePayload("Hello", true, mentions, {}),
+    );
+    expect(buildChatMessagePayload("Hello")).toEqual({
+      body: { contentType: "html", content: "Hello" },
+    });
+  });
+
+  test.each([
+    {
+      label: "explicit normal importance and empty subject",
+      options: { importance: "normal" as const, subject: "" },
+    },
+    { label: "an empty options object", options: {} },
+  ])("omits importance and subject for $label", ({ options }) => {
+    expect(buildChatMessagePayload("Hello", true, null, options)).toEqual({
+      body: { contentType: "html", content: "Hello" },
+    });
+  });
+
+  test.each(["high", "urgent"] as const)("includes %s importance", (importance) => {
+    expect(buildChatMessagePayload("Hello", false, null, { importance })).toEqual({
+      body: { contentType: "text", content: "Hello" },
+      importance,
+    });
+  });
+
+  test("includes a non-empty subject alongside mentions and importance", () => {
+    expect(
+      buildChatMessagePayload("Hello Jane", true, [{ name: "Jane Smith", user_id: "user-1" }], {
+        importance: "urgent",
+        subject: "Incident 42",
+      }),
+    ).toEqual({
+      body: { contentType: "html", content: "Hello Jane" },
+      mentions: [
+        {
+          id: 0,
+          mentionText: "Jane Smith",
+          mentioned: {
+            user: {
+              id: "user-1",
+              displayName: "Jane Smith",
+              userIdentityType: "aadUser",
+            },
+          },
+        },
+      ],
+      importance: "urgent",
+      subject: "Incident 42",
+    });
+  });
+
+  test("does not mutate the options object", () => {
+    const options = Object.freeze({ importance: "high" as const, subject: "Incident 42" });
+
+    buildChatMessagePayload("Hello", true, null, options);
+
+    expect(options).toEqual({ importance: "high", subject: "Incident 42" });
   });
 });

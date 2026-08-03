@@ -95,6 +95,175 @@ Args:
     share_type: Permission type: "view", "edit", or "embed" (default "view").
     scope: Share scope: "anonymous", "organization", or "users" (default "organization").`,
   },
+  {
+    name: "graph_create_folder",
+    description: `Create a folder in OneDrive.
+
+Args:
+    folder_name: Name of the new folder.
+    parent_folder_id: Parent folder ID. Empty for the drive root.`,
+  },
+  {
+    name: "graph_delete_file",
+    description: `Delete a file or folder from OneDrive.
+
+The item is moved to the OneDrive recycle bin.
+
+Args:
+    item_id: The file or folder ID to delete.`,
+  },
+  {
+    name: "graph_move_file",
+    description: `Move and/or rename a file or folder in OneDrive.
+
+At least one of new_parent_folder_id or new_name must be provided.
+
+Args:
+    item_id: The file or folder ID to move.
+    new_parent_folder_id: Destination folder ID. Empty to keep the current parent.
+    new_name: New name for the item. Empty to keep the current name.`,
+  },
+  {
+    name: "graph_list_shared_files",
+    description: `List files other people have shared with the user.
+
+Only $top is passed because sharedWithMe does not support $select reliably.
+
+Args:
+    top: Maximum number of items to return (default 25).`,
+  },
+  {
+    name: "graph_copy_file",
+    description: `Copy a file or folder in OneDrive.
+
+The copy is asynchronous: Graph returns 202 with a monitor URL rather than the
+finished item, so the new item may not exist yet when this call returns.
+
+Args:
+    item_id: The file or folder ID to copy.
+    destination_folder_id: Destination folder ID. Empty to copy into the current parent.
+    new_name: Name for the copy. Empty to keep the current name.
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
+  {
+    name: "graph_list_file_permissions",
+    description: `List who currently has access to a file or folder.
+
+Args:
+    item_id: The file or folder ID.
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
+  {
+    name: "graph_delete_file_permission",
+    description: `Revoke a sharing link or a person's access to a file or folder.
+
+Args:
+    item_id: The file or folder ID.
+    permission_id: The permission ID (from graph_list_file_permissions).
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
+  {
+    name: "graph_invite_to_file",
+    description: `Invite people to a file or folder by email.
+
+Args:
+    item_id: The file or folder ID to share.
+    emails: Email addresses of the people to invite.
+    role: Access to grant: "read" or "write" (default "read").
+    send_email: Whether Graph should email the invitation (default false).
+    message: Optional message to include with the invitation.
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
+  {
+    name: "graph_list_file_versions",
+    description: `List the stored versions of a file.
+
+Args:
+    item_id: The file ID.
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
+  {
+    name: "graph_restore_file_version",
+    description: `Restore a file to an earlier version.
+
+Args:
+    item_id: The file ID.
+    version_id: The version ID (from graph_list_file_versions).
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
+  {
+    name: "graph_list_recent_files",
+    description: `List what the user worked on recently across their OneDrive.
+
+Args:
+    top: Maximum number of items to return (default 25, maximum 50).`,
+  },
+  {
+    name: "graph_list_drives",
+    description: `List the drives the user can reach, including their OneDrive and followed document libraries.`,
+  },
+  {
+    name: "graph_resolve_share_link",
+    description: `Resolve a sharing link to the file or folder it points to.
+
+Args:
+    share_url: The sharing URL to resolve.`,
+  },
+  {
+    name: "graph_search_sites",
+    description: `Search SharePoint sites by keyword.
+
+Needs the Sites.Read.All permission, which requires admin consent. Listing every
+site without a search term is application-only, so a query is always sent.
+
+Args:
+    query: Search query string.
+    top: Maximum number of results (default 25, maximum 50).`,
+  },
+  {
+    name: "graph_list_site_drives",
+    description: `List the document libraries of a SharePoint site.
+
+Args:
+    site_id: The SharePoint site ID (from graph_search_sites).`,
+  },
+  {
+    name: "graph_list_worksheets",
+    description: `List the worksheets in an Excel workbook.
+
+Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx files.
+
+Args:
+    item_id: The workbook file ID.
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
+  {
+    name: "graph_get_worksheet_range",
+    description: `Read cell values from a worksheet range.
+
+The response \`values\` array holds the cell values, one inner array per row.
+Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx files.
+
+Args:
+    item_id: The workbook file ID.
+    worksheet: Worksheet ID or name.
+    address: Range address (e.g. "A1:D10"). Empty reads the used range.
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
+  {
+    name: "graph_update_worksheet_range",
+    description: `Write cell values to a worksheet range.
+
+Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx files.
+
+Args:
+    item_id: The workbook file ID.
+    worksheet: Worksheet ID or name.
+    address: Range address to write (e.g. "A1:D10"). Its shape must match values.
+    values: Cell values as a 2D array, one inner array per row. Cells may be
+        strings, numbers, booleans, or null.
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
 ] as const;
 
 const INVALID_GRAPH_RESPONSE_RESULT = {
@@ -301,7 +470,7 @@ function firstRequest(fetch: ReturnType<typeof vi.fn<typeof globalThis.fetch>>):
 }
 
 describe("file tool registration", () => {
-  test("registers exactly the five legacy file names and complete descriptions", () => {
+  test("registers exactly the expected file tool names and complete descriptions", () => {
     const { harness } = registerFilesHarness();
 
     expect(
@@ -786,6 +955,276 @@ describe("OneDrive sharing and path safety", () => {
   );
 });
 
+describe("OneDrive folder creation", () => {
+  test("creates a folder at the drive root with the exact conflict behaviour body", async () => {
+    const created = { id: "folder-1", name: "Reports", folder: { childCount: 0 } };
+    const { harness, graph } = registerFilesHarness([created]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_create_folder", { folder_name: "Reports" })),
+    ).toEqual(created);
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/drive/root/children",
+        body: {
+          name: "Reports",
+          folder: {},
+          "@microsoft.graph.conflictBehavior": "rename",
+        },
+      },
+    ]);
+  });
+
+  test("creates a nested folder under an encoded parent folder ID", async () => {
+    const parentId = "../folder/path\\name#fragment?query=:value%";
+    const { harness, graph } = registerFilesHarness([{ id: "folder-2" }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_create_folder", {
+          folder_name: "Q3 #plans/final",
+          parent_folder_id: parentId,
+        }),
+      ),
+    ).toEqual({ id: "folder-2" });
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: `/me/drive/items/${encodeURIComponent(parentId)}/children`,
+        body: {
+          name: "Q3 #plans/final",
+          folder: {},
+          "@microsoft.graph.conflictBehavior": "rename",
+        },
+      },
+    ]);
+  });
+
+  test("exposes exact create folder schema keys, defaults, and rejected names", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_create_folder");
+    expect(Object.keys(shape)).toEqual(["folder_name", "parent_folder_id"]);
+    const schema = z.object(shape);
+    expect(schema.parse({ folder_name: "Reports" })).toEqual({
+      folder_name: "Reports",
+      parent_folder_id: "",
+    });
+    expect(schema.safeParse({}).success).toBe(false);
+    for (const folderName of ["", ".", ".."]) {
+      expect(schema.safeParse({ folder_name: folderName }).success).toBe(false);
+    }
+    for (const parentFolderId of [".", ".."]) {
+      expect(
+        schema.safeParse({ folder_name: "Reports", parent_folder_id: parentFolderId }).success,
+      ).toBe(false);
+    }
+  });
+
+  test.each([null, [], "payload-secret", 42])(
+    "rejects malformed created folder metadata %# without leakage",
+    async (response) => {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke("graph_create_folder", { folder_name: "Reports" });
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
+describe("OneDrive deletion", () => {
+  test("deletes an item through the exact encoded path with the fixed status payload", async () => {
+    const itemId = "../file/path\\name#fragment?query=:value%";
+    const { harness, graph } = registerFilesHarness([null]);
+
+    expect(dataFrom(await harness.invoke("graph_delete_file", { item_id: itemId }))).toEqual({
+      status: "Item deleted",
+    });
+    expect(graph.calls).toEqual([
+      {
+        method: "DELETE",
+        path: `/me/drive/items/${encodeURIComponent(itemId)}`,
+      },
+    ]);
+  });
+
+  test("exposes exact delete schema keys and rejects sentinel item IDs", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_delete_file");
+    expect(Object.keys(shape)).toEqual(["item_id"]);
+    const schema = z.object(shape);
+    for (const itemId of ["", ".", ".."]) {
+      expect(schema.safeParse({ item_id: itemId }).success).toBe(false);
+    }
+  });
+});
+
+describe("OneDrive moves and renames", () => {
+  test("moves an item with a parent reference only", async () => {
+    const { harness, graph } = registerFilesHarness([{ id: "file-1" }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_move_file", {
+          item_id: "file-1",
+          new_parent_folder_id: "folder-9",
+        }),
+      ),
+    ).toEqual({ id: "file-1" });
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: "/me/drive/items/file-1",
+        body: { parentReference: { id: "folder-9" } },
+      },
+    ]);
+  });
+
+  test("renames an item with a name only through the exact encoded path", async () => {
+    const itemId = "../file/path\\name#fragment?query=:value%";
+    const { harness, graph } = registerFilesHarness([{ id: "file-2" }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_move_file", { item_id: itemId, new_name: "renamed.txt" }),
+      ),
+    ).toEqual({ id: "file-2" });
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: `/me/drive/items/${encodeURIComponent(itemId)}`,
+        body: { name: "renamed.txt" },
+      },
+    ]);
+  });
+
+  test("moves and renames together with parentReference before name", async () => {
+    const { harness, graph } = registerFilesHarness([{ id: "file-3" }]);
+
+    await harness.invoke("graph_move_file", {
+      item_id: "file-3",
+      new_parent_folder_id: "folder-7",
+      new_name: "final.docx",
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: "/me/drive/items/file-3",
+        body: { parentReference: { id: "folder-7" }, name: "final.docx" },
+      },
+    ]);
+    expect(Object.keys(graph.calls[0]?.body as Record<string, unknown>)).toEqual([
+      "parentReference",
+      "name",
+    ]);
+  });
+
+  test("returns the exact error envelope when neither destination nor name is given", async () => {
+    const { harness, graph } = registerFilesHarness();
+
+    const result = await harness.invoke("graph_move_file", { item_id: "file-4" });
+
+    expect(result).toEqual({
+      content: [
+        {
+          type: "text",
+          text: '{"data":{"error":"At least one of new_parent_folder_id or new_name is required."},"message":"error"}',
+        },
+      ],
+    });
+    expect(graph.calls).toEqual([]);
+  });
+
+  test("exposes exact move schema keys, defaults, and rejected identifiers", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_move_file");
+    expect(Object.keys(shape)).toEqual(["item_id", "new_parent_folder_id", "new_name"]);
+    const schema = z.object(shape);
+    expect(schema.parse({ item_id: "file-1" })).toEqual({
+      item_id: "file-1",
+      new_parent_folder_id: "",
+      new_name: "",
+    });
+    expect(schema.safeParse({}).success).toBe(false);
+    for (const itemId of ["", ".", ".."]) {
+      expect(schema.safeParse({ item_id: itemId }).success).toBe(false);
+    }
+    for (const parentId of [".", ".."]) {
+      expect(schema.safeParse({ item_id: "file-1", new_parent_folder_id: parentId }).success).toBe(
+        false,
+      );
+    }
+    expect(schema.safeParse({ item_id: "file-1", new_name: ".." }).success).toBe(true);
+  });
+
+  test.each([null, [], "payload-secret", 42])(
+    "rejects malformed move metadata %# without leakage",
+    async (response) => {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke("graph_move_file", {
+        item_id: "file-1",
+        new_name: "renamed.txt",
+      });
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
+describe("OneDrive shared items", () => {
+  test("lists shared items with only a top parameter and caps it at 50", async () => {
+    const { harness, graph } = registerFilesHarness([
+      { value: [{ id: "shared-1" }] },
+      { value: [] },
+      { value: [] },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_list_shared_files"))).toEqual([{ id: "shared-1" }]);
+    await harness.invoke("graph_list_shared_files", { top: 500 });
+    await harness.invoke("graph_list_shared_files", { top: -2 });
+
+    expect(graph.calls).toEqual([
+      { method: "GET", path: "/me/drive/sharedWithMe", params: { $top: "25" } },
+      { method: "GET", path: "/me/drive/sharedWithMe", params: { $top: "50" } },
+      { method: "GET", path: "/me/drive/sharedWithMe", params: { $top: "-2" } },
+    ]);
+    for (const call of graph.calls) {
+      expect(Object.keys(call.params as Record<string, unknown>)).toEqual(["$top"]);
+    }
+  });
+
+  test("exposes exact shared files schema keys and default top", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_list_shared_files");
+    expect(Object.keys(shape)).toEqual(["top"]);
+    const schema = z.object(shape);
+    expect(schema.parse({})).toEqual({ top: 25 });
+    expect(schema.safeParse({ top: 1.5 }).success).toBe(false);
+  });
+
+  test("treats a missing value property as an empty list", async () => {
+    const { harness } = registerFilesHarness([{}]);
+    expect(dataFrom(await harness.invoke("graph_list_shared_files"))).toEqual([]);
+  });
+
+  test.each([null, [], "payload-secret", { value: null }, { value: {} }])(
+    "rejects malformed shared collection responses %# without leakage",
+    async (response) => {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke("graph_list_shared_files");
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
 describe("file authenticated wrapper errors", () => {
   test.each([
     { name: "graph_list_files", args: {} },
@@ -796,9 +1235,771 @@ describe("file authenticated wrapper errors", () => {
       args: { file_path: "report.txt", content_base64: "SGVsbG8=" },
     },
     { name: "graph_share_file", args: { file_id: "file-1" } },
+    { name: "graph_create_folder", args: { folder_name: "Reports" } },
+    { name: "graph_delete_file", args: { item_id: "file-1" } },
+    { name: "graph_move_file", args: { item_id: "file-1", new_name: "renamed.txt" } },
+    { name: "graph_list_shared_files", args: {} },
+    { name: "graph_copy_file", args: { item_id: "file-1", new_name: "copy.txt" } },
+    { name: "graph_list_file_permissions", args: { item_id: "file-1" } },
+    {
+      name: "graph_delete_file_permission",
+      args: { item_id: "file-1", permission_id: "permission-1" },
+    },
+    { name: "graph_invite_to_file", args: { item_id: "file-1", emails: ["a@example.com"] } },
+    { name: "graph_list_file_versions", args: { item_id: "file-1" } },
+    { name: "graph_restore_file_version", args: { item_id: "file-1", version_id: "3.0" } },
+    { name: "graph_list_recent_files", args: {} },
+    { name: "graph_list_drives", args: {} },
+    { name: "graph_resolve_share_link", args: { share_url: "https://a.example/s" } },
+    { name: "graph_search_sites", args: { query: "finance" } },
+    { name: "graph_list_site_drives", args: { site_id: "site-1" } },
+    { name: "graph_list_worksheets", args: { item_id: "file-1" } },
+    { name: "graph_get_worksheet_range", args: { item_id: "file-1", worksheet: "Sheet1" } },
+    {
+      name: "graph_update_worksheet_range",
+      args: { item_id: "file-1", worksheet: "Sheet1", address: "A1", values: [[1]] },
+    },
   ])("$name returns the stable authentication error envelope", async ({ name, args }) => {
     const { harness } = registerFilesHarness([new AuthenticationError("Not authenticated.")]);
 
     await expect(harness.invoke(name, args)).resolves.toEqual(AUTHENTICATION_ERROR_RESULT);
+  });
+});
+
+const ENCODED_ITEM_ID = "../file/path\\name#fragment?query=:value%";
+const OTHER_DRIVE_ID = "b!drive/id?x=1";
+
+interface DriveRoutingCase {
+  readonly name: string;
+  readonly args: Record<string, unknown>;
+  readonly method: GraphCall["method"];
+  readonly suffix: string;
+  readonly response: unknown;
+}
+
+const DRIVE_ROUTING_CASES: readonly DriveRoutingCase[] = [
+  {
+    name: "graph_copy_file",
+    args: { item_id: ENCODED_ITEM_ID, new_name: "copy.txt" },
+    method: "POST",
+    suffix: "/copy",
+    response: null,
+  },
+  {
+    name: "graph_list_file_permissions",
+    args: { item_id: ENCODED_ITEM_ID },
+    method: "GET",
+    suffix: "/permissions",
+    response: { value: [] },
+  },
+  {
+    name: "graph_delete_file_permission",
+    args: { item_id: ENCODED_ITEM_ID, permission_id: "permission/1 #a" },
+    method: "DELETE",
+    suffix: `/permissions/${encodeURIComponent("permission/1 #a")}`,
+    response: null,
+  },
+  {
+    name: "graph_invite_to_file",
+    args: { item_id: ENCODED_ITEM_ID, emails: ["amina@example.com"] },
+    method: "POST",
+    suffix: "/invite",
+    response: { value: [] },
+  },
+  {
+    name: "graph_list_file_versions",
+    args: { item_id: ENCODED_ITEM_ID },
+    method: "GET",
+    suffix: "/versions",
+    response: { value: [] },
+  },
+  {
+    name: "graph_restore_file_version",
+    args: { item_id: ENCODED_ITEM_ID, version_id: "3.0 #a/b" },
+    method: "POST",
+    suffix: `/versions/${encodeURIComponent("3.0 #a/b")}/restoreVersion`,
+    response: null,
+  },
+  {
+    name: "graph_list_worksheets",
+    args: { item_id: ENCODED_ITEM_ID },
+    method: "GET",
+    suffix: "/workbook/worksheets",
+    response: { value: [] },
+  },
+  {
+    name: "graph_get_worksheet_range",
+    args: { item_id: ENCODED_ITEM_ID, worksheet: "Sheet 1/#2" },
+    method: "GET",
+    suffix: `/workbook/worksheets/${encodeURIComponent("Sheet 1/#2")}/usedRange`,
+    response: {},
+  },
+  {
+    name: "graph_update_worksheet_range",
+    args: {
+      item_id: ENCODED_ITEM_ID,
+      worksheet: "Sheet 1/#2",
+      address: "A1:B2",
+      values: [[1, "a"]],
+    },
+    method: "PATCH",
+    suffix: `/workbook/worksheets/${encodeURIComponent("Sheet 1/#2")}/range(address='A1:B2')`,
+    response: {},
+  },
+];
+
+describe("drive_id routing", () => {
+  test.each(DRIVE_ROUTING_CASES)(
+    "$name targets the default drive with an encoded item ID",
+    async ({ name, args, method, suffix, response }) => {
+      const { harness, graph } = registerFilesHarness([response]);
+
+      await harness.invoke(name, args);
+
+      expect(graph.calls).toHaveLength(1);
+      expect(graph.calls[0]?.method).toBe(method);
+      expect(graph.calls[0]?.path).toBe(
+        `/me/drive/items/${encodeURIComponent(ENCODED_ITEM_ID)}${suffix}`,
+      );
+    },
+  );
+
+  test.each(DRIVE_ROUTING_CASES)(
+    "$name switches to an encoded explicit drive",
+    async ({ name, args, method, suffix, response }) => {
+      const { harness, graph } = registerFilesHarness([response]);
+
+      await harness.invoke(name, { ...args, drive_id: OTHER_DRIVE_ID });
+
+      expect(graph.calls).toHaveLength(1);
+      expect(graph.calls[0]?.method).toBe(method);
+      expect(graph.calls[0]?.path).toBe(
+        `/drives/${encodeURIComponent(OTHER_DRIVE_ID)}/items/${encodeURIComponent(
+          ENCODED_ITEM_ID,
+        )}${suffix}`,
+      );
+    },
+  );
+
+  test.each(DRIVE_ROUTING_CASES)("$name rejects sentinel drive IDs", ({ name }) => {
+    const { harness } = registerFilesHarness();
+    const schema = z.object(schemaFor(harness, name));
+    for (const driveId of [".", ".."]) {
+      expect(schema.safeParse({ drive_id: driveId }).success).toBe(false);
+    }
+  });
+
+  test.each(["graph_list_recent_files", "graph_list_drives", "graph_search_sites"])(
+    "%s exposes no drive_id argument",
+    (name) => {
+      const { harness } = registerFilesHarness();
+      expect(Object.keys(schemaFor(harness, name))).not.toContain("drive_id");
+    },
+  );
+});
+
+describe("OneDrive copy", () => {
+  test.each([
+    {
+      label: "destination and name",
+      args: { destination_folder_id: "folder-9", new_name: "copy.txt" },
+      body: { name: "copy.txt", parentReference: { id: "folder-9" } },
+    },
+    { label: "name only", args: { new_name: "copy.txt" }, body: { name: "copy.txt" } },
+    {
+      label: "destination only",
+      args: { destination_folder_id: "folder-9" },
+      body: { parentReference: { id: "folder-9" } },
+    },
+    { label: "neither", args: {}, body: {} },
+  ])("posts the exact copy body with $label", async ({ args, body }) => {
+    const { harness, graph } = registerFilesHarness([null]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_copy_file", { item_id: "file-1", ...args })),
+    ).toEqual({ status: "Copy accepted" });
+    expect(graph.calls).toEqual([{ method: "POST", path: "/me/drive/items/file-1/copy", body }]);
+  });
+
+  test("puts name before parentReference in the copy body", async () => {
+    const { harness, graph } = registerFilesHarness([null]);
+
+    await harness.invoke("graph_copy_file", {
+      item_id: "file-1",
+      destination_folder_id: "folder-9",
+      new_name: "copy.txt",
+    });
+
+    expect(Object.keys(graph.calls[0]?.body as Record<string, unknown>)).toEqual([
+      "name",
+      "parentReference",
+    ]);
+  });
+
+  test("exposes exact copy schema keys and defaults", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_copy_file");
+    expect(Object.keys(shape)).toEqual([
+      "item_id",
+      "destination_folder_id",
+      "new_name",
+      "drive_id",
+    ]);
+    const schema = z.object(shape);
+    expect(schema.parse({ item_id: "file-1" })).toEqual({
+      item_id: "file-1",
+      destination_folder_id: "",
+      new_name: "",
+      drive_id: "",
+    });
+    expect(schema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("OneDrive permissions", () => {
+  test("lists permissions with no query parameters", async () => {
+    const permissions = [{ id: "permission-1", roles: ["read"] }];
+    const { harness, graph } = registerFilesHarness([{ value: permissions }]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_list_file_permissions", { item_id: "file-1" })),
+    ).toEqual(permissions);
+    expect(graph.calls).toEqual([{ method: "GET", path: "/me/drive/items/file-1/permissions" }]);
+  });
+
+  test("treats a missing value property as an empty permission list", async () => {
+    const { harness } = registerFilesHarness([{}]);
+    expect(
+      dataFrom(await harness.invoke("graph_list_file_permissions", { item_id: "file-1" })),
+    ).toEqual([]);
+  });
+
+  test("deletes a permission and returns the fixed status payload", async () => {
+    const { harness, graph } = registerFilesHarness([null]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_delete_file_permission", {
+          item_id: "file-1",
+          permission_id: "permission-1",
+        }),
+      ),
+    ).toEqual({ status: "Permission deleted" });
+    expect(graph.calls).toEqual([
+      { method: "DELETE", path: "/me/drive/items/file-1/permissions/permission-1" },
+    ]);
+  });
+
+  test("rejects sentinel permission IDs", () => {
+    const { harness } = registerFilesHarness();
+    const schema = z.object(schemaFor(harness, "graph_delete_file_permission"));
+    for (const permissionId of ["", ".", ".."]) {
+      expect(schema.safeParse({ item_id: "file-1", permission_id: permissionId }).success).toBe(
+        false,
+      );
+    }
+  });
+});
+
+describe("OneDrive invitations", () => {
+  test("invites with the exact default body and omits an empty message", async () => {
+    const granted = [{ id: "permission-1", roles: ["read"] }];
+    const { harness, graph } = registerFilesHarness([{ value: granted }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_invite_to_file", {
+          item_id: "file-1",
+          emails: ["amina@example.com", "bo@example.com"],
+        }),
+      ),
+    ).toEqual(granted);
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/drive/items/file-1/invite",
+        body: {
+          recipients: [{ email: "amina@example.com" }, { email: "bo@example.com" }],
+          roles: ["read"],
+          requireSignIn: true,
+          sendInvitation: false,
+        },
+      },
+    ]);
+    expect(graph.calls[0]?.body).not.toHaveProperty("message");
+  });
+
+  test("invites with write access, an email notification, and a message", async () => {
+    const { harness, graph } = registerFilesHarness([{ value: [] }]);
+
+    await harness.invoke("graph_invite_to_file", {
+      item_id: "file-1",
+      emails: ["amina@example.com"],
+      role: "write",
+      send_email: true,
+      message: "Please review",
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/drive/items/file-1/invite",
+        body: {
+          recipients: [{ email: "amina@example.com" }],
+          roles: ["write"],
+          requireSignIn: true,
+          sendInvitation: true,
+          message: "Please review",
+        },
+      },
+    ]);
+  });
+
+  test("exposes exact invite schema keys, defaults, and the role enum", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_invite_to_file");
+    expect(Object.keys(shape)).toEqual([
+      "item_id",
+      "emails",
+      "role",
+      "send_email",
+      "message",
+      "drive_id",
+    ]);
+    const schema = z.object(shape);
+    expect(schema.parse({ item_id: "file-1", emails: [] })).toEqual({
+      item_id: "file-1",
+      emails: [],
+      role: "read",
+      send_email: false,
+      message: "",
+      drive_id: "",
+    });
+    expect(schema.safeParse({ item_id: "file-1" }).success).toBe(false);
+    expect(schema.safeParse({ item_id: "file-1", emails: [], role: "owner" }).success).toBe(false);
+  });
+});
+
+describe("OneDrive versions", () => {
+  test("lists versions with no query parameters", async () => {
+    const versions = [{ id: "3.0" }, { id: "2.0" }];
+    const { harness, graph } = registerFilesHarness([{ value: versions }]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_list_file_versions", { item_id: "file-1" })),
+    ).toEqual(versions);
+    expect(graph.calls).toEqual([{ method: "GET", path: "/me/drive/items/file-1/versions" }]);
+  });
+
+  test("restores a version and returns the fixed status payload", async () => {
+    const { harness, graph } = registerFilesHarness([null]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_restore_file_version", {
+          item_id: "file-1",
+          version_id: "3.0",
+        }),
+      ),
+    ).toEqual({ status: "Version restored" });
+    expect(graph.calls).toEqual([
+      { method: "POST", path: "/me/drive/items/file-1/versions/3.0/restoreVersion" },
+    ]);
+    expect(graph.calls[0]).not.toHaveProperty("body");
+  });
+
+  test("rejects sentinel version IDs", () => {
+    const { harness } = registerFilesHarness();
+    const schema = z.object(schemaFor(harness, "graph_restore_file_version"));
+    for (const versionId of ["", ".", ".."]) {
+      expect(schema.safeParse({ item_id: "file-1", version_id: versionId }).success).toBe(false);
+    }
+  });
+});
+
+describe("OneDrive recent files and drives", () => {
+  test("lists recent items with only a top parameter and caps it at 50", async () => {
+    const { harness, graph } = registerFilesHarness([
+      { value: [{ id: "recent-1" }] },
+      { value: [] },
+      { value: [] },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_list_recent_files"))).toEqual([{ id: "recent-1" }]);
+    await harness.invoke("graph_list_recent_files", { top: 500 });
+    await harness.invoke("graph_list_recent_files", { top: -2 });
+
+    expect(graph.calls).toEqual([
+      { method: "GET", path: "/me/drive/recent", params: { $top: "25" } },
+      { method: "GET", path: "/me/drive/recent", params: { $top: "50" } },
+      { method: "GET", path: "/me/drive/recent", params: { $top: "-2" } },
+    ]);
+  });
+
+  test("exposes exact recent files schema keys and default top", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_list_recent_files");
+    expect(Object.keys(shape)).toEqual(["top"]);
+    expect(z.object(shape).parse({})).toEqual({ top: 25 });
+    expect(z.object(shape).safeParse({ top: 1.5 }).success).toBe(false);
+  });
+
+  test("lists drives with the exact select and no arguments", async () => {
+    const drives = [{ id: "drive-1", driveType: "business" }];
+    const { harness, graph } = registerFilesHarness([{ value: drives }]);
+
+    expect(dataFrom(await harness.invoke("graph_list_drives"))).toEqual(drives);
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/drives",
+        params: { $select: "id,name,driveType,owner,quota" },
+      },
+    ]);
+    expect(Object.keys(schemaFor(harness, "graph_list_drives"))).toEqual([]);
+  });
+});
+
+describe("share link resolution", () => {
+  test.each([
+    {
+      shareUrl: "https://contoso.sharepoint.com/:w:/g/design/EY0-Cw?e=aQ1+2/3",
+      encoded: "u!aHR0cHM6Ly9jb250b3NvLnNoYXJlcG9pbnQuY29tLzp3Oi9nL2Rlc2lnbi9FWTAtQ3c_ZT1hUTErMi8z",
+    },
+    {
+      shareUrl: "https://a.example/~?x=\u00ff\u00fe",
+      encoded: "u!aHR0cHM6Ly9hLmV4YW1wbGUvfj94PcO_w74",
+    },
+    {
+      shareUrl: "https://a.example/?\u00be",
+      encoded: "u!aHR0cHM6Ly9hLmV4YW1wbGUvP8K-",
+    },
+  ])("encodes $shareUrl as a base64url sharing token", async ({ shareUrl, encoded }) => {
+    const item = { id: "file-1", name: "design.docx" };
+    const { harness, graph } = registerFilesHarness([item]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_resolve_share_link", { share_url: shareUrl })),
+    ).toEqual(item);
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/shares/${encoded}/driveItem`,
+        params: { $select: DRIVE_ITEM_FIELDS },
+      },
+    ]);
+    expect(encoded.startsWith("u!")).toBe(true);
+    expect(encoded).toBe(
+      `u!${Buffer.from(shareUrl, "utf8")
+        .toString("base64")
+        .replaceAll("/", "_")
+        .replaceAll("+", "-")
+        .replace(/=+$/, "")}`,
+    );
+    expect(encoded.slice(2)).not.toMatch(/[+/=]/);
+  });
+
+  test("exposes exact share link schema keys", () => {
+    const { harness } = registerFilesHarness();
+    expect(Object.keys(schemaFor(harness, "graph_resolve_share_link"))).toEqual(["share_url"]);
+    expect(z.object(schemaFor(harness, "graph_resolve_share_link")).safeParse({}).success).toBe(
+      false,
+    );
+  });
+
+  test.each([null, [], "payload-secret", 42])(
+    "rejects malformed share link metadata %# without leakage",
+    async (response) => {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke("graph_resolve_share_link", {
+        share_url: "https://a.example/s",
+      });
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
+describe("SharePoint sites", () => {
+  test("searches sites with the exact parameters and caps top at 50", async () => {
+    const sites = [{ id: "site-1", displayName: "Finance" }];
+    const { harness, graph } = registerFilesHarness([{ value: sites }, { value: [] }]);
+
+    expect(dataFrom(await harness.invoke("graph_search_sites", { query: "finance" }))).toEqual(
+      sites,
+    );
+    await harness.invoke("graph_search_sites", { query: "O'Brien & co", top: 500 });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/sites",
+        params: {
+          search: "finance",
+          $select: "id,name,displayName,webUrl",
+          $top: "25",
+        },
+      },
+      {
+        method: "GET",
+        path: "/sites",
+        params: {
+          search: "O'Brien & co",
+          $select: "id,name,displayName,webUrl",
+          $top: "50",
+        },
+      },
+    ]);
+  });
+
+  test("encodes the site search term as a query parameter through real URL semantics", async () => {
+    const { harness, fetch } = registerRealGraphFilesHarness();
+
+    await harness.invoke("graph_search_sites", { query: "finance & ops?#x=1" });
+
+    const url = new URL(firstRequest(fetch).url);
+    expect(url.pathname).toBe("/v1.0/sites");
+    expect(url.searchParams.get("search")).toBe("finance & ops?#x=1");
+    expect([...url.searchParams.keys()].sort()).toEqual(["$select", "$top", "search"]);
+    expect(url.hash).toBe("");
+  });
+
+  test("lists site drives with the exact select and an encoded site ID", async () => {
+    const siteId = "contoso.sharepoint.com,00000000-0000-0000-0000-000000000001,guid-2";
+    const libraries = [{ id: "drive-1", name: "Documents" }];
+    const { harness, graph } = registerFilesHarness([{ value: libraries }]);
+
+    expect(dataFrom(await harness.invoke("graph_list_site_drives", { site_id: siteId }))).toEqual(
+      libraries,
+    );
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/sites/${encodeURIComponent(siteId)}/drives`,
+        params: { $select: "id,name,driveType,webUrl" },
+      },
+    ]);
+  });
+
+  test("exposes exact site schema keys and rejects sentinel site IDs", () => {
+    const { harness } = registerFilesHarness();
+    expect(Object.keys(schemaFor(harness, "graph_search_sites"))).toEqual(["query", "top"]);
+    expect(Object.keys(schemaFor(harness, "graph_list_site_drives"))).toEqual(["site_id"]);
+    const schema = z.object(schemaFor(harness, "graph_list_site_drives"));
+    for (const siteId of ["", ".", ".."]) {
+      expect(schema.safeParse({ site_id: siteId }).success).toBe(false);
+    }
+  });
+
+  test.each([
+    { name: "graph_search_sites", args: { query: "finance" } },
+    { name: "graph_list_site_drives", args: { site_id: "site-1" } },
+  ])("$name rejects malformed collection responses without leakage", async ({ name, args }) => {
+    for (const response of [null, [], "payload-secret", { value: null }, { value: {} }]) {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke(name, args);
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    }
+  });
+});
+
+describe("Excel workbooks", () => {
+  test("lists worksheets with the exact select", async () => {
+    const worksheets = [{ id: "sheet-1", name: "Sheet1", position: 0, visibility: "Visible" }];
+    const { harness, graph } = registerFilesHarness([{ value: worksheets }]);
+
+    expect(dataFrom(await harness.invoke("graph_list_worksheets", { item_id: "file-1" }))).toEqual(
+      worksheets,
+    );
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/drive/items/file-1/workbook/worksheets",
+        params: { $select: "id,name,position,visibility" },
+      },
+    ]);
+  });
+
+  test("reads the used range when no address is given", async () => {
+    const range = { address: "Sheet1!A1:B2", values: [[1, 2]] };
+    const { harness, graph } = registerFilesHarness([range]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_worksheet_range", {
+          item_id: "file-1",
+          worksheet: "Sheet1",
+        }),
+      ),
+    ).toEqual(range);
+    expect(graph.calls).toEqual([
+      { method: "GET", path: "/me/drive/items/file-1/workbook/worksheets/Sheet1/usedRange" },
+    ]);
+  });
+
+  test.each([
+    { address: "A1:D10", expected: "A1:D10" },
+    { address: "O'Brien!A1", expected: "O''Brien!A1" },
+    { address: "'My Sheet'!A1:B2", expected: "''My Sheet''!A1:B2" },
+  ])("reads $address with single quotes doubled", async ({ address, expected }) => {
+    const { harness, graph } = registerFilesHarness([{ values: [] }]);
+
+    await harness.invoke("graph_get_worksheet_range", {
+      item_id: "file-1",
+      worksheet: "Sheet1",
+      address,
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/me/drive/items/file-1/workbook/worksheets/Sheet1/range(address='${expected}')`,
+      },
+    ]);
+  });
+
+  test("writes values with the exact body and escaped address", async () => {
+    const updated = { address: "Sheet1!A1:B2" };
+    const values = [
+      ["a", 1],
+      [true, null],
+    ];
+    const { harness, graph } = registerFilesHarness([updated]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_update_worksheet_range", {
+          item_id: "file-1",
+          worksheet: "Sheet1",
+          address: "O'Brien!A1:B2",
+          values,
+        }),
+      ),
+    ).toEqual(updated);
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: "/me/drive/items/file-1/workbook/worksheets/Sheet1/range(address='O''Brien!A1:B2')",
+        body: { values },
+      },
+    ]);
+  });
+
+  test("returns the exact error envelope for empty values without calling Graph", async () => {
+    const { harness, graph } = registerFilesHarness();
+
+    const result = await harness.invoke("graph_update_worksheet_range", {
+      item_id: "file-1",
+      worksheet: "Sheet1",
+      address: "A1",
+      values: [],
+    });
+
+    expect(result).toEqual({
+      content: [
+        {
+          type: "text",
+          text: '{"data":{"error":"values must contain at least one row."},"message":"error"}',
+        },
+      ],
+    });
+    expect(graph.calls).toEqual([]);
+  });
+
+  test("exposes exact worksheet schema keys, defaults, and value types", () => {
+    const { harness } = registerFilesHarness();
+    expect(Object.keys(schemaFor(harness, "graph_list_worksheets"))).toEqual([
+      "item_id",
+      "drive_id",
+    ]);
+
+    const readShape = schemaFor(harness, "graph_get_worksheet_range");
+    expect(Object.keys(readShape)).toEqual(["item_id", "worksheet", "address", "drive_id"]);
+    expect(z.object(readShape).parse({ item_id: "file-1", worksheet: "Sheet1" })).toEqual({
+      item_id: "file-1",
+      worksheet: "Sheet1",
+      address: "",
+      drive_id: "",
+    });
+    for (const worksheet of ["", ".", ".."]) {
+      expect(z.object(readShape).safeParse({ item_id: "file-1", worksheet }).success).toBe(false);
+    }
+
+    const writeShape = schemaFor(harness, "graph_update_worksheet_range");
+    expect(Object.keys(writeShape)).toEqual([
+      "item_id",
+      "worksheet",
+      "address",
+      "values",
+      "drive_id",
+    ]);
+    const writeSchema = z.object(writeShape);
+    expect(
+      writeSchema.safeParse({ item_id: "file-1", worksheet: "Sheet1", address: "A1" }).success,
+    ).toBe(false);
+    expect(
+      writeSchema.safeParse({
+        item_id: "file-1",
+        worksheet: "Sheet1",
+        address: "A1",
+        values: [["a", 1, true, null]],
+      }).success,
+    ).toBe(true);
+    expect(
+      writeSchema.safeParse({
+        item_id: "file-1",
+        worksheet: "Sheet1",
+        address: "A1",
+        values: [[{ nested: true }]],
+      }).success,
+    ).toBe(false);
+    expect(
+      writeSchema.safeParse({
+        item_id: "file-1",
+        worksheet: "Sheet1",
+        address: "A1",
+        values: ["a"],
+      }).success,
+    ).toBe(false);
+  });
+
+  test.each([
+    { name: "graph_get_worksheet_range", args: { item_id: "file-1", worksheet: "Sheet1" } },
+    {
+      name: "graph_update_worksheet_range",
+      args: { item_id: "file-1", worksheet: "Sheet1", address: "A1", values: [[1]] },
+    },
+  ])("$name rejects malformed range payloads without leakage", async ({ name, args }) => {
+    for (const response of [null, [], "payload-secret", 42]) {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke(name, args);
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    }
+  });
+
+  test.each([
+    { name: "graph_list_file_permissions", args: { item_id: "file-1" } },
+    { name: "graph_invite_to_file", args: { item_id: "file-1", emails: ["a@example.com"] } },
+    { name: "graph_list_file_versions", args: { item_id: "file-1" } },
+    { name: "graph_list_recent_files", args: {} },
+    { name: "graph_list_drives", args: {} },
+    { name: "graph_list_worksheets", args: { item_id: "file-1" } },
+  ])("$name rejects malformed collection responses without leakage", async ({ name, args }) => {
+    for (const response of [null, [], "payload-secret", { value: null }, { value: {} }]) {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke(name, args);
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    }
   });
 });
