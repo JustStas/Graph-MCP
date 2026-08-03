@@ -4,6 +4,15 @@ import { z } from "zod";
 import { GraphApiError } from "../errors.js";
 import { successResponse } from "../responses.js";
 import { CHANNEL_FIELDS, TEAM_FIELDS } from "../select-fields.js";
+import {
+  collectionResult,
+  COMPACT_ARGS_DOC,
+  COMPACT_SCHEMA,
+  INCLUDE_NEXT_LINK_SCHEMA,
+  NEXT_LINK_SCHEMA,
+  PAGING_ARGS_DOC,
+  selectFields,
+} from "./list-options.js";
 import { buildChatMessagePayload, buildRichTextBody } from "./message-tools.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
 
@@ -15,6 +24,10 @@ const RESOURCE_ID_SCHEMA = z
   });
 const TOP_SCHEMA = z.number().int().default(50);
 const TEAM_DETAIL_FIELDS = "id,displayName,description,isArchived,visibility,webUrl";
+const CHANNEL_MESSAGE_COMPACT_FIELDS = "id,createdDateTime,from,subject,importance,webUrl";
+const CHANNEL_MESSAGE_COMPACT_DOC = `Messages carry full HTML bodies plus their attachments and mentions, so
+\`compact\` narrows them to the identifying fields. Without it no \`$select\` is
+sent and the response is unchanged.`;
 const MEMBERSHIP_TYPE_SCHEMA = z.enum(["standard", "private", "shared"]).default("standard");
 const MENTIONS_SCHEMA = z
   .array(z.record(z.string(), z.unknown()))
@@ -46,6 +59,15 @@ function requireGraphObject(response: unknown): Record<string, unknown> {
   return response;
 }
 
+/** Query parameters for a channel message list, adding `$select` only when compact is asked for. */
+function messageListParams(top: number, compact: boolean): Record<string, string> {
+  const select = selectFields("", CHANNEL_MESSAGE_COMPACT_FIELDS, compact);
+  return {
+    $top: String(Math.min(top, 50)),
+    ...(select === "" ? {} : { $select: select }),
+  };
+}
+
 function teamPath(teamId: string): string {
   return `/teams/${encodeURIComponent(teamId)}`;
 }
@@ -69,14 +91,23 @@ export function registerTeamsTools(
     server,
     "graph_list_teams",
     {
-      description: "List Microsoft Teams that the authenticated user has joined.",
-      inputSchema: {},
+      description: `List Microsoft Teams that the authenticated user has joined.
+
+Args:
+${PAGING_ARGS_DOC}`,
+      inputSchema: {
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+      },
     },
-    async () => {
-      const result = await dependencies.graphClient.get("/me/joinedTeams", {
-        $select: TEAM_FIELDS,
-      });
-      return successResponse(collectionValue(result));
+    async ({ next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get("/me/joinedTeams", {
+              $select: TEAM_FIELDS,
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -84,16 +115,25 @@ export function registerTeamsTools(
     server,
     "graph_list_channels",
     {
-      description: "List channels in a team.",
+      description: `List channels in a team.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         team_id: RESOURCE_ID_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ team_id }) => {
-      const result = await dependencies.graphClient.get(`${teamPath(team_id)}/channels`, {
-        $select: CHANNEL_FIELDS,
-      });
-      return successResponse(collectionValue(result));
+    async ({ team_id, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(`${teamPath(team_id)}/channels`, {
+              $select: CHANNEL_FIELDS,
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -101,18 +141,34 @@ export function registerTeamsTools(
     server,
     "graph_get_channel_messages",
     {
-      description: "Get messages from a channel.",
+      description: `Get messages from a channel.
+
+${CHANNEL_MESSAGE_COMPACT_DOC}
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    top: Maximum number of messages to return (default 50, maximum 50).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         team_id: RESOURCE_ID_SCHEMA,
         channel_id: RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ team_id, channel_id, top }) => {
-      const result = await dependencies.graphClient.get(messagePath(team_id, channel_id), {
-        $top: String(Math.min(top, 50)),
-      });
-      return successResponse(collectionValue(result));
+    async ({ team_id, channel_id, top, compact, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(
+              messagePath(team_id, channel_id),
+              messageListParams(top, compact),
+            )
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -142,17 +198,25 @@ export function registerTeamsTools(
     server,
     "graph_list_channel_members",
     {
-      description: "List members of a channel.",
+      description: `List members of a channel.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         team_id: RESOURCE_ID_SCHEMA,
         channel_id: RESOURCE_ID_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ team_id, channel_id }) => {
-      const result = await dependencies.graphClient.get(
-        `${channelPath(team_id, channel_id)}/members`,
-      );
-      return successResponse(collectionValue(result));
+    async ({ team_id, channel_id, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(`${channelPath(team_id, channel_id)}/members`)
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -160,20 +224,36 @@ export function registerTeamsTools(
     server,
     "graph_get_channel_message_replies",
     {
-      description: "Get replies to a channel message.",
+      description: `Get replies to a channel message.
+
+${CHANNEL_MESSAGE_COMPACT_DOC}
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    message_id: The message ID whose replies to return.
+    top: Maximum number of replies to return (default 50, maximum 50).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         team_id: RESOURCE_ID_SCHEMA,
         channel_id: RESOURCE_ID_SCHEMA,
         message_id: RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ team_id, channel_id, message_id, top }) => {
-      const result = await dependencies.graphClient.get(
-        `${messagePath(team_id, channel_id, message_id)}/replies`,
-        { $top: String(Math.min(top, 50)) },
-      );
-      return successResponse(collectionValue(result));
+    async ({ team_id, channel_id, message_id, top, compact, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(
+              `${messagePath(team_id, channel_id, message_id)}/replies`,
+              messageListParams(top, compact),
+            )
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -210,17 +290,23 @@ Needs the TeamMember.Read.All permission, which requires admin consent.
 
 Args:
     team_id: The team ID (from graph_list_teams).
-    top: Maximum number of members to return (default 50, maximum 50).`,
+    top: Maximum number of members to return (default 50, maximum 50).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         team_id: RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ team_id, top }) => {
-      const result = await dependencies.graphClient.get(`${teamPath(team_id)}/members`, {
-        $top: String(Math.min(top, 50)),
-      });
-      return successResponse(collectionValue(result));
+    async ({ team_id, top, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(`${teamPath(team_id)}/members`, {
+              $top: String(Math.min(top, 50)),
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 

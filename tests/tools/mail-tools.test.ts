@@ -4,7 +4,11 @@ import { z, type ZodRawShape } from "zod";
 import { describe, expect, test } from "vitest";
 
 import { AuthenticationError, GraphApiError } from "../../src/errors.js";
-import { MAIL_FOLDER_FIELDS, MAIL_LIST_FIELDS } from "../../src/select-fields.js";
+import {
+  MAIL_COMPACT_FIELDS,
+  MAIL_FOLDER_FIELDS,
+  MAIL_LIST_FIELDS,
+} from "../../src/select-fields.js";
 import { registerMailTools } from "../../src/tools/mail-tools.js";
 import type { ToolDependencies } from "../../src/tools/tool-types.js";
 
@@ -47,14 +51,27 @@ const EXPECTED_MAIL_TOOLS = [
     name: "graph_list_mail",
     description: `List emails from a mail folder.
 
+Results are sorted newest first, except that the sort is dropped automatically when
+filter_query targets from/, sender/, toRecipients/ or ccRecipients/, because Graph
+cannot combine a sort with a filter on those properties.
+
 Args:
     folder: Mail folder name or ID (default "inbox"). Common: inbox, sentitems, drafts,
         deleteditems, archive.
     top: Maximum number of emails to return per call (default 25, maximum 50).
-    skip: Number of emails to skip before returning results (default 0). Graph
-        returns at most 50 per call, so page through larger folders by raising
-        skip in steps of top.
-    filter_query: Optional OData filter (e.g. "isRead eq false").
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    filter_query: Optional OData filter (e.g. "isRead eq false"). Filtering on a
+        sender or recipient drops the sort order, as described above.
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).
+    immutable_ids: Whether to ask Graph for immutable message IDs (default false).
+        A message ID changes when the message is moved, so a stored ID stops
+        working; an immutable ID survives the move.
     mailbox: Shared mailbox address or user ID to act on. Empty targets your own
         mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
@@ -64,6 +81,11 @@ Args:
 
 Args:
     message_id: The email message ID.
+    body_type: Body format to request: "html" or "text" (default "html").
+        Use "text" to avoid pulling large HTML bodies into context.
+    immutable_ids: Whether to ask Graph for immutable message IDs (default false).
+        A message ID changes when the message is moved, so a stored ID stops
+        working; an immutable ID survives the move.
     mailbox: Shared mailbox address or user ID to act on. Empty targets your own
         mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
@@ -74,6 +96,17 @@ Args:
 Args:
     query: Search query string.
     top: Maximum number of results (default 25).
+    folder: Mail folder name or ID to search (default "", the whole mailbox). Scope
+        the search to a folder when the mailbox holds thousands of messages.
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).
+    immutable_ids: Whether to ask Graph for immutable message IDs (default false).
+        A message ID changes when the message is moved, so a stored ID stops
+        working; an immutable ID survives the move.
     mailbox: Shared mailbox address or user ID to act on. Empty targets your own
         mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
@@ -198,6 +231,12 @@ Use the returned folder IDs with graph_list_mail or graph_move_mail.
 Args:
     parent_folder_id: Parent folder ID. Empty lists top-level folders.
     top: Maximum number of folders to return (default 25).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).
     mailbox: Shared mailbox address or user ID to act on. Empty targets your own
         mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
@@ -577,13 +616,27 @@ describe("mail tool registration", () => {
     const { harness } = registerMailHarness();
 
     const listShape = schemaFor(harness, "graph_list_mail");
-    expect(Object.keys(listShape)).toEqual(["folder", "top", "skip", "filter_query", "mailbox"]);
+    expect(Object.keys(listShape)).toEqual([
+      "folder",
+      "top",
+      "skip",
+      "filter_query",
+      "compact",
+      "next_link",
+      "include_next_link",
+      "immutable_ids",
+      "mailbox",
+    ]);
     const listSchema = z.object(listShape);
     expect(listSchema.parse({})).toEqual({
       folder: "inbox",
       top: 25,
       skip: 0,
       filter_query: "",
+      compact: false,
+      next_link: "",
+      include_next_link: false,
+      immutable_ids: false,
       mailbox: "",
     });
     expect(listSchema.safeParse({ top: 1.5 }).success).toBe(false);
@@ -595,17 +648,45 @@ describe("mail tool registration", () => {
     expect(listSchema.safeParse({ skip: 2.5 }).success).toBe(false);
 
     const readShape = schemaFor(harness, "graph_read_mail");
-    expect(Object.keys(readShape)).toEqual(["message_id", "mailbox"]);
-    expect(z.object(readShape).safeParse({}).success).toBe(false);
+    expect(Object.keys(readShape)).toEqual(["message_id", "body_type", "immutable_ids", "mailbox"]);
+    const readSchema = z.object(readShape);
+    expect(readSchema.safeParse({}).success).toBe(false);
+    expect(readSchema.parse({ message_id: "message-1" })).toEqual({
+      message_id: "message-1",
+      body_type: "html",
+      immutable_ids: false,
+      mailbox: "",
+    });
+    expect(readSchema.safeParse({ message_id: "message-1", body_type: "text" }).success).toBe(true);
+    expect(readSchema.safeParse({ message_id: "message-1", body_type: "markdown" }).success).toBe(
+      false,
+    );
 
     const searchShape = schemaFor(harness, "graph_search_mail");
-    expect(Object.keys(searchShape)).toEqual(["query", "top", "mailbox"]);
+    expect(Object.keys(searchShape)).toEqual([
+      "query",
+      "top",
+      "folder",
+      "compact",
+      "next_link",
+      "include_next_link",
+      "immutable_ids",
+      "mailbox",
+    ]);
     const searchSchema = z.object(searchShape);
     expect(searchSchema.parse({ query: "planning" })).toEqual({
       query: "planning",
       top: 25,
+      folder: "",
+      compact: false,
+      next_link: "",
+      include_next_link: false,
+      immutable_ids: false,
       mailbox: "",
     });
+    for (const folder of [".", ".."]) {
+      expect(searchSchema.safeParse({ query: "planning", folder }).success).toBe(false);
+    }
     expect(searchSchema.safeParse({}).success).toBe(false);
     expect(searchSchema.safeParse({ query: "planning", top: 2.5 }).success).toBe(false);
 
@@ -785,6 +866,26 @@ describe("mail tool registration", () => {
       mailbox: "",
     });
     expect(deltaSchema.safeParse({ top: 2.5 }).success).toBe(false);
+
+    const foldersShape = schemaFor(harness, "graph_list_mail_folders");
+    expect(Object.keys(foldersShape)).toEqual([
+      "parent_folder_id",
+      "top",
+      "skip",
+      "next_link",
+      "include_next_link",
+      "mailbox",
+    ]);
+    const foldersSchema = z.object(foldersShape);
+    expect(foldersSchema.parse({})).toEqual({
+      parent_folder_id: "",
+      top: 25,
+      skip: 0,
+      next_link: "",
+      include_next_link: false,
+      mailbox: "",
+    });
+    expect(foldersSchema.safeParse({ skip: -1 }).success).toBe(false);
 
     const listAttachmentsShape = schemaFor(harness, "graph_list_mail_attachments");
     expect(Object.keys(listAttachmentsShape)).toEqual(["message_id", "mailbox"]);
@@ -1693,12 +1794,305 @@ describe("mail paging", () => {
     });
   });
 
+  test("adds $skip to a folder listing only when a positive skip is requested", async () => {
+    const { harness, graph } = registerMailHarness([{ value: [] }, { value: [] }]);
+
+    await harness.invoke("graph_list_mail_folders", { skip: 0 });
+    await harness.invoke("graph_list_mail_folders", { top: 50, skip: 25 });
+
+    expect(graph.calls[0]?.params).toEqual({ $select: MAIL_FOLDER_FIELDS, $top: "25" });
+    expect(graph.calls[1]?.params).toEqual({
+      $select: MAIL_FOLDER_FIELDS,
+      $top: "50",
+      $skip: "25",
+    });
+  });
+
   test("rejects a negative skip", () => {
     const { harness } = registerMailHarness();
 
     expect(z.object(schemaFor(harness, "graph_list_mail")).safeParse({ skip: -1 }).success).toBe(
       false,
     );
+    expect(
+      z.object(schemaFor(harness, "graph_list_mail_folders")).safeParse({ skip: -1 }).success,
+    ).toBe(false);
+  });
+});
+
+const NEXT_PAGE_LINK =
+  "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$select=id&$skiptoken=page-2";
+
+describe("mail sort compatibility", () => {
+  test.each([
+    { label: "from", filter: "from/emailAddress/address eq 'alerts@bp.com'" },
+    { label: "sender", filter: "sender/emailAddress/address eq 'alerts@bp.com'" },
+    {
+      label: "toRecipients",
+      filter: "toRecipients/any(r: r/emailAddress/address eq 'me@bp.com')",
+    },
+    {
+      label: "ccRecipients",
+      filter: "ccRecipients/any(r: r/emailAddress/address eq 'me@bp.com')",
+    },
+    { label: "differently cased From", filter: "From/emailAddress/address eq 'alerts@bp.com'" },
+  ])("omits $orderby for a $label filter that Graph cannot sort", async ({ filter }) => {
+    const { harness, graph } = registerMailHarness([{ value: [] }]);
+
+    await harness.invoke("graph_list_mail", { filter_query: filter });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/mailFolders/inbox/messages",
+        params: { $select: MAIL_LIST_FIELDS, $top: "25", $filter: filter },
+      },
+    ]);
+  });
+
+  test.each([
+    { label: "no filter", filter: "" },
+    { label: "a read-state filter", filter: "isRead eq false" },
+    { label: "a date filter", filter: "receivedDateTime ge 2026-07-01T00:00:00Z" },
+    { label: "a subject filter", filter: "contains(subject, 'renewal')" },
+  ])("keeps $orderby with $label", async ({ filter }) => {
+    const { harness, graph } = registerMailHarness([{ value: [] }]);
+
+    await harness.invoke("graph_list_mail", { filter_query: filter });
+
+    expect(graph.calls[0]?.params).toEqual({
+      $select: MAIL_LIST_FIELDS,
+      $top: "25",
+      $orderby: "receivedDateTime desc",
+      ...(filter === "" ? {} : { $filter: filter }),
+    });
+  });
+});
+
+describe("mail compact projections", () => {
+  test.each([
+    { name: "graph_list_mail", args: {} },
+    { name: "graph_search_mail", args: { query: "planning" } },
+  ])("$name selects the compact fields only when compact is set", async ({ name, args }) => {
+    const { harness, graph } = registerMailHarness([{ value: [] }, { value: [] }]);
+
+    await harness.invoke(name, args);
+    await harness.invoke(name, { ...args, compact: true });
+
+    expect((graph.calls[0]?.params as Record<string, string>).$select).toBe(MAIL_LIST_FIELDS);
+    expect((graph.calls[1]?.params as Record<string, string>).$select).toBe(MAIL_COMPACT_FIELDS);
+    expect(MAIL_COMPACT_FIELDS).not.toBe(MAIL_LIST_FIELDS);
+  });
+});
+
+describe("folder-scoped mail search", () => {
+  test("searches the whole mailbox by default and an encoded folder when scoped", async () => {
+    const folder = "archive/2026#priority?owner=me";
+    const { harness, graph } = registerMailHarness([{ value: [] }, { value: [] }]);
+
+    await harness.invoke("graph_search_mail", { query: "renewal" });
+    await harness.invoke("graph_search_mail", { query: "renewal", folder });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/messages",
+        params: { $search: '"renewal"', $select: MAIL_LIST_FIELDS, $top: "25" },
+      },
+      {
+        method: "GET",
+        path: `/me/mailFolders/${encodeURIComponent(folder)}/messages`,
+        params: { $search: '"renewal"', $select: MAIL_LIST_FIELDS, $top: "25" },
+      },
+    ]);
+  });
+
+  test("scopes a folder search inside a shared mailbox", async () => {
+    const { harness, graph } = registerMailHarness([{ value: [] }]);
+
+    await harness.invoke("graph_search_mail", {
+      query: "renewal",
+      folder: "archive",
+      mailbox: SHARED_MAILBOX,
+    });
+
+    expect(graph.calls[0]?.path).toBe(`${SHARED_ROOT}/mailFolders/archive/messages`);
+  });
+
+  test("never sends $skip alongside $search", async () => {
+    const { harness, graph } = registerMailHarness([{ value: [] }]);
+
+    await harness.invoke("graph_search_mail", { query: "renewal" });
+
+    expect(schemaFor(harness, "graph_search_mail").skip).toBeUndefined();
+    expect(graph.calls[0]?.params).not.toHaveProperty("$skip");
+  });
+});
+
+describe("mail nextLink paging", () => {
+  test.each([
+    {
+      name: "graph_list_mail",
+      args: {
+        folder: "sentitems",
+        top: 50,
+        skip: 100,
+        filter_query: "isRead eq false",
+        compact: true,
+      },
+    },
+    {
+      name: "graph_search_mail",
+      args: { query: "planning", top: 50, folder: "archive", compact: true },
+    },
+    {
+      name: "graph_list_mail_folders",
+      args: { parent_folder_id: "folder-1", top: 50, skip: 25 },
+    },
+  ])(
+    "$name fetches next_link as a bare absolute URL and ignores the other arguments",
+    async ({ name, args }) => {
+      const { harness, graph } = registerMailHarness([{ value: [{ id: "item-2" }] }]);
+
+      expect(dataFrom(await harness.invoke(name, { ...args, next_link: NEXT_PAGE_LINK }))).toEqual([
+        { id: "item-2" },
+      ]);
+      expect(graph.calls).toEqual([{ method: "GET", path: NEXT_PAGE_LINK }]);
+    },
+  );
+
+  test("keeps the immutable id header while following a next_link", async () => {
+    const { harness, graph } = registerMailHarness([{ value: [] }]);
+
+    await harness.invoke("graph_list_mail", { next_link: NEXT_PAGE_LINK, immutable_ids: true });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: NEXT_PAGE_LINK,
+        headers: { Prefer: 'IdType="ImmutableId"' },
+      },
+    ]);
+  });
+
+  test.each([
+    { label: "a message list", name: "graph_list_mail", args: {} },
+    { label: "a search", name: "graph_search_mail", args: { query: "planning" } },
+    { label: "a folder list", name: "graph_list_mail_folders", args: {} },
+  ])(
+    "$label wraps the page as {items, next_link} only when include_next_link is set",
+    async ({ name, args }) => {
+      const { harness } = registerMailHarness([
+        { value: [{ id: "item-1" }], "@odata.nextLink": NEXT_PAGE_LINK },
+        { value: [{ id: "item-1" }], "@odata.nextLink": NEXT_PAGE_LINK },
+        { value: [{ id: "item-1" }] },
+        { value: [{ id: "item-1" }], "@odata.nextLink": "https://example.com/v1.0/next" },
+      ]);
+
+      expect(dataFrom(await harness.invoke(name, args))).toEqual([{ id: "item-1" }]);
+      expect(dataFrom(await harness.invoke(name, { ...args, include_next_link: true }))).toEqual({
+        items: [{ id: "item-1" }],
+        next_link: NEXT_PAGE_LINK,
+      });
+      expect(dataFrom(await harness.invoke(name, { ...args, include_next_link: true }))).toEqual({
+        items: [{ id: "item-1" }],
+        next_link: "",
+      });
+      expect(dataFrom(await harness.invoke(name, { ...args, include_next_link: true }))).toEqual({
+        items: [{ id: "item-1" }],
+        next_link: "",
+      });
+    },
+  );
+
+  test.each(["graph_list_mail", "graph_search_mail", "graph_list_mail_folders"])(
+    "%s rejects a next_link that is not a Graph v1.0 URL",
+    (name) => {
+      const { harness } = registerMailHarness();
+      const nextLinkField = schemaFor(harness, name).next_link;
+      if (nextLinkField === undefined) {
+        throw new Error(`Tool ${name} did not expose a next_link argument.`);
+      }
+      const schema = z.object({ next_link: nextLinkField });
+
+      expect(schema.parse({})).toEqual({ next_link: "" });
+      expect(schema.safeParse({ next_link: NEXT_PAGE_LINK }).success).toBe(true);
+      for (const value of [
+        "https://graph.microsoft.com/beta/me/messages",
+        "https://evil.example.com/v1.0/me/messages",
+        "https://graph.microsoft.com.evil.example/v1.0/me/messages",
+        "http://graph.microsoft.com/v1.0/me/messages",
+        "/me/mailFolders/inbox/messages?$skiptoken=page-2",
+      ]) {
+        expect(schema.safeParse({ next_link: value }).success).toBe(false);
+      }
+    },
+  );
+
+  test.each([
+    { name: "graph_list_mail", args: {} },
+    { name: "graph_search_mail", args: { query: "planning" } },
+    { name: "graph_list_mail_folders", args: {} },
+  ])("$name rejects a malformed page while paging", async ({ name, args }) => {
+    const { harness } = registerMailHarness([{ value: [], "@odata.nextLink": 42 }]);
+
+    await expect(harness.invoke(name, { ...args, include_next_link: true })).resolves.toEqual(
+      INVALID_GRAPH_RESPONSE_RESULT,
+    );
+  });
+});
+
+describe("mail Prefer headers", () => {
+  test.each([
+    { name: "graph_list_mail", args: {}, response: { value: [] } },
+    { name: "graph_search_mail", args: { query: "planning" }, response: { value: [] } },
+  ])("$name asks for immutable ids only when requested", async ({ name, args, response }) => {
+    const { harness, graph } = registerMailHarness([response, response]);
+
+    await harness.invoke(name, args);
+    await harness.invoke(name, { ...args, immutable_ids: true });
+
+    expect(graph.calls[0]).not.toHaveProperty("headers");
+    expect(graph.calls[1]?.headers).toEqual({ Prefer: 'IdType="ImmutableId"' });
+  });
+
+  test.each([
+    { label: "neither preference", args: {}, headers: undefined },
+    {
+      label: "only a text body",
+      args: { body_type: "text" },
+      headers: { Prefer: 'outlook.body-content-type="text"' },
+    },
+    {
+      label: "only immutable ids",
+      args: { immutable_ids: true },
+      headers: { Prefer: 'IdType="ImmutableId"' },
+    },
+    {
+      label: "both preferences merged into one Prefer header",
+      args: { body_type: "text", immutable_ids: true },
+      headers: { Prefer: 'outlook.body-content-type="text", IdType="ImmutableId"' },
+    },
+  ])("graph_read_mail sends $label", async ({ args, headers }) => {
+    const { harness, graph } = registerMailHarness([{ id: "message-1" }]);
+
+    await harness.invoke("graph_read_mail", { message_id: "message-1", ...args });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/messages/message-1",
+        ...(headers === undefined ? {} : { headers }),
+      },
+    ]);
+  });
+
+  test("keeps the default html body without a Prefer header", async () => {
+    const { harness, graph } = registerMailHarness([{ id: "message-1" }]);
+
+    await harness.invoke("graph_read_mail", { message_id: "message-1", body_type: "html" });
+
+    expect(graph.calls).toEqual([{ method: "GET", path: "/me/messages/message-1" }]);
   });
 });
 

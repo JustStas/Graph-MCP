@@ -3,6 +3,18 @@ import { z } from "zod";
 
 import { GraphApiError } from "../errors.js";
 import { successResponse } from "../responses.js";
+import { DRIVE_ITEM_COMPACT_FIELDS } from "../select-fields.js";
+import {
+  COMPACT_ARGS_DOC,
+  COMPACT_SCHEMA,
+  INCLUDE_NEXT_LINK_SCHEMA,
+  NEXT_LINK_SCHEMA,
+  PAGING_ARGS_DOC,
+  SKIP_ARGS_DOC,
+  SKIP_SCHEMA,
+  collectionResult,
+  selectFields,
+} from "./list-options.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
 
 export const DRIVE_ITEM_FIELDS =
@@ -152,6 +164,11 @@ function decodeStrictBase64(contentBase64: string): Uint8Array {
   return new Uint8Array(decoded);
 }
 
+/** Only send `$skip` when the caller asked for it, so the default request stays unchanged. */
+function skipParameter(skip: number): Record<string, string> {
+  return skip > 0 ? { $skip: String(skip) } : {};
+}
+
 function driveRoot(driveId: string): string {
   return driveId === "" ? "/me/drive" : `/drives/${encodeURIComponent(driveId)}`;
 }
@@ -185,22 +202,33 @@ export function registerFilesTools(
 
 Args:
     folder_id: Folder ID to list contents of. Empty for root folder.
-    top: Maximum number of items to return (default 25).`,
+    top: Maximum number of items to return (default 25).
+${COMPACT_ARGS_DOC}
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ folder_id, top }) => {
+    async ({ folder_id, top, compact, skip, next_link, include_next_link }) => {
       const path =
         folder_id === ""
           ? "/me/drive/root/children"
           : `/me/drive/items/${encodeURIComponent(folder_id)}/children`;
-      const result = await dependencies.graphClient.get(path, {
-        $select: DRIVE_ITEM_FIELDS,
-        $top: String(Math.min(top, 50)),
-      });
-      return successResponse(collectionValue(result));
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(path, {
+              $select: selectFields(DRIVE_ITEM_FIELDS, DRIVE_ITEM_COMPACT_FIELDS, compact),
+              $top: String(Math.min(top, 50)),
+              ...skipParameter(skip),
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -210,23 +238,33 @@ Args:
     {
       description: `Search for files in OneDrive by name or content.
 
+Graph rejects $skip on the search function, so page with next_link instead.
+
 Args:
     query: Search query string.
-    top: Maximum number of results (default 25).`,
+    top: Maximum number of results (default 25).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         query: z.string(),
         top: TOP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ query, top }) => {
-      const result = await dependencies.graphClient.get(
-        `/me/drive/root/search(q='${encodeSearchQuery(query)}')`,
-        {
-          $select: DRIVE_ITEM_FIELDS,
-          $top: String(Math.min(top, 25)),
-        },
-      );
-      return successResponse(collectionValue(result));
+    async ({ query, top, compact, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(
+              `/me/drive/root/search(q='${encodeSearchQuery(query)}')`,
+              {
+                $select: selectFields(DRIVE_ITEM_FIELDS, DRIVE_ITEM_COMPACT_FIELDS, compact),
+                $top: String(Math.min(top, 25)),
+              },
+            )
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -425,19 +463,26 @@ Args:
     {
       description: `List files other people have shared with the user.
 
-Only $top is passed because sharedWithMe does not support $select reliably.
+Only $top is passed because sharedWithMe does not support $select or $skip
+reliably, so page with next_link instead.
 
 Args:
-    top: Maximum number of items to return (default 25).`,
+    top: Maximum number of items to return (default 25).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         top: TOP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/drive/sharedWithMe", {
-        $top: String(Math.min(top, 50)),
-      });
-      return successResponse(collectionValue(result));
+    async ({ top, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get("/me/drive/sharedWithMe", {
+              $top: String(Math.min(top, 50)),
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -484,17 +529,21 @@ ${DRIVE_ID_ARGS_DOC}`,
 
 Args:
     item_id: The file or folder ID.
+${PAGING_ARGS_DOC}
 ${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         item_id: RESOURCE_ID_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
       },
     },
-    async ({ item_id, drive_id }) => {
-      const result = await dependencies.graphClient.get(
-        `${driveItemPath(drive_id, item_id)}/permissions`,
-      );
-      return successResponse(collectionValue(result));
+    async ({ item_id, next_link, include_next_link, drive_id }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(`${driveItemPath(drive_id, item_id)}/permissions`)
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -571,17 +620,21 @@ ${DRIVE_ID_ARGS_DOC}`,
 
 Args:
     item_id: The file ID.
+${PAGING_ARGS_DOC}
 ${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         item_id: RESOURCE_ID_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
       },
     },
-    async ({ item_id, drive_id }) => {
-      const result = await dependencies.graphClient.get(
-        `${driveItemPath(drive_id, item_id)}/versions`,
-      );
-      return successResponse(collectionValue(result));
+    async ({ item_id, next_link, include_next_link, drive_id }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(`${driveItemPath(drive_id, item_id)}/versions`)
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -618,16 +671,25 @@ ${DRIVE_ID_ARGS_DOC}`,
       description: `List what the user worked on recently across their OneDrive.
 
 Args:
-    top: Maximum number of items to return (default 25, maximum 50).`,
+    top: Maximum number of items to return (default 25, maximum 50).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         top: TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/drive/recent", {
-        $top: String(Math.min(top, 50)),
-      });
-      return successResponse(collectionValue(result));
+    async ({ top, skip, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get("/me/drive/recent", {
+              $top: String(Math.min(top, 50)),
+              ...skipParameter(skip),
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -635,14 +697,26 @@ Args:
     server,
     "graph_list_drives",
     {
-      description: `List the drives the user can reach, including their OneDrive and followed document libraries.`,
-      inputSchema: {},
+      description: `List the drives the user can reach, including their OneDrive and followed document libraries.
+
+Args:
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
+      inputSchema: {
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+      },
     },
-    async () => {
-      const result = await dependencies.graphClient.get("/me/drives", {
-        $select: "id,name,driveType,owner,quota",
-      });
-      return successResponse(collectionValue(result));
+    async ({ skip, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get("/me/drives", {
+              $select: "id,name,driveType,owner,quota",
+              ...skipParameter(skip),
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -701,17 +775,25 @@ Args:
       description: `List the document libraries of a SharePoint site.
 
 Args:
-    site_id: The SharePoint site ID (from graph_search_sites).`,
+    site_id: The SharePoint site ID (from graph_search_sites).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         site_id: RESOURCE_ID_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ site_id }) => {
-      const result = await dependencies.graphClient.get(
-        `/sites/${encodeURIComponent(site_id)}/drives`,
-        { $select: "id,name,driveType,webUrl" },
-      );
-      return successResponse(collectionValue(result));
+    async ({ site_id, skip, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(`/sites/${encodeURIComponent(site_id)}/drives`, {
+              $select: "id,name,driveType,webUrl",
+              ...skipParameter(skip),
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -725,18 +807,24 @@ Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx f
 
 Args:
     item_id: The workbook file ID.
+${PAGING_ARGS_DOC}
 ${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         item_id: RESOURCE_ID_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
       },
     },
-    async ({ item_id, drive_id }) => {
-      const result = await dependencies.graphClient.get(
-        `${driveItemPath(drive_id, item_id)}/workbook/worksheets`,
-        { $select: "id,name,position,visibility" },
-      );
-      return successResponse(collectionValue(result));
+    async ({ item_id, next_link, include_next_link, drive_id }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(
+              `${driveItemPath(drive_id, item_id)}/workbook/worksheets`,
+              { $select: "id,name,position,visibility" },
+            )
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 

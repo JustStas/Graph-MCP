@@ -3,7 +3,24 @@ import { z } from "zod";
 
 import { GraphApiError } from "../errors.js";
 import { successResponse } from "../responses.js";
-import { MAIL_FOLDER_FIELDS, MAIL_LIST_FIELDS } from "../select-fields.js";
+import { MAIL_COMPACT_FIELDS, MAIL_FOLDER_FIELDS, MAIL_LIST_FIELDS } from "../select-fields.js";
+import {
+  BODY_TYPE_ARGS_DOC,
+  BODY_TYPE_SCHEMA,
+  bodyTypeHeaders,
+  collectionResult,
+  COMPACT_ARGS_DOC,
+  COMPACT_SCHEMA,
+  filterForbidsSort,
+  immutableIdHeaders,
+  INCLUDE_NEXT_LINK_SCHEMA,
+  mergeHeaders,
+  NEXT_LINK_SCHEMA,
+  PAGING_ARGS_DOC,
+  selectFields,
+  SKIP_ARGS_DOC,
+  SKIP_SCHEMA,
+} from "./list-options.js";
 import { buildRichTextBody } from "./message-tools.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
 
@@ -25,7 +42,9 @@ const OPTIONAL_RESOURCE_ID_SCHEMA = z
 const MAILBOX_SCHEMA = OPTIONAL_RESOURCE_ID_SCHEMA;
 const MAILBOX_ARGS_DOC = `    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
         mailbox. Requires the delegated Mail.*.Shared permissions.`;
-const SKIP_SCHEMA = z.number().int().min(0).default(0);
+const IMMUTABLE_IDS_ARGS_DOC = `    immutable_ids: Whether to ask Graph for immutable message IDs (default false).
+        A message ID changes when the message is moved, so a stored ID stops
+        working; an immutable ID survives the move.`;
 const MESSAGE_IDS_SCHEMA = z.array(RESOURCE_ID_SCHEMA).min(1).max(50);
 const IMPORTANCE_SCHEMA = z.enum(["low", "normal", "high"]);
 const INCOMPLETE_MESSAGE_RULE_MESSAGE =
@@ -63,6 +82,32 @@ function collectionValue(response: unknown): unknown[] {
     throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
   }
   return response.value;
+}
+
+interface PagedCollectionRequest {
+  /** Absolute nextLink from a previous page. Empty means start from `path`. */
+  readonly nextLink: string;
+  readonly path: string;
+  readonly params: Record<string, string>;
+  readonly includeNextLink: boolean;
+  readonly headers: Record<string, string> | undefined;
+}
+
+/**
+ * Fetch one page of a collection. A nextLink already carries every query parameter Graph
+ * needs, so it is requested bare and the caller's paging arguments are ignored.
+ */
+async function pagedCollection(
+  graphClient: ToolDependencies["graphClient"],
+  request: PagedCollectionRequest,
+): Promise<string> {
+  const response =
+    request.nextLink === ""
+      ? await graphClient.get(request.path, request.params, request.headers)
+      : await graphClient.get(request.nextLink, undefined, request.headers);
+  return successResponse(
+    collectionResult(collectionValue(response), response, request.includeNextLink),
+  );
 }
 
 function requireGraphObject(response: unknown): GraphObject {
@@ -197,29 +242,51 @@ export function registerMailTools(
     {
       description: `List emails from a mail folder.
 
+Results are sorted newest first, except that the sort is dropped automatically when
+filter_query targets from/, sender/, toRecipients/ or ccRecipients/, because Graph
+cannot combine a sort with a filter on those properties.
+
 Args:
     folder: Mail folder name or ID (default "inbox"). Common: inbox, sentitems, drafts,
         deleteditems, archive.
     top: Maximum number of emails to return per call (default 25, maximum 50).
-    skip: Number of emails to skip before returning results (default 0). Graph
-        returns at most 50 per call, so page through larger folders by raising
-        skip in steps of top.
-    filter_query: Optional OData filter (e.g. "isRead eq false").
+${SKIP_ARGS_DOC}
+    filter_query: Optional OData filter (e.g. "isRead eq false"). Filtering on a
+        sender or recipient drops the sort order, as described above.
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}
+${IMMUTABLE_IDS_ARGS_DOC}
 ${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         folder: RESOURCE_ID_SCHEMA.default("inbox"),
         top: LIST_TOP_SCHEMA,
         skip: SKIP_SCHEMA,
         filter_query: z.string().default(""),
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+        immutable_ids: z.boolean().default(false),
         mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ folder, top, skip, filter_query, mailbox }) => {
+    async ({
+      folder,
+      top,
+      skip,
+      filter_query,
+      compact,
+      next_link,
+      include_next_link,
+      immutable_ids,
+      mailbox,
+    }) => {
       const params: Record<string, string> = {
-        $select: MAIL_LIST_FIELDS,
+        $select: selectFields(MAIL_LIST_FIELDS, MAIL_COMPACT_FIELDS, compact),
         $top: String(Math.min(top, 50)),
-        $orderby: "receivedDateTime desc",
       };
+      if (!filterForbidsSort(filter_query)) {
+        params.$orderby = "receivedDateTime desc";
+      }
       if (skip > 0) {
         params.$skip = String(skip);
       }
@@ -227,11 +294,13 @@ ${MAILBOX_ARGS_DOC}`,
         params.$filter = filter_query;
       }
 
-      const result = await dependencies.graphClient.get(
-        `${mailboxRoot(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages`,
+      return await pagedCollection(dependencies.graphClient, {
+        nextLink: next_link,
+        path: `${mailboxRoot(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages`,
         params,
-      );
-      return successResponse(collectionValue(result));
+        includeNextLink: include_next_link,
+        headers: immutableIdHeaders(immutable_ids),
+      });
     },
   );
 
@@ -243,14 +312,22 @@ ${MAILBOX_ARGS_DOC}`,
 
 Args:
     message_id: The email message ID.
+${BODY_TYPE_ARGS_DOC}
+${IMMUTABLE_IDS_ARGS_DOC}
 ${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_id: RESOURCE_ID_SCHEMA,
+        body_type: BODY_TYPE_SCHEMA,
+        immutable_ids: z.boolean().default(false),
         mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_id, mailbox }) => {
-      const result = await dependencies.graphClient.get(messagePath(mailbox, message_id));
+    async ({ message_id, body_type, immutable_ids, mailbox }) => {
+      const result = await dependencies.graphClient.get(
+        messagePath(mailbox, message_id),
+        undefined,
+        mergeHeaders(bodyTypeHeaders(body_type), immutableIdHeaders(immutable_ids)),
+      );
       return successResponse(requireGraphObject(result));
     },
   );
@@ -264,21 +341,50 @@ ${MAILBOX_ARGS_DOC}`,
 Args:
     query: Search query string.
     top: Maximum number of results (default 25).
+    folder: Mail folder name or ID to search (default "", the whole mailbox). Scope
+        the search to a folder when the mailbox holds thousands of messages.
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}
+${IMMUTABLE_IDS_ARGS_DOC}
 ${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         query: z.string(),
         top: LIST_TOP_SCHEMA,
+        folder: OPTIONAL_RESOURCE_ID_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+        immutable_ids: z.boolean().default(false),
         mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ query, top, mailbox }) => {
+    async ({
+      query,
+      top,
+      folder,
+      compact,
+      next_link,
+      include_next_link,
+      immutable_ids,
+      mailbox,
+    }) => {
       const escapedQuery = query.replaceAll('"', '""');
-      const result = await dependencies.graphClient.get(`${mailboxRoot(mailbox)}/messages`, {
-        $search: `"${escapedQuery}"`,
-        $select: MAIL_LIST_FIELDS,
-        $top: String(Math.min(top, 50)),
+      const root = mailboxRoot(mailbox);
+
+      return await pagedCollection(dependencies.graphClient, {
+        nextLink: next_link,
+        path:
+          folder === ""
+            ? `${root}/messages`
+            : `${root}/mailFolders/${encodeURIComponent(folder)}/messages`,
+        params: {
+          $search: `"${escapedQuery}"`,
+          $select: selectFields(MAIL_LIST_FIELDS, MAIL_COMPACT_FIELDS, compact),
+          $top: String(Math.min(top, 50)),
+        },
+        includeNextLink: include_next_link,
+        headers: immutableIdHeaders(immutable_ids),
       });
-      return successResponse(collectionValue(result));
     },
   );
 
@@ -570,19 +676,34 @@ Use the returned folder IDs with graph_list_mail or graph_move_mail.
 Args:
     parent_folder_id: Parent folder ID. Empty lists top-level folders.
     top: Maximum number of folders to return (default 25).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}
 ${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
         top: LIST_TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ parent_folder_id, top, mailbox }) => {
-      const result = await dependencies.graphClient.get(mailFolderPath(mailbox, parent_folder_id), {
+    async ({ parent_folder_id, top, skip, next_link, include_next_link, mailbox }) => {
+      const params: Record<string, string> = {
         $select: MAIL_FOLDER_FIELDS,
         $top: String(Math.min(top, 50)),
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+
+      return await pagedCollection(dependencies.graphClient, {
+        nextLink: next_link,
+        path: mailFolderPath(mailbox, parent_folder_id),
+        params,
+        includeNextLink: include_next_link,
+        headers: undefined,
       });
-      return successResponse(collectionValue(result));
     },
   );
 

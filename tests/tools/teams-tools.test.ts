@@ -45,15 +45,43 @@ interface ToolHarness {
 const EXPECTED_TEAMS_TOOLS = [
   {
     name: "graph_list_teams",
-    description: "List Microsoft Teams that the authenticated user has joined.",
+    description: `List Microsoft Teams that the authenticated user has joined.
+
+Args:
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_list_channels",
-    description: "List channels in a team.",
+    description: `List channels in a team.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_channel_messages",
-    description: "Get messages from a channel.",
+    description: `Get messages from a channel.
+
+Messages carry full HTML bodies plus their attachments and mentions, so
+\`compact\` narrows them to the identifying fields. Without it no \`$select\` is
+sent and the response is unchanged.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    top: Maximum number of messages to return (default 50, maximum 50).
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_send_channel_message",
@@ -61,11 +89,35 @@ const EXPECTED_TEAMS_TOOLS = [
   },
   {
     name: "graph_list_channel_members",
-    description: "List members of a channel.",
+    description: `List members of a channel.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_channel_message_replies",
-    description: "Get replies to a channel message.",
+    description: `Get replies to a channel message.
+
+Messages carry full HTML bodies plus their attachments and mentions, so
+\`compact\` narrows them to the identifying fields. Without it no \`$select\` is
+sent and the response is unchanged.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    message_id: The message ID whose replies to return.
+    top: Maximum number of replies to return (default 50, maximum 50).
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_reply_to_channel_message",
@@ -79,7 +131,11 @@ Needs the TeamMember.Read.All permission, which requires admin consent.
 
 Args:
     team_id: The team ID (from graph_list_teams).
-    top: Maximum number of members to return (default 50, maximum 50).`,
+    top: Maximum number of members to return (default 50, maximum 50).
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_team",
@@ -358,21 +414,38 @@ describe("Teams tool registration", () => {
   test("exposes exact public snake_case Teams schemas, defaults, and required fields", () => {
     const { harness } = registerTeamsHarness();
 
-    expect(schemaFor(harness, "graph_list_teams")).toEqual({});
+    const teamsShape = schemaFor(harness, "graph_list_teams");
+    expect(Object.keys(teamsShape)).toEqual(["next_link", "include_next_link"]);
+    expect(z.object(teamsShape).parse({})).toEqual({
+      next_link: "",
+      include_next_link: false,
+    });
 
     const channelsShape = schemaFor(harness, "graph_list_channels");
-    expect(Object.keys(channelsShape)).toEqual(["team_id"]);
+    expect(Object.keys(channelsShape)).toEqual(["team_id", "next_link", "include_next_link"]);
     expect(z.object(channelsShape).parse({ team_id: "team-1" })).toEqual({
       team_id: "team-1",
+      next_link: "",
+      include_next_link: false,
     });
 
     const messagesShape = schemaFor(harness, "graph_get_channel_messages");
-    expect(Object.keys(messagesShape)).toEqual(["team_id", "channel_id", "top"]);
+    expect(Object.keys(messagesShape)).toEqual([
+      "team_id",
+      "channel_id",
+      "top",
+      "compact",
+      "next_link",
+      "include_next_link",
+    ]);
     const messagesSchema = z.object(messagesShape);
     expect(messagesSchema.parse({ team_id: "team-1", channel_id: "channel-1" })).toEqual({
       team_id: "team-1",
       channel_id: "channel-1",
       top: 50,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
     });
     expect(
       messagesSchema.safeParse({
@@ -443,10 +516,23 @@ describe("Teams tool registration", () => {
     ).toBe(false);
 
     const membersShape = schemaFor(harness, "graph_list_channel_members");
-    expect(Object.keys(membersShape)).toEqual(["team_id", "channel_id"]);
+    expect(Object.keys(membersShape)).toEqual([
+      "team_id",
+      "channel_id",
+      "next_link",
+      "include_next_link",
+    ]);
 
     const repliesShape = schemaFor(harness, "graph_get_channel_message_replies");
-    expect(Object.keys(repliesShape)).toEqual(["team_id", "channel_id", "message_id", "top"]);
+    expect(Object.keys(repliesShape)).toEqual([
+      "team_id",
+      "channel_id",
+      "message_id",
+      "top",
+      "compact",
+      "next_link",
+      "include_next_link",
+    ]);
     expect(
       z.object(repliesShape).parse({
         team_id: "team-1",
@@ -458,6 +544,9 @@ describe("Teams tool registration", () => {
       channel_id: "channel-1",
       message_id: "message-1",
       top: 50,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
     });
 
     const replyShape = schemaFor(harness, "graph_reply_to_channel_message");
@@ -1019,10 +1108,12 @@ describe("Teams team and channel metadata operations", () => {
     const { harness } = registerTeamsHarness();
 
     const membersShape = schemaFor(harness, "graph_list_team_members");
-    expect(Object.keys(membersShape)).toEqual(["team_id", "top"]);
+    expect(Object.keys(membersShape)).toEqual(["team_id", "top", "next_link", "include_next_link"]);
     expect(z.object(membersShape).parse({ team_id: "team-1" })).toEqual({
       team_id: "team-1",
       top: 50,
+      next_link: "",
+      include_next_link: false,
     });
 
     const teamShape = schemaFor(harness, "graph_get_team");
@@ -1504,5 +1595,138 @@ describe("Teams message lifecycle operations", () => {
 
     const graphError = registerTeamsHarness([new GraphApiError("403: Access denied", 403)]);
     await expect(graphError.harness.invoke(name, args)).resolves.toEqual(GRAPH_API_ERROR_RESULT);
+  });
+});
+
+describe("Teams list paging and compact projections", () => {
+  const TEAMS_NEXT_LINK =
+    "https://graph.microsoft.com/v1.0/teams/team-1/channels/channel-1/messages?$skiptoken=abc123";
+  const CHANNEL_MESSAGE_COMPACT_FIELDS = "id,createdDateTime,from,subject,importance,webUrl";
+
+  const PAGING_INVOCATIONS = [
+    { name: "graph_list_teams", args: {} },
+    { name: "graph_list_channels", args: { team_id: "team-1" } },
+    {
+      name: "graph_get_channel_messages",
+      args: { team_id: "team-1", channel_id: "channel-1", top: 500, compact: true },
+    },
+    {
+      name: "graph_get_channel_message_replies",
+      args: {
+        team_id: "team-1",
+        channel_id: "channel-1",
+        message_id: "message-1",
+        top: 500,
+        compact: true,
+      },
+    },
+    {
+      name: "graph_list_channel_members",
+      args: { team_id: "team-1", channel_id: "channel-1" },
+    },
+    { name: "graph_list_team_members", args: { team_id: "team-1", top: 500 } },
+  ] as const;
+
+  test.each(PAGING_INVOCATIONS)(
+    "$name fetches next_link as a bare absolute URL and ignores the other arguments",
+    async ({ name, args }) => {
+      const { harness, graph } = registerTeamsHarness([{ value: [{ id: "page-2" }] }]);
+
+      expect(dataFrom(await harness.invoke(name, { ...args, next_link: TEAMS_NEXT_LINK }))).toEqual(
+        [{ id: "page-2" }],
+      );
+      expect(graph.calls).toEqual([{ method: "GET", path: TEAMS_NEXT_LINK }]);
+    },
+  );
+
+  test.each(PAGING_INVOCATIONS)(
+    "$name wraps the result as {items, next_link} only when include_next_link is set",
+    async ({ name, args }) => {
+      const bare = registerTeamsHarness([
+        { value: [{ id: "item-1" }], "@odata.nextLink": TEAMS_NEXT_LINK },
+      ]);
+      expect(dataFrom(await bare.harness.invoke(name, args))).toEqual([{ id: "item-1" }]);
+
+      const wrapped = registerTeamsHarness([
+        { value: [{ id: "item-1" }], "@odata.nextLink": TEAMS_NEXT_LINK },
+      ]);
+      expect(
+        dataFrom(await wrapped.harness.invoke(name, { ...args, include_next_link: true })),
+      ).toEqual({ items: [{ id: "item-1" }], next_link: TEAMS_NEXT_LINK });
+
+      const lastPage = registerTeamsHarness([{ value: [{ id: "item-1" }] }]);
+      expect(
+        dataFrom(await lastPage.harness.invoke(name, { ...args, include_next_link: true })),
+      ).toEqual({ items: [{ id: "item-1" }], next_link: "" });
+    },
+  );
+
+  test.each(PAGING_INVOCATIONS)("$name only accepts a Graph v1.0 next_link", ({ name, args }) => {
+    const { harness } = registerTeamsHarness();
+    const schema = z.object(schemaFor(harness, name));
+
+    for (const next_link of [
+      "https://evil.example.com/v1.0/teams/team-1/channels",
+      "https://graph.microsoft.com/beta/teams/team-1/channels",
+      "/teams/team-1/channels?$skiptoken=abc",
+    ]) {
+      expect(schema.safeParse({ ...args, next_link }).success).toBe(false);
+    }
+    expect(schema.safeParse({ ...args, next_link: TEAMS_NEXT_LINK }).success).toBe(true);
+  });
+
+  test("adds $select to channel messages and replies only when compact is requested", async () => {
+    const { harness, graph } = registerTeamsHarness([
+      { value: [] },
+      { value: [] },
+      { value: [] },
+      { value: [] },
+    ]);
+
+    await harness.invoke("graph_get_channel_messages", {
+      team_id: "team-1",
+      channel_id: "channel-1",
+    });
+    await harness.invoke("graph_get_channel_messages", {
+      team_id: "team-1",
+      channel_id: "channel-1",
+      top: 10,
+      compact: true,
+    });
+    await harness.invoke("graph_get_channel_message_replies", {
+      team_id: "team-1",
+      channel_id: "channel-1",
+      message_id: "message-1",
+    });
+    await harness.invoke("graph_get_channel_message_replies", {
+      team_id: "team-1",
+      channel_id: "channel-1",
+      message_id: "message-1",
+      top: 10,
+      compact: true,
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/teams/team-1/channels/channel-1/messages",
+        params: { $top: "50" },
+      },
+      {
+        method: "GET",
+        path: "/teams/team-1/channels/channel-1/messages",
+        params: { $top: "10", $select: CHANNEL_MESSAGE_COMPACT_FIELDS },
+      },
+      {
+        method: "GET",
+        path: "/teams/team-1/channels/channel-1/messages/message-1/replies",
+        params: { $top: "50" },
+      },
+      {
+        method: "GET",
+        path: "/teams/team-1/channels/channel-1/messages/message-1/replies",
+        params: { $top: "10", $select: CHANNEL_MESSAGE_COMPACT_FIELDS },
+      },
+    ]);
   });
 });

@@ -74,7 +74,7 @@ export async function createServer(dependencies?: ToolDependencies): Promise<Mcp
     ownedAuthManager = defaults.authManager;
   }
   const server = new McpServer(
-    { name: "Graph MCP", version: "0.7.0" },
+    { name: "Graph MCP", version: "0.8.0" },
     { instructions: SERVER_INSTRUCTIONS },
   );
   registerAllTools(server, resolvedDependencies);

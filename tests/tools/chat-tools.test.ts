@@ -45,11 +45,32 @@ interface ToolHarness {
 const EXPECTED_CHAT_TOOLS = [
   {
     name: "graph_list_chats",
-    description: "List recent Microsoft Teams chats.",
+    description: `List recent Microsoft Teams chats.
+
+Args:
+    top: Maximum number of chats to return (default 50, maximum 50).
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_chat_messages",
-    description: "Get messages from a specific chat.",
+    description: `Get messages from a specific chat.
+
+Messages carry full HTML bodies plus their attachments and mentions, so
+\`compact\` narrows them to the identifying fields. Without it no \`$select\` is
+sent and the response is unchanged.
+
+Args:
+    chat_id: The chat ID.
+    top: Maximum number of messages to return (default 50, maximum 50).
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_send_chat_message",
@@ -73,7 +94,14 @@ Args:
   },
   {
     name: "graph_list_chat_members",
-    description: "List members of a chat.",
+    description: `List members of a chat.
+
+Args:
+    chat_id: The chat ID.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_chat",
@@ -375,18 +403,35 @@ describe("chat tool registration", () => {
     const { harness } = registerChatHarness();
 
     const listSchema = z.object(schemaFor(harness, "graph_list_chats"));
-    expect(Object.keys(schemaFor(harness, "graph_list_chats"))).toEqual(["top"]);
-    expect(listSchema.parse({})).toEqual({ top: 50 });
+    expect(Object.keys(schemaFor(harness, "graph_list_chats"))).toEqual([
+      "top",
+      "next_link",
+      "include_next_link",
+    ]);
+    expect(listSchema.parse({})).toEqual({
+      top: 50,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(listSchema.safeParse({ top: 1.5 }).success).toBe(false);
     expect(listSchema.safeParse({ top: -1 }).success).toBe(true);
     expect(listSchema.safeParse({ top: 500 }).success).toBe(true);
 
     const getMessagesShape = schemaFor(harness, "graph_get_chat_messages");
-    expect(Object.keys(getMessagesShape)).toEqual(["chat_id", "top"]);
+    expect(Object.keys(getMessagesShape)).toEqual([
+      "chat_id",
+      "top",
+      "compact",
+      "next_link",
+      "include_next_link",
+    ]);
     const getMessagesSchema = z.object(getMessagesShape);
     expect(getMessagesSchema.parse({ chat_id: "chat-1" })).toEqual({
       chat_id: "chat-1",
       top: 50,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
     });
     expect(getMessagesSchema.safeParse({ top: 50 }).success).toBe(false);
 
@@ -447,9 +492,11 @@ describe("chat tool registration", () => {
     expect(createSchema.safeParse({ members: ["user-1"] }).success).toBe(false);
 
     const membersShape = schemaFor(harness, "graph_list_chat_members");
-    expect(Object.keys(membersShape)).toEqual(["chat_id"]);
+    expect(Object.keys(membersShape)).toEqual(["chat_id", "next_link", "include_next_link"]);
     expect(z.object(membersShape).parse({ chat_id: "chat-1" })).toEqual({
       chat_id: "chat-1",
+      next_link: "",
+      include_next_link: false,
     });
   });
 
@@ -1617,4 +1664,99 @@ describe("chat lifecycle authenticated wrapper errors", () => {
       await expect(harness.invoke(name, args)).resolves.toEqual(GRAPH_API_ERROR_RESULT);
     },
   );
+});
+
+describe("chat list paging and compact projections", () => {
+  const CHAT_NEXT_LINK =
+    "https://graph.microsoft.com/v1.0/chats/chat-1/messages?$top=50&$skiptoken=integer'50'";
+  const CHAT_MESSAGE_COMPACT_FIELDS = "id,createdDateTime,from,subject,importance,webUrl";
+
+  test.each([
+    { name: "graph_list_chats", args: { top: 500 } },
+    {
+      name: "graph_get_chat_messages",
+      args: { chat_id: "chat-1", top: 500, compact: true },
+    },
+    { name: "graph_list_chat_members", args: { chat_id: "chat-1" } },
+  ])(
+    "$name fetches next_link as a bare absolute URL and ignores the other arguments",
+    async ({ name, args }) => {
+      const { harness, graph } = registerChatHarness([{ value: [{ id: "page-2" }] }]);
+
+      expect(dataFrom(await harness.invoke(name, { ...args, next_link: CHAT_NEXT_LINK }))).toEqual([
+        { id: "page-2" },
+      ]);
+      expect(graph.calls).toEqual([{ method: "GET", path: CHAT_NEXT_LINK }]);
+    },
+  );
+
+  test("wraps chat messages as {items, next_link} only when include_next_link is set", async () => {
+    const { harness } = registerChatHarness([
+      { value: [{ id: "message-1" }], "@odata.nextLink": CHAT_NEXT_LINK },
+      { value: [{ id: "message-1" }], "@odata.nextLink": CHAT_NEXT_LINK },
+      { value: [{ id: "message-1" }] },
+    ]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_get_chat_messages", { chat_id: "chat-1" })),
+    ).toEqual([{ id: "message-1" }]);
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_chat_messages", {
+          chat_id: "chat-1",
+          include_next_link: true,
+        }),
+      ),
+    ).toEqual({ items: [{ id: "message-1" }], next_link: CHAT_NEXT_LINK });
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_chat_messages", {
+          chat_id: "chat-1",
+          include_next_link: true,
+        }),
+      ),
+    ).toEqual({ items: [{ id: "message-1" }], next_link: "" });
+  });
+
+  test.each(["graph_list_chats", "graph_get_chat_messages", "graph_list_chat_members"])(
+    "%s only accepts a Graph v1.0 next_link",
+    (name) => {
+      const { harness } = registerChatHarness();
+      const schema = z.object(schemaFor(harness, name));
+      const base = name === "graph_list_chats" ? {} : { chat_id: "chat-1" };
+
+      for (const next_link of [
+        "https://evil.example.com/v1.0/chats/chat-1/messages",
+        "https://graph.microsoft.com/beta/chats/chat-1/messages",
+        "/chats/chat-1/messages?$skiptoken=abc",
+      ]) {
+        expect(schema.safeParse({ ...base, next_link }).success).toBe(false);
+      }
+      expect(schema.safeParse({ ...base, next_link: CHAT_NEXT_LINK }).success).toBe(true);
+    },
+  );
+
+  test("adds $select to chat messages only when compact is requested", async () => {
+    const { harness, graph } = registerChatHarness([{ value: [] }, { value: [] }]);
+
+    await harness.invoke("graph_get_chat_messages", { chat_id: "chat-1" });
+    await harness.invoke("graph_get_chat_messages", {
+      chat_id: "chat-1",
+      top: 10,
+      compact: true,
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/chats/chat-1/messages",
+        params: { $top: "50" },
+      },
+      {
+        method: "GET",
+        path: "/chats/chat-1/messages",
+        params: { $top: "10", $select: CHAT_MESSAGE_COMPACT_FIELDS },
+      },
+    ]);
+  });
 });

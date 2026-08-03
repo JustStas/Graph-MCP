@@ -14,3 +14,13 @@ export const MAIL_FOLDER_FIELDS =
   "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
 
 export const USER_PROFILE_FIELDS = "id,displayName,mail,jobTitle,department,officeLocation";
+
+export const MAIL_COMPACT_FIELDS = "id,subject,from,receivedDateTime,isRead,hasAttachments,webLink";
+
+export const EVENT_COMPACT_FIELDS = "id,subject,start,end,organizer,isCancelled,responseStatus";
+
+export const DRIVE_ITEM_COMPACT_FIELDS = "id,name,size,lastModifiedDateTime,file,folder,webUrl";
+
+export const CONTACT_COMPACT_FIELDS = "id,displayName,emailAddresses";
+
+export const USER_COMPACT_FIELDS = "id,displayName,mail";

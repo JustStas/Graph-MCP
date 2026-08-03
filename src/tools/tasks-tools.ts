@@ -3,6 +3,14 @@ import { z } from "zod";
 
 import { GraphApiError } from "../errors.js";
 import { successResponse } from "../responses.js";
+import {
+  collectionResult,
+  INCLUDE_NEXT_LINK_SCHEMA,
+  NEXT_LINK_SCHEMA,
+  PAGING_ARGS_DOC,
+  SKIP_ARGS_DOC,
+  SKIP_SCHEMA,
+} from "./list-options.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
 
 const INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
@@ -44,6 +52,31 @@ function collectionValue(response: unknown): unknown[] {
   return response.value;
 }
 
+interface PagedCollectionRequest {
+  /** Absolute nextLink from a previous page. Empty means start from `path`. */
+  readonly nextLink: string;
+  readonly path: string;
+  readonly params: Record<string, string>;
+  readonly includeNextLink: boolean;
+}
+
+/**
+ * Fetch one page of a collection. A nextLink already carries every query parameter Graph
+ * needs, so it is requested bare and the caller's paging arguments are ignored.
+ */
+async function pagedCollection(
+  graphClient: ToolDependencies["graphClient"],
+  request: PagedCollectionRequest,
+): Promise<string> {
+  const response =
+    request.nextLink === ""
+      ? await graphClient.get(request.path, request.params)
+      : await graphClient.get(request.nextLink);
+  return successResponse(
+    collectionResult(collectionValue(response), response, request.includeNextLink),
+  );
+}
+
 function requireGraphObject(response: unknown): GraphObject {
   if (!isNonArrayObject(response)) {
     throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
@@ -72,16 +105,30 @@ export function registerTasksTools(
 Use the returned list IDs with the other To Do tools.
 
 Args:
-    top: Maximum number of lists to return (default 25, maximum 50).`,
+    top: Maximum number of lists to return (default 25, maximum 50).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         top: TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/todo/lists", {
+    async ({ top, skip, next_link, include_next_link }) => {
+      const params: Record<string, string> = {
         $top: String(Math.min(top, 50)),
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+
+      return await pagedCollection(dependencies.graphClient, {
+        nextLink: next_link,
+        path: "/me/todo/lists",
+        params,
+        includeNextLink: include_next_link,
       });
-      return successResponse(collectionValue(result));
     },
   );
 
@@ -97,15 +144,28 @@ Args:
     filter_query: Optional OData filter (e.g. "status eq 'completed'"). Replaces
         the default incomplete-only filter.
     include_completed: Whether to include completed tasks (default false). When
-        false and no filter_query is given, only incomplete tasks are returned.`,
+        false and no filter_query is given, only incomplete tasks are returned.
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         list_id: RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
         filter_query: z.string().default(""),
         include_completed: z.boolean().default(false),
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ list_id, top, filter_query, include_completed }) => {
+    async ({
+      list_id,
+      top,
+      filter_query,
+      include_completed,
+      skip,
+      next_link,
+      include_next_link,
+    }) => {
       const params: Record<string, string> = {
         $top: String(Math.min(top, 50)),
       };
@@ -114,9 +174,16 @@ Args:
       } else if (!include_completed) {
         params.$filter = INCOMPLETE_FILTER;
       }
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
 
-      const result = await dependencies.graphClient.get(taskListPath(list_id), params);
-      return successResponse(collectionValue(result));
+      return await pagedCollection(dependencies.graphClient, {
+        nextLink: next_link,
+        path: taskListPath(list_id),
+        params,
+        includeNextLink: include_next_link,
+      });
     },
   );
 
@@ -252,16 +319,30 @@ Planner tasks live on plans owned by Microsoft 365 groups, so this is separate
 from Microsoft To Do. Requires the Tasks.Read permission.
 
 Args:
-    top: Maximum number of tasks to return (default 25, maximum 50).`,
+    top: Maximum number of tasks to return (default 25, maximum 50).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         top: TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/planner/tasks", {
+    async ({ top, skip, next_link, include_next_link }) => {
+      const params: Record<string, string> = {
         $top: String(Math.min(top, 50)),
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+
+      return await pagedCollection(dependencies.graphClient, {
+        nextLink: next_link,
+        path: "/me/planner/tasks",
+        params,
+        includeNextLink: include_next_link,
       });
-      return successResponse(collectionValue(result));
     },
   );
 }

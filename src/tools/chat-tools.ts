@@ -4,6 +4,15 @@ import { z } from "zod";
 import { GraphApiError } from "../errors.js";
 import { successResponse } from "../responses.js";
 import { CHAT_FIELDS } from "../select-fields.js";
+import {
+  collectionResult,
+  COMPACT_ARGS_DOC,
+  COMPACT_SCHEMA,
+  INCLUDE_NEXT_LINK_SCHEMA,
+  NEXT_LINK_SCHEMA,
+  PAGING_ARGS_DOC,
+  selectFields,
+} from "./list-options.js";
 import { buildChatMessagePayload, buildRichTextBody } from "./message-tools.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
 
@@ -20,6 +29,7 @@ const OPTIONAL_RESOURCE_ID_SCHEMA = z
   })
   .default("");
 const TOP_SCHEMA = z.number().int().default(50);
+const CHAT_MESSAGE_COMPACT_FIELDS = "id,createdDateTime,from,subject,importance,webUrl";
 const IMPORTANCE_SCHEMA = z.enum(["normal", "high", "urgent"]).default("normal");
 const SUBJECT_SCHEMA = z.string().default("");
 const REACTION_TARGET_REQUIRED_MESSAGE = "Provide either chat_id or both team_id and channel_id.";
@@ -64,6 +74,15 @@ function requireGraphObjectWithId(response: unknown): GraphObjectWithId {
   return response as GraphObjectWithId;
 }
 
+/** Query parameters for a chat message list, adding `$select` only when compact is asked for. */
+function messageListParams(top: number, compact: boolean): Record<string, string> {
+  const select = selectFields("", CHAT_MESSAGE_COMPACT_FIELDS, compact);
+  return {
+    $top: String(Math.min(top, 50)),
+    ...(select === "" ? {} : { $select: select }),
+  };
+}
+
 function chatPath(chatId: string): string {
   return `/chats/${encodeURIComponent(chatId)}`;
 }
@@ -91,17 +110,26 @@ export function registerChatTools(
     server,
     "graph_list_chats",
     {
-      description: "List recent Microsoft Teams chats.",
+      description: `List recent Microsoft Teams chats.
+
+Args:
+    top: Maximum number of chats to return (default 50, maximum 50).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         top: TOP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/chats", {
-        $select: CHAT_FIELDS,
-        $top: String(Math.min(top, 50)),
-      });
-      return successResponse(collectionValue(result));
+    async ({ top, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get("/me/chats", {
+              $select: CHAT_FIELDS,
+              $top: String(Math.min(top, 50)),
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -109,18 +137,34 @@ export function registerChatTools(
     server,
     "graph_get_chat_messages",
     {
-      description: "Get messages from a specific chat.",
+      description: `Get messages from a specific chat.
+
+Messages carry full HTML bodies plus their attachments and mentions, so
+\`compact\` narrows them to the identifying fields. Without it no \`$select\` is
+sent and the response is unchanged.
+
+Args:
+    chat_id: The chat ID.
+    top: Maximum number of messages to return (default 50, maximum 50).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         chat_id: RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ chat_id, top }) => {
-      const encodedChatId = encodeURIComponent(chat_id);
-      const result = await dependencies.graphClient.get(`/chats/${encodedChatId}/messages`, {
-        $top: String(Math.min(top, 50)),
-      });
-      return successResponse(collectionValue(result));
+    async ({ chat_id, top, compact, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(
+              `/chats/${encodeURIComponent(chat_id)}/messages`,
+              messageListParams(top, compact),
+            )
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -202,15 +246,23 @@ Args:
     server,
     "graph_list_chat_members",
     {
-      description: "List members of a chat.",
+      description: `List members of a chat.
+
+Args:
+    chat_id: The chat ID.
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         chat_id: RESOURCE_ID_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ chat_id }) => {
-      const encodedChatId = encodeURIComponent(chat_id);
-      const result = await dependencies.graphClient.get(`/chats/${encodedChatId}/members`);
-      return successResponse(collectionValue(result));
+    async ({ chat_id, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(`/chats/${encodeURIComponent(chat_id)}/members`)
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 

@@ -3,6 +3,12 @@ import { z } from "zod";
 
 import { GraphApiError } from "../errors.js";
 import { successResponse } from "../responses.js";
+import {
+  collectionResult,
+  INCLUDE_NEXT_LINK_SCHEMA,
+  NEXT_LINK_SCHEMA,
+  PAGING_ARGS_DOC,
+} from "./list-options.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
 
 const INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
@@ -65,19 +71,25 @@ export function registerMeetingTools(
 
 Args:
     join_url: Teams meeting join URL to look up a specific meeting.
-              If empty, returns recent meetings.`,
+              If empty, returns recent meetings.
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         join_url: z.string().default(""),
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ join_url }) => {
+    async ({ join_url, next_link, include_next_link }) => {
       const params: Record<string, string> = {};
       if (join_url !== "") {
         const escapedJoinUrl = join_url.replaceAll("'", "''");
         params.$filter = `JoinWebUrl eq '${encodeURIComponent(escapedJoinUrl)}'`;
       }
-      const result = await dependencies.graphClient.get("/me/onlineMeetings", params);
-      return successResponse(collectionValue(result));
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get("/me/onlineMeetings", params)
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -88,16 +100,22 @@ Args:
       description: `List available transcripts for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+    meeting_id: The online meeting ID (from graph_list_online_meetings).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ meeting_id }) => {
-      const result = await dependencies.graphClient.get(`${meetingPath(meeting_id)}/transcripts`, {
-        $select: MEETING_METADATA_FIELDS,
-      });
-      return successResponse(collectionValue(result));
+    async ({ meeting_id, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(`${meetingPath(meeting_id)}/transcripts`, {
+              $select: MEETING_METADATA_FIELDS,
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -134,16 +152,22 @@ Args:
       description: `List available recordings for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+    meeting_id: The online meeting ID (from graph_list_online_meetings).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ meeting_id }) => {
-      const result = await dependencies.graphClient.get(`${meetingPath(meeting_id)}/recordings`, {
-        $select: MEETING_METADATA_FIELDS,
-      });
-      return successResponse(collectionValue(result));
+    async ({ meeting_id, next_link, include_next_link }) => {
+      const result =
+        next_link === ""
+          ? await dependencies.graphClient.get(`${meetingPath(meeting_id)}/recordings`, {
+              $select: MEETING_METADATA_FIELDS,
+            })
+          : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue(result), result, include_next_link));
     },
   );
 
@@ -245,12 +269,13 @@ Args:
 
 Without report_id this lists the available attendance reports. With
 report_id it returns that report expanded with per-attendee join and leave
-times. Needs the OnlineMeetingArtifact.Read.All permission, which requires
-admin consent.
+times, and the paging arguments do not apply. Needs the
+OnlineMeetingArtifact.Read.All permission, which requires admin consent.
 
 Args:
     meeting_id: The online meeting ID (from graph_list_online_meetings).
-    report_id: Attendance report ID. Empty lists the available reports.`,
+    report_id: Attendance report ID. Empty lists the available reports.
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA,
         report_id: z
@@ -259,13 +284,20 @@ Args:
             message: "Resource IDs must not be '.' or '..'.",
           })
           .default(""),
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ meeting_id, report_id }) => {
+    async ({ meeting_id, report_id, next_link, include_next_link }) => {
       const reportsPath = `${meetingPath(meeting_id)}/attendanceReports`;
       if (report_id === "") {
-        const result = await dependencies.graphClient.get(reportsPath);
-        return successResponse(collectionValue(result));
+        const result =
+          next_link === ""
+            ? await dependencies.graphClient.get(reportsPath)
+            : await dependencies.graphClient.get(next_link);
+        return successResponse(
+          collectionResult(collectionValue(result), result, include_next_link),
+        );
       }
 
       const result = await dependencies.graphClient.get(

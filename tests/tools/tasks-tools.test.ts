@@ -40,6 +40,11 @@ interface ToolHarness {
   invoke(name: string, args?: unknown): Promise<CallToolResult>;
 }
 
+const LISTS_NEXT_LINK = "https://graph.microsoft.com/v1.0/me/todo/lists?%24skip=25";
+const TASKS_NEXT_LINK =
+  "https://graph.microsoft.com/v1.0/me/todo/lists/list-1/tasks?%24skiptoken=abc";
+const PLANNER_NEXT_LINK = "https://graph.microsoft.com/v1.0/me/planner/tasks?%24skip=25";
+
 const EXPECTED_TASKS_TOOLS = [
   {
     name: "graph_list_todo_lists",
@@ -48,7 +53,13 @@ const EXPECTED_TASKS_TOOLS = [
 Use the returned list IDs with the other To Do tools.
 
 Args:
-    top: Maximum number of lists to return (default 25, maximum 50).`,
+    top: Maximum number of lists to return (default 25, maximum 50).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_list_todo_tasks",
@@ -60,7 +71,13 @@ Args:
     filter_query: Optional OData filter (e.g. "status eq 'completed'"). Replaces
         the default incomplete-only filter.
     include_completed: Whether to include completed tasks (default false). When
-        false and no filter_query is given, only incomplete tasks are returned.`,
+        false and no filter_query is given, only incomplete tasks are returned.
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_create_todo_task",
@@ -111,7 +128,13 @@ Planner tasks live on plans owned by Microsoft 365 groups, so this is separate
 from Microsoft To Do. Requires the Tasks.Read permission.
 
 Args:
-    top: Maximum number of tasks to return (default 25, maximum 50).`,
+    top: Maximum number of tasks to return (default 25, maximum 50).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
 ] as const;
 
@@ -306,15 +329,31 @@ describe("tasks tool registration", () => {
   test("exposes exact snake_case schemas, defaults, enums, and required fields", () => {
     const { harness } = registerTasksHarness();
 
+    expect(Object.keys(schemaFor(harness, "graph_list_todo_lists"))).toEqual([
+      "top",
+      "skip",
+      "next_link",
+      "include_next_link",
+    ]);
     const listsSchema = z.object(schemaFor(harness, "graph_list_todo_lists"));
-    expect(listsSchema.parse({})).toEqual({ top: 25 });
+    expect(listsSchema.parse({})).toEqual({
+      top: 25,
+      skip: 0,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(listsSchema.safeParse({ top: 1.5 }).success).toBe(false);
+    expect(listsSchema.safeParse({ skip: -1 }).success).toBe(false);
+    expect(listsSchema.safeParse({ skip: 1.5 }).success).toBe(false);
 
     expect(Object.keys(schemaFor(harness, "graph_list_todo_tasks"))).toEqual([
       "list_id",
       "top",
       "filter_query",
       "include_completed",
+      "skip",
+      "next_link",
+      "include_next_link",
     ]);
     const tasksSchema = z.object(schemaFor(harness, "graph_list_todo_tasks"));
     expect(tasksSchema.parse({ list_id: "list-1" })).toEqual({
@@ -322,6 +361,9 @@ describe("tasks tool registration", () => {
       top: 25,
       filter_query: "",
       include_completed: false,
+      skip: 0,
+      next_link: "",
+      include_next_link: false,
     });
     for (const listId of ["", ".", ".."]) {
       expect(tasksSchema.safeParse({ list_id: listId }).success).toBe(false);
@@ -402,10 +444,46 @@ describe("tasks tool registration", () => {
     });
     expect(deleteSchema.safeParse({ list_id: "list-1", task_id: "" }).success).toBe(false);
 
+    expect(Object.keys(schemaFor(harness, "graph_list_my_planner_tasks"))).toEqual([
+      "top",
+      "skip",
+      "next_link",
+      "include_next_link",
+    ]);
     const plannerSchema = z.object(schemaFor(harness, "graph_list_my_planner_tasks"));
-    expect(plannerSchema.parse({})).toEqual({ top: 25 });
+    expect(plannerSchema.parse({})).toEqual({
+      top: 25,
+      skip: 0,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(plannerSchema.safeParse({ top: 2.5 }).success).toBe(false);
   });
+
+  test.each(["graph_list_todo_lists", "graph_list_todo_tasks", "graph_list_my_planner_tasks"])(
+    "%s rejects a next_link that is not a Graph v1.0 URL",
+    (name) => {
+      const { harness } = registerTasksHarness();
+      const schema = z.object(schemaFor(harness, name));
+
+      for (const nextLink of [
+        "https://evil.example.com/v1.0/me/todo/lists",
+        "https://graph.microsoft.com/beta/me/todo/lists",
+        "/me/todo/lists?$skip=25",
+      ]) {
+        const result = schema.safeParse({ list_id: "list-1", next_link: nextLink });
+        expect(result.success).toBe(false);
+        if (!result.success) {
+          expect(result.error.issues[0]?.message).toBe(
+            "next_link must be a Microsoft Graph v1.0 URL returned by a previous call.",
+          );
+        }
+      }
+      expect(schema.safeParse({ list_id: "list-1", next_link: LISTS_NEXT_LINK }).success).toBe(
+        true,
+      );
+    },
+  );
 });
 
 describe("todo listing", () => {
@@ -470,6 +548,74 @@ describe("todo listing", () => {
         path: "/me/todo/lists/list-1/tasks",
         params: { $top: "25", $filter: "importance eq 'high'" },
       },
+    ]);
+  });
+
+  test("sends skip only above zero and keeps the incomplete filter", async () => {
+    const { harness, graph } = registerTasksHarness([
+      { value: [] },
+      { value: [] },
+      { value: [] },
+      { value: [] },
+    ]);
+
+    await harness.invoke("graph_list_todo_lists", { skip: 25 });
+    await harness.invoke("graph_list_todo_lists", { skip: 0 });
+    await harness.invoke("graph_list_todo_tasks", { list_id: "list-1", skip: 50 });
+    await harness.invoke("graph_list_my_planner_tasks", { skip: 25 });
+
+    expect(graph.calls).toEqual([
+      { method: "GET", path: "/me/todo/lists", params: { $top: "25", $skip: "25" } },
+      { method: "GET", path: "/me/todo/lists", params: { $top: "25" } },
+      {
+        method: "GET",
+        path: "/me/todo/lists/list-1/tasks",
+        params: { $top: "25", $filter: "status ne 'completed'", $skip: "50" },
+      },
+      { method: "GET", path: "/me/planner/tasks", params: { $top: "25", $skip: "25" } },
+    ]);
+  });
+
+  test("fetches each next_link bare and ignores the other arguments", async () => {
+    const { harness, graph } = registerTasksHarness([
+      { value: [{ id: "list-2" }], "@odata.nextLink": LISTS_NEXT_LINK },
+      { value: [{ id: "task-2" }] },
+      { value: [{ id: "planner-2" }], "@odata.nextLink": PLANNER_NEXT_LINK },
+    ]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_list_todo_lists", {
+          top: 50,
+          skip: 25,
+          next_link: LISTS_NEXT_LINK,
+          include_next_link: true,
+        }),
+      ),
+    ).toEqual({ items: [{ id: "list-2" }], next_link: LISTS_NEXT_LINK });
+    expect(
+      dataFrom(
+        await harness.invoke("graph_list_todo_tasks", {
+          list_id: "list-1",
+          top: 50,
+          filter_query: "importance eq 'high'",
+          include_completed: true,
+          skip: 25,
+          next_link: TASKS_NEXT_LINK,
+          include_next_link: true,
+        }),
+      ),
+    ).toEqual({ items: [{ id: "task-2" }], next_link: "" });
+    expect(
+      dataFrom(
+        await harness.invoke("graph_list_my_planner_tasks", { next_link: PLANNER_NEXT_LINK }),
+      ),
+    ).toEqual([{ id: "planner-2" }]);
+
+    expect(graph.calls).toEqual([
+      { method: "GET", path: LISTS_NEXT_LINK },
+      { method: "GET", path: TASKS_NEXT_LINK },
+      { method: "GET", path: PLANNER_NEXT_LINK },
     ]);
   });
 

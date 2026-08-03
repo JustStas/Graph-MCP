@@ -5,7 +5,7 @@ import { describe, expect, test } from "vitest";
 
 import type { LoginMethod, LoginStatus } from "../../src/auth/auth-manager.js";
 import { AuthenticationError } from "../../src/errors.js";
-import { USER_PROFILE_FIELDS } from "../../src/select-fields.js";
+import { USER_COMPACT_FIELDS, USER_PROFILE_FIELDS } from "../../src/select-fields.js";
 import { registerAuthTools } from "../../src/tools/auth-tools.js";
 import { registerPresenceTools } from "../../src/tools/presence-tools.js";
 import { registerProfileTools } from "../../src/tools/profile-tools.js";
@@ -63,6 +63,9 @@ interface ToolHarness {
   invoke(name: string, args?: unknown): Promise<CallToolResult>;
 }
 
+const USERS_NEXT_LINK = "https://graph.microsoft.com/v1.0/users?%24skiptoken=abc";
+const REPORTS_NEXT_LINK = "https://graph.microsoft.com/v1.0/me/directReports?%24skip=50";
+
 const EXPECTED_TOOLS = [
   {
     name: "graph_auth_status",
@@ -82,7 +85,20 @@ const EXPECTED_TOOLS = [
   },
   {
     name: "graph_search_users",
-    description: "Search for users in the organization directory by name or email.",
+    description: `Search for users in the organization directory by name or email.
+
+Graph does not support \`$skip\` alongside \`$search\` on /users, so page with
+next_link instead of an offset.
+
+Args:
+    query: Name or email address to look up.
+    top: Maximum number of users to return (default 10, maximum 25).
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_manager",
@@ -101,7 +117,15 @@ Reading someone else's direct reports requires the User.Read.All permission.
 
 Args:
     user_id: User ID or email address. Empty targets the signed-in user.
-    top: Maximum number of reports to return (default 50, maximum 50).`,
+    top: Maximum number of reports to return (default 50, maximum 50).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_my_presence",
@@ -167,7 +191,13 @@ Args:
         One or more of: message, event, driveItem, drive, site, list, listItem,
         chatMessage, person.
     size: Maximum number of hits to return (default 25, maximum 50).
-    from: Number of hits to skip for paging (default 0).`,
+    from: Number of hits to skip for paging (default 0).
+    compact: Whether to flatten the response into one list of hits, each reduced to
+        {id, rank, summary, resource_type, name_or_subject, web_url} (default false,
+        which returns the full hitsContainers payload). id is the hitId, falling back
+        to the resource id; name_or_subject is the resource subject, name, displayName
+        or title; web_url is its webUrl or webLink; a field the hit does not carry is
+        omitted.`,
   },
 ] as const;
 
@@ -379,6 +409,18 @@ function schemaFor(harness: ToolHarness, name: string): ZodRawShape {
   return schema;
 }
 
+function dataFrom(result: CallToolResult): unknown {
+  const content = result.content[0];
+  if (content?.type !== "text") {
+    throw new Error("Expected a text tool result.");
+  }
+  const payload: unknown = JSON.parse(content.text);
+  if (typeof payload !== "object" || payload === null || !("data" in payload)) {
+    throw new Error("Expected a success response.");
+  }
+  return payload.data;
+}
+
 describe("core tool registration", () => {
   test("registers exactly the twelve core names and descriptions", () => {
     const harness = createToolHarness();
@@ -415,10 +457,24 @@ describe("core tool registration", () => {
     });
     expect(loginSchema.safeParse({ method: "password" }).success).toBe(false);
 
+    expect(Object.keys(schemaFor(harness, "graph_search_users"))).toEqual([
+      "query",
+      "top",
+      "compact",
+      "next_link",
+      "include_next_link",
+    ]);
     const userSearchSchema = z.object(schemaFor(harness, "graph_search_users"));
-    expect(userSearchSchema.parse({ query: "Ada" })).toEqual({ query: "Ada", top: 10 });
+    expect(userSearchSchema.parse({ query: "Ada" })).toEqual({
+      query: "Ada",
+      top: 10,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(userSearchSchema.safeParse({ query: "Ada", top: 1.5 }).success).toBe(false);
     expect(userSearchSchema.safeParse({ top: 10 }).success).toBe(false);
+    expect(userSearchSchema.parse({ query: "Ada", skip: 25 })).not.toHaveProperty("skip");
 
     const userPresenceSchema = z.object(schemaFor(harness, "graph_get_user_presence"));
     expect(userPresenceSchema.parse({ user_id: "user-1" })).toEqual({
@@ -783,6 +839,48 @@ describe("Graph-backed core tools", () => {
           $select: USER_PROFILE_FIELDS,
           $top: "10",
         },
+        headers: { ConsistencyLevel: "eventual" },
+      },
+    ]);
+  });
+
+  test("selects the compact user fields and pages users with a bare next_link", async () => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies({}, [
+      { value: [{ id: "user-1" }] },
+      { value: [{ id: "user-2" }], "@odata.nextLink": USERS_NEXT_LINK },
+    ]);
+    registerUserTools(harness.server, dependencies);
+
+    expect(
+      dataFrom(await harness.invoke("graph_search_users", { query: "Ada", compact: true })),
+    ).toEqual([{ id: "user-1" }]);
+    expect(
+      dataFrom(
+        await harness.invoke("graph_search_users", {
+          query: "ignored",
+          top: 25,
+          compact: true,
+          next_link: USERS_NEXT_LINK,
+          include_next_link: true,
+        }),
+      ),
+    ).toEqual({ items: [{ id: "user-2" }], next_link: USERS_NEXT_LINK });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/users",
+        params: {
+          $search: '"displayName:Ada" OR "mail:Ada"',
+          $select: USER_COMPACT_FIELDS,
+          $top: "10",
+        },
+        headers: { ConsistencyLevel: "eventual" },
+      },
+      {
+        method: "GET",
+        path: USERS_NEXT_LINK,
         headers: { ConsistencyLevel: "eventual" },
       },
     ]);
@@ -1305,13 +1403,51 @@ describe("organization hierarchy tools", () => {
     expect(Object.keys(schemaFor(harness, "graph_list_direct_reports"))).toEqual([
       "user_id",
       "top",
+      "skip",
+      "compact",
+      "next_link",
+      "include_next_link",
     ]);
     const reportsSchema = z.object(schemaFor(harness, "graph_list_direct_reports"));
-    expect(reportsSchema.parse({})).toEqual({ user_id: "", top: 50 });
+    expect(reportsSchema.parse({})).toEqual({
+      user_id: "",
+      top: 50,
+      skip: 0,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(reportsSchema.safeParse({ top: 1.5 }).success).toBe(false);
+    expect(reportsSchema.safeParse({ skip: -1 }).success).toBe(false);
+    expect(reportsSchema.safeParse({ skip: 2.5 }).success).toBe(false);
     for (const userId of [".", ".."]) {
       expect(reportsSchema.safeParse({ user_id: userId }).success).toBe(false);
     }
+  });
+
+  test.each([
+    { name: "graph_search_users", nextLink: USERS_NEXT_LINK },
+    { name: "graph_list_direct_reports", nextLink: REPORTS_NEXT_LINK },
+  ])("$name rejects a next_link that is not a Graph v1.0 URL", ({ name, nextLink }) => {
+    const harness = createToolHarness();
+    const { dependencies } = createDependencies();
+    registerUserTools(harness.server, dependencies);
+    const schema = z.object(schemaFor(harness, name));
+
+    for (const rejected of [
+      "https://evil.example.com/v1.0/users",
+      "https://graph.microsoft.com/beta/users",
+      "/users?$skiptoken=abc",
+    ]) {
+      const result = schema.safeParse({ query: "Ada", next_link: rejected });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0]?.message).toBe(
+          "next_link must be a Microsoft Graph v1.0 URL returned by a previous call.",
+        );
+      }
+    }
+    expect(schema.safeParse({ query: "Ada", next_link: nextLink }).success).toBe(true);
   });
 
   test("gets my manager and another user's manager with the centralized select fields", async () => {
@@ -1385,6 +1521,45 @@ describe("organization hierarchy tools", () => {
     ]);
   });
 
+  test("sends report skip only above zero, selects compact fields, and pages bare", async () => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies({}, [
+      { value: [] },
+      { value: [] },
+      { value: [{ id: "report-3" }] },
+    ]);
+    registerUserTools(harness.server, dependencies);
+
+    await harness.invoke("graph_list_direct_reports", { skip: 50, compact: true });
+    await harness.invoke("graph_list_direct_reports", { skip: 0 });
+    expect(
+      dataFrom(
+        await harness.invoke("graph_list_direct_reports", {
+          user_id: "ada@example.com",
+          top: 10,
+          skip: 50,
+          compact: true,
+          next_link: REPORTS_NEXT_LINK,
+          include_next_link: true,
+        }),
+      ),
+    ).toEqual({ items: [{ id: "report-3" }], next_link: "" });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/directReports",
+        params: { $select: USER_COMPACT_FIELDS, $top: "50", $skip: "50" },
+      },
+      {
+        method: "GET",
+        path: "/me/directReports",
+        params: { $select: USER_PROFILE_FIELDS, $top: "50" },
+      },
+      { method: "GET", path: REPORTS_NEXT_LINK },
+    ]);
+  });
+
   test.each([
     { name: "graph_get_manager", response: null },
     { name: "graph_get_manager", response: [{ secret: "payload-secret" }] },
@@ -1433,6 +1608,7 @@ describe("unified search tool", () => {
       "entity_types",
       "size",
       "from",
+      "compact",
     ]);
     const schema = z.object(schemaFor(harness, "graph_search_all"));
     expect(schema.parse({ query: "budget" })).toEqual({
@@ -1440,6 +1616,7 @@ describe("unified search tool", () => {
       entity_types: ["message", "event", "driveItem"],
       size: 25,
       from: 0,
+      compact: false,
     });
     expect(schema.safeParse({}).success).toBe(false);
     expect(schema.safeParse({ query: "budget", size: 1.5 }).success).toBe(false);
@@ -1601,6 +1778,125 @@ describe("unified search tool", () => {
       ],
     });
     expect(graph.calls).toEqual([]);
+  });
+
+  test("reduces every hit when compact is set, omitting the fields a hit lacks", async () => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies({}, [
+      {
+        value: [
+          {
+            searchTerms: ["budget"],
+            hitsContainers: [
+              {
+                total: 3,
+                moreResultsAvailable: true,
+                hits: [
+                  {
+                    hitId: "message-1",
+                    rank: 1,
+                    summary: "The <c0>budget</c0> review is on Friday.",
+                    resource: {
+                      "@odata.type": "#microsoft.graph.message",
+                      id: "message-1",
+                      subject: "Budget review",
+                      webLink: "https://outlook.office.com/mail/message-1",
+                      bodyPreview: "a long preview that compact drops",
+                      from: { emailAddress: { address: "ada@example.com" } },
+                    },
+                  },
+                  {
+                    hitId: "drive-item-1",
+                    rank: 2,
+                    resource: {
+                      "@odata.type": "#microsoft.graph.driveItem",
+                      id: "drive-item-1",
+                      name: "Budget.xlsx",
+                      webUrl: "https://contoso.sharepoint.com/Budget.xlsx",
+                      size: 4096,
+                    },
+                  },
+                  {
+                    rank: 3,
+                    resource: { displayName: "Ada Lovelace", id: "person-1" },
+                  },
+                  { summary: "no resource at all" },
+                ],
+              },
+              { hits: [] },
+            ],
+          },
+          { hitsContainers: [] },
+        ],
+      },
+    ]);
+    registerSearchTools(harness.server, dependencies);
+
+    const result = await harness.invoke("graph_search_all", { query: "budget", compact: true });
+
+    expect(dataFrom(result)).toEqual([
+      {
+        id: "message-1",
+        rank: 1,
+        summary: "The <c0>budget</c0> review is on Friday.",
+        resource_type: "#microsoft.graph.message",
+        name_or_subject: "Budget review",
+        web_url: "https://outlook.office.com/mail/message-1",
+      },
+      {
+        id: "drive-item-1",
+        rank: 2,
+        resource_type: "#microsoft.graph.driveItem",
+        name_or_subject: "Budget.xlsx",
+        web_url: "https://contoso.sharepoint.com/Budget.xlsx",
+      },
+      { id: "person-1", rank: 3, name_or_subject: "Ada Lovelace" },
+      { summary: "no resource at all" },
+    ]);
+    const hits = dataFrom(result) as Record<string, unknown>[];
+    expect(Object.keys(hits[0] ?? {})).toEqual([
+      "id",
+      "rank",
+      "summary",
+      "resource_type",
+      "name_or_subject",
+      "web_url",
+    ]);
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/search/query",
+        body: {
+          requests: [
+            {
+              entityTypes: ["message", "event", "driveItem"],
+              query: { queryString: "budget" },
+              from: 0,
+              size: 25,
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  test.each([
+    { label: "text hits", response: { value: [{ hitsContainers: [{ hits: "payload-secret" }] }] } },
+    {
+      label: "text hit",
+      response: { value: [{ hitsContainers: [{ hits: ["payload-secret"] }] }] },
+    },
+    { label: "text container", response: { value: [{ hitsContainers: ["payload-secret"] }] } },
+    { label: "text response", response: { value: ["payload-secret"] } },
+  ])("rejects a malformed compact search payload: $label", async ({ response }) => {
+    const harness = createToolHarness();
+    const { dependencies } = createDependencies({}, [response]);
+    registerSearchTools(harness.server, dependencies);
+
+    const result = await harness.invoke("graph_search_all", { query: "budget", compact: true });
+
+    expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+    expect(JSON.stringify(result)).not.toContain("payload-secret");
   });
 
   test.each([null, "payload-secret", 42, [{ secret: "payload-secret" }]])(

@@ -83,15 +83,29 @@ least privilege your deployment needs and follow your organization's approval pr
 
 ### Claude Code plugin
 
-From a local checkout of this repository:
+This repository is itself a plugin marketplace, so Claude Code can install it straight from
+GitHub:
+
+```bash
+claude plugin marketplace add JustStas/Graph-MCP --scope user
+claude plugin install graph-mcp@graph-mcp --scope user
+```
+
+The same thing works inside a Claude Code session with `/plugin marketplace add
+JustStas/Graph-MCP` followed by `/plugin install graph-mcp@graph-mcp`.
+
+Claude clones the repository into its marketplace cache, validates
+`.claude-plugin/marketplace.json`, and installs the self-contained plugin under the plugin
+cache. The MCP server launches from the installed plugin bundle, so no source checkout is
+needed. To pick up a new release, re-run the two commands.
+
+For plugin development, a local checkout can be added the same way by path instead of
+`owner/repo`:
 
 ```bash
 claude plugin marketplace add /absolute/path/to/Graph-MCP --scope user
 claude plugin install graph-mcp@graph-mcp --scope user
 ```
-
-The marketplace installs the self-contained plugin under Claude's plugin cache. Its MCP
-server launches from the installed plugin bundle, not from the source checkout.
 
 ### Codex plugin
 

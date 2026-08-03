@@ -26,7 +26,7 @@ describe("package metadata", () => {
     const pkg: unknown = JSON.parse(await readFile(packageJsonUrl, "utf8"));
     expect(pkg).toMatchObject({
       name: "@juststas/graph-mcp",
-      version: "0.7.0",
+      version: "0.8.0",
       type: "module",
       bin: { "graph-mcp": "dist/cli.js" },
       repository: {
