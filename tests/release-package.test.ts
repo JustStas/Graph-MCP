@@ -112,6 +112,16 @@ function dryRunManifestJson(
   });
 }
 
+function nestedDryRunManifestJson(
+  metadata: typeof localMetadata,
+  overrides: Partial<typeof localMetadata & { id: string }> = {},
+  key: string = metadata.name,
+): string {
+  return JSON.stringify({
+    [key]: JSON.parse(dryRunManifestJson(metadata, overrides)) as unknown,
+  });
+}
+
 function isDryRunPublish(args: readonly string[]): boolean {
   return args[0] === "publish" && args.includes("--dry-run");
 }
@@ -580,6 +590,102 @@ describe("release publication", () => {
       publishRelease(artifact.metadataPath, artifact.metadata.tag, { execFile }),
     ).rejects.toThrow("malformed JSON");
     expect(registryCalls).toBe(1);
+    expect(actualPublishCalls).toBe(0);
+  });
+
+  test.each([
+    {
+      label: "npm 11 nests the manifest under the package name",
+      stdout: (metadata: typeof localMetadata) => nestedDryRunManifestJson(metadata),
+    },
+    {
+      label: "npm 10 prints the manifest flat",
+      stdout: (metadata: typeof localMetadata) => dryRunManifestJson(metadata),
+    },
+  ])("publishes when $label", async ({ stdout }) => {
+    const artifact = await createReleaseArtifact();
+    let viewCalls = 0;
+    let actualPublishCalls = 0;
+    const execFile: ExecFileFunction = (file, args) => {
+      if (isDryRunPublish(args)) {
+        return Promise.resolve({ stdout: stdout(artifact.metadata), stderr: "" });
+      }
+      if (args[0] === "view") {
+        viewCalls += 1;
+        if (viewCalls === 1) {
+          return Promise.reject(missingVersionFailure(artifact.metadata.version));
+        }
+        return Promise.resolve({ stdout: registryMetadataJson(artifact.metadata), stderr: "" });
+      }
+      if (isActualPublish(args)) {
+        actualPublishCalls += 1;
+        return Promise.resolve({ stdout: "", stderr: "" });
+      }
+      return Promise.reject(new Error("unexpected subprocess call"));
+    };
+
+    await expect(
+      publishRelease(artifact.metadataPath, artifact.metadata.tag, {
+        execFile,
+        delay: () => Promise.resolve(),
+      }),
+    ).resolves.toEqual({
+      state: "publish",
+      version: artifact.metadata.version,
+      integrity: artifact.metadata.integrity,
+    });
+    expect(actualPublishCalls).toBe(1);
+  });
+
+  test("rejects a nested npm publish dry-run manifest that is not an object", async () => {
+    const artifact = await createReleaseArtifact();
+    let actualPublishCalls = 0;
+    const execFile: ExecFileFunction = (file, args) => {
+      if (isDryRunPublish(args)) {
+        return Promise.resolve({
+          stdout: JSON.stringify({ [artifact.metadata.name]: "not-a-manifest" }),
+          stderr: "",
+        });
+      }
+      if (args[0] === "view") {
+        return Promise.reject(missingVersionFailure(artifact.metadata.version));
+      }
+      if (isActualPublish(args)) {
+        actualPublishCalls += 1;
+        return Promise.resolve({ stdout: "", stderr: "" });
+      }
+      return Promise.reject(new Error("unexpected subprocess call"));
+    };
+
+    await expect(
+      publishRelease(artifact.metadataPath, artifact.metadata.tag, { execFile }),
+    ).rejects.toThrow("manifest must be an object");
+    expect(actualPublishCalls).toBe(0);
+  });
+
+  test("rejects a nested npm publish dry-run manifest whose fields mismatch", async () => {
+    const artifact = await createReleaseArtifact();
+    let actualPublishCalls = 0;
+    const execFile: ExecFileFunction = (file, args) => {
+      if (isDryRunPublish(args)) {
+        return Promise.resolve({
+          stdout: nestedDryRunManifestJson(artifact.metadata, { shasum: "0".repeat(40) }),
+          stderr: "",
+        });
+      }
+      if (args[0] === "view") {
+        return Promise.reject(missingVersionFailure(artifact.metadata.version));
+      }
+      if (isActualPublish(args)) {
+        actualPublishCalls += 1;
+        return Promise.resolve({ stdout: "", stderr: "" });
+      }
+      return Promise.reject(new Error("unexpected subprocess call"));
+    };
+
+    await expect(
+      publishRelease(artifact.metadataPath, artifact.metadata.tag, { execFile }),
+    ).rejects.toThrow("shasum does not match package metadata");
     expect(actualPublishCalls).toBe(0);
   });
 
