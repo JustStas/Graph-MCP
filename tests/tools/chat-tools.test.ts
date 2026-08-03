@@ -53,7 +53,19 @@ const EXPECTED_CHAT_TOOLS = [
   },
   {
     name: "graph_send_chat_message",
-    description: "Send a message to a chat.",
+    description: `Send a message to a chat.
+
+Args:
+    chat_id: The chat ID.
+    message: Message body. When \`is_html\` is true, send explicit HTML;
+        markdown is not converted.
+    is_html: Whether the body is HTML content (default: True). Use false for
+        plain text.
+    mentions: Optional mentions. Each entry accepts raw Graph mention fields or
+        a simplified shape with \`name\`/\`display_name\` and \`user_id\`.
+    importance: Message importance: "normal", "high", or "urgent"
+        (default "normal").
+    subject: Optional subject line. Empty omits it.`,
   },
   {
     name: "graph_create_chat",
@@ -62,6 +74,99 @@ const EXPECTED_CHAT_TOOLS = [
   {
     name: "graph_list_chat_members",
     description: "List members of a chat.",
+  },
+  {
+    name: "graph_get_chat",
+    description: `Get a single chat, including its members.
+
+Args:
+    chat_id: The chat ID.`,
+  },
+  {
+    name: "graph_update_chat_topic",
+    description: `Rename a chat by setting its topic.
+
+Only group chats have a topic; Graph rejects this for one-on-one chats.
+
+Args:
+    chat_id: The chat ID.
+    topic: New topic for the chat.`,
+  },
+  {
+    name: "graph_add_chat_member",
+    description: `Add a user to a group chat.
+
+Requires the delegated ChatMember.ReadWrite permission.
+
+Args:
+    chat_id: The chat ID.
+    user_id: User ID or user principal name to add.
+    share_history_from: ISO 8601 timestamp (e.g. "2026-07-14T12:00:00Z") to
+        share chat history from. Empty shares no history.`,
+  },
+  {
+    name: "graph_remove_chat_member",
+    description: `Remove a member from a group chat.
+
+Requires the delegated ChatMember.ReadWrite permission.
+
+Args:
+    chat_id: The chat ID.
+    membership_id: The membership ID (from graph_list_chat_members).`,
+  },
+  {
+    name: "graph_mark_chat_read",
+    description: `Mark a chat as read or unread for a user.
+
+Args:
+    chat_id: The chat ID.
+    user_id: The user ID to mark the chat for.
+    is_read: Whether the chat is read (default true). Use false to mark it
+        unread.`,
+  },
+  {
+    name: "graph_update_chat_message",
+    description: `Edit the body of a chat message.
+
+You can only edit messages you sent.
+
+Args:
+    chat_id: The chat ID.
+    message_id: The message ID to edit.
+    message: New message body. When \`is_html\` is true, send explicit HTML;
+        markdown is not converted.
+    is_html: Whether the body is HTML content (default: True). Use false for
+        plain text.`,
+  },
+  {
+    name: "graph_delete_chat_message",
+    description: `Soft delete a chat message, or restore one with \`restore\`.
+
+Graph only exposes this action under /users/{user_id}, so the user ID is
+required. There is no hard delete, so a deleted message stays recoverable.
+
+Args:
+    chat_id: The chat ID.
+    message_id: The message ID to delete.
+    user_id: The user ID that sent the message.
+    restore: Whether to restore a previously deleted message (default false).`,
+  },
+  {
+    name: "graph_react_to_message",
+    description: `Set or remove an emoji reaction on a chat or channel message.
+
+Supply either \`chat_id\` for a chat message or both \`team_id\` and
+\`channel_id\` for a channel message, never both.
+
+Args:
+    message_id: The message ID to react to.
+    chat_id: Chat ID for a chat message. Empty when targeting a channel.
+    team_id: Team ID for a channel message. Empty when targeting a chat.
+    channel_id: Channel ID for a channel message. Empty when targeting a chat.
+    reaction: Reaction type (default "like"). Common: like, heart, laugh,
+        surprised, sad, angry.
+    remove: Whether to remove the reaction instead of setting it
+        (default false).`,
   },
 ] as const;
 
@@ -255,7 +360,7 @@ function registerChatHarness(graphResponses: readonly unknown[] = []): {
 }
 
 describe("chat tool registration", () => {
-  test("registers exactly the five legacy chat names and first-line descriptions", () => {
+  test("registers exactly the thirteen chat tool names and verbatim descriptions", () => {
     const { harness } = registerChatHarness();
 
     expect(
@@ -286,13 +391,22 @@ describe("chat tool registration", () => {
     expect(getMessagesSchema.safeParse({ top: 50 }).success).toBe(false);
 
     const sendShape = schemaFor(harness, "graph_send_chat_message");
-    expect(Object.keys(sendShape)).toEqual(["chat_id", "message", "is_html", "mentions"]);
+    expect(Object.keys(sendShape)).toEqual([
+      "chat_id",
+      "message",
+      "is_html",
+      "mentions",
+      "importance",
+      "subject",
+    ]);
     const sendSchema = z.object(sendShape);
     expect(sendSchema.parse({ chat_id: "chat-1", message: "hello" })).toEqual({
       chat_id: "chat-1",
       message: "hello",
       is_html: true,
       mentions: null,
+      importance: "normal",
+      subject: "",
     });
     expect(
       sendSchema.parse({
@@ -306,7 +420,12 @@ describe("chat tool registration", () => {
       message: "hello",
       is_html: false,
       mentions: [{ name: "Ada", user_id: "user-1", custom: 42 }],
+      importance: "normal",
+      subject: "",
     });
+    expect(
+      sendSchema.safeParse({ chat_id: "chat-1", message: "hello", importance: "low" }).success,
+    ).toBe(false);
     expect(
       sendSchema.safeParse({
         chat_id: "chat-1",
@@ -951,4 +1070,551 @@ describe("chat authenticated wrapper errors", () => {
 
     await expect(harness.invoke(name, args)).resolves.toEqual(GRAPH_API_ERROR_RESULT);
   });
+});
+
+describe("chat lifecycle tool schemas", () => {
+  test("exposes exact snake_case schemas, defaults, and required fields for the new tools", () => {
+    const { harness } = registerChatHarness();
+
+    expect(Object.keys(schemaFor(harness, "graph_get_chat"))).toEqual(["chat_id"]);
+    expect(z.object(schemaFor(harness, "graph_get_chat")).parse({ chat_id: "chat-1" })).toEqual({
+      chat_id: "chat-1",
+    });
+
+    const topicShape = schemaFor(harness, "graph_update_chat_topic");
+    expect(Object.keys(topicShape)).toEqual(["chat_id", "topic"]);
+    expect(z.object(topicShape).safeParse({ chat_id: "chat-1" }).success).toBe(false);
+
+    const addShape = schemaFor(harness, "graph_add_chat_member");
+    expect(Object.keys(addShape)).toEqual(["chat_id", "user_id", "share_history_from"]);
+    expect(z.object(addShape).parse({ chat_id: "chat-1", user_id: "user-1" })).toEqual({
+      chat_id: "chat-1",
+      user_id: "user-1",
+      share_history_from: "",
+    });
+
+    const removeShape = schemaFor(harness, "graph_remove_chat_member");
+    expect(Object.keys(removeShape)).toEqual(["chat_id", "membership_id"]);
+    expect(z.object(removeShape).safeParse({ chat_id: "chat-1", membership_id: "" }).success).toBe(
+      false,
+    );
+
+    const markShape = schemaFor(harness, "graph_mark_chat_read");
+    expect(Object.keys(markShape)).toEqual(["chat_id", "user_id", "is_read"]);
+    expect(z.object(markShape).parse({ chat_id: "chat-1", user_id: "user-1" })).toEqual({
+      chat_id: "chat-1",
+      user_id: "user-1",
+      is_read: true,
+    });
+
+    const updateMessageShape = schemaFor(harness, "graph_update_chat_message");
+    expect(Object.keys(updateMessageShape)).toEqual([
+      "chat_id",
+      "message_id",
+      "message",
+      "is_html",
+    ]);
+    expect(
+      z
+        .object(updateMessageShape)
+        .parse({ chat_id: "chat-1", message_id: "message-1", message: "edited" }),
+    ).toEqual({
+      chat_id: "chat-1",
+      message_id: "message-1",
+      message: "edited",
+      is_html: true,
+    });
+
+    const deleteShape = schemaFor(harness, "graph_delete_chat_message");
+    expect(Object.keys(deleteShape)).toEqual(["chat_id", "message_id", "user_id", "restore"]);
+    expect(
+      z
+        .object(deleteShape)
+        .parse({ chat_id: "chat-1", message_id: "message-1", user_id: "user-1" }),
+    ).toEqual({
+      chat_id: "chat-1",
+      message_id: "message-1",
+      user_id: "user-1",
+      restore: false,
+    });
+    expect(
+      z.object(deleteShape).safeParse({ chat_id: "chat-1", message_id: "message-1" }).success,
+    ).toBe(false);
+
+    const reactShape = schemaFor(harness, "graph_react_to_message");
+    expect(Object.keys(reactShape)).toEqual([
+      "message_id",
+      "chat_id",
+      "team_id",
+      "channel_id",
+      "reaction",
+      "remove",
+    ]);
+    const reactSchema = z.object(reactShape);
+    expect(reactSchema.parse({ message_id: "message-1" })).toEqual({
+      message_id: "message-1",
+      chat_id: "",
+      team_id: "",
+      channel_id: "",
+      reaction: "like",
+      remove: false,
+    });
+    for (const dotSegment of [".", ".."]) {
+      expect(reactSchema.safeParse({ message_id: "message-1", chat_id: dotSegment }).success).toBe(
+        false,
+      );
+      expect(reactSchema.safeParse({ message_id: "message-1", team_id: dotSegment }).success).toBe(
+        false,
+      );
+      expect(
+        reactSchema.safeParse({ message_id: "message-1", channel_id: dotSegment }).success,
+      ).toBe(false);
+    }
+    expect(reactSchema.safeParse({ message_id: "" }).success).toBe(false);
+  });
+});
+
+describe("chat read and topic operations", () => {
+  test("expands members with the centralized select fields and returns the chat unchanged", async () => {
+    const chat = {
+      id: "chat-1",
+      chatType: "group",
+      topic: "Release room",
+      members: [{ id: "member-1" }],
+    };
+    const { harness, graph } = registerChatHarness([chat]);
+
+    expect(dataFrom(await harness.invoke("graph_get_chat", { chat_id: "chat-1" }))).toEqual(chat);
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/chats/chat-1",
+        params: { $select: CHAT_FIELDS, $expand: "members" },
+      },
+    ]);
+  });
+
+  test.each([
+    { label: "null response", response: null },
+    { label: "text response", response: "payload-secret-text" },
+    { label: "array response", response: [{ id: "payload-secret-array" }] },
+  ])("graph_get_chat rejects malformed responses without leakage: $label", async ({ response }) => {
+    const { harness } = registerChatHarness([response]);
+
+    const result = await harness.invoke("graph_get_chat", { chat_id: "chat-1" });
+
+    expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+    expect(JSON.stringify(result)).not.toContain("payload-secret");
+  });
+
+  test("patches only the topic and reports the applied topic", async () => {
+    const { harness, graph } = registerChatHarness([{}]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_update_chat_topic", {
+          chat_id: "chat-1",
+          topic: "Release room",
+        }),
+      ),
+    ).toEqual({ status: "Chat topic updated", topic: "Release room" });
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: "/chats/chat-1",
+        body: { topic: "Release room" },
+      },
+    ]);
+  });
+});
+
+describe("chat membership operations", () => {
+  test("omits visibleHistoryStartDateTime by default and includes it when history is shared", async () => {
+    const { harness, graph } = registerChatHarness([{}, {}]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_add_chat_member", {
+          chat_id: "chat-1",
+          user_id: "user-1",
+        }),
+      ),
+    ).toEqual({ status: "Chat member added", user_id: "user-1" });
+    expect(
+      dataFrom(
+        await harness.invoke("graph_add_chat_member", {
+          chat_id: "chat-1",
+          user_id: "o'hara@example.com",
+          share_history_from: "2026-07-14T12:00:00Z",
+        }),
+      ),
+    ).toEqual({ status: "Chat member added", user_id: "o'hara@example.com" });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/chats/chat-1/members",
+        body: {
+          "@odata.type": "#microsoft.graph.aadUserConversationMember",
+          roles: ["owner"],
+          "user@odata.bind": "https://graph.microsoft.com/v1.0/users('user-1')",
+        },
+      },
+      {
+        method: "POST",
+        path: "/chats/chat-1/members",
+        body: {
+          "@odata.type": "#microsoft.graph.aadUserConversationMember",
+          roles: ["owner"],
+          "user@odata.bind": "https://graph.microsoft.com/v1.0/users('o''hara@example.com')",
+          visibleHistoryStartDateTime: "2026-07-14T12:00:00Z",
+        },
+      },
+    ]);
+  });
+
+  test("deletes the exact membership route with both IDs encoded", async () => {
+    const { harness, graph } = registerChatHarness([null]);
+    const hostileChatId = "../chat/id#fragment?query=:value%";
+    const hostileMembershipId = "../member/id\\name#fragment";
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_remove_chat_member", {
+          chat_id: hostileChatId,
+          membership_id: hostileMembershipId,
+        }),
+      ),
+    ).toEqual({ status: "Chat member removed", membership_id: hostileMembershipId });
+    expect(graph.calls).toEqual([
+      {
+        method: "DELETE",
+        path: `/chats/${encodeURIComponent(hostileChatId)}/members/${encodeURIComponent(
+          hostileMembershipId,
+        )}`,
+      },
+    ]);
+  });
+
+  test.each([
+    {
+      is_read: true,
+      action: "markChatReadForUser",
+      status: "Chat marked read",
+    },
+    {
+      is_read: false,
+      action: "markChatUnreadForUser",
+      status: "Chat marked unread",
+    },
+  ])("marks a chat with $action when is_read is $is_read", async ({ is_read, action, status }) => {
+    const { harness, graph } = registerChatHarness([{}]);
+    const hostileChatId = "../chat/id?query";
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_mark_chat_read", {
+          chat_id: hostileChatId,
+          user_id: "user-1",
+          is_read,
+        }),
+      ),
+    ).toEqual({ status });
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: `/chats/${encodeURIComponent(hostileChatId)}/${action}`,
+        body: { user: { id: "user-1" } },
+      },
+    ]);
+  });
+});
+
+describe("chat message editing and deletion", () => {
+  test.each([
+    { is_html: true, contentType: "html" },
+    { is_html: false, contentType: "text" },
+  ])("patches the message body with contentType $contentType", async ({ is_html, contentType }) => {
+    const { harness, graph } = registerChatHarness([{}]);
+    const hostileChatId = "../chat/id#fragment";
+    const hostileMessageId = "../message/id?query=:value%";
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_update_chat_message", {
+          chat_id: hostileChatId,
+          message_id: hostileMessageId,
+          message: "<p>edited</p>",
+          is_html,
+        }),
+      ),
+    ).toEqual({ status: "Message updated", message_id: hostileMessageId });
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: `/chats/${encodeURIComponent(hostileChatId)}/messages/${encodeURIComponent(
+          hostileMessageId,
+        )}`,
+        body: { body: { contentType, content: "<p>edited</p>" } },
+      },
+    ]);
+  });
+
+  test.each([
+    { restore: false, action: "softDelete", status: "Message deleted" },
+    { restore: true, action: "undoSoftDelete", status: "Message restored" },
+  ])("posts $action under /users when restore is $restore", async ({ restore, action, status }) => {
+    const { harness, graph } = registerChatHarness([{}]);
+    const hostileUserId = "../user/id@example.com?query";
+    const hostileChatId = "../chat/id#fragment";
+    const hostileMessageId = "../message/id%";
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_delete_chat_message", {
+          chat_id: hostileChatId,
+          message_id: hostileMessageId,
+          user_id: hostileUserId,
+          restore,
+        }),
+      ),
+    ).toEqual({ status, message_id: hostileMessageId });
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: `/users/${encodeURIComponent(hostileUserId)}/chats/${encodeURIComponent(
+          hostileChatId,
+        )}/messages/${encodeURIComponent(hostileMessageId)}/${action}`,
+      },
+    ]);
+  });
+});
+
+describe("message reactions", () => {
+  test.each([
+    { remove: false, action: "setReaction", status: "Reaction set" },
+    { remove: true, action: "unsetReaction", status: "Reaction removed" },
+  ])("routes chat reactions to $action", async ({ remove, action, status }) => {
+    const { harness, graph } = registerChatHarness([{}]);
+    const hostileChatId = "../chat/id#fragment";
+    const hostileMessageId = "../message/id?query";
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_react_to_message", {
+          message_id: hostileMessageId,
+          chat_id: hostileChatId,
+          reaction: "heart",
+          remove,
+        }),
+      ),
+    ).toEqual({ status, reaction: "heart" });
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: `/chats/${encodeURIComponent(hostileChatId)}/messages/${encodeURIComponent(
+          hostileMessageId,
+        )}/${action}`,
+        body: { reactionType: "heart" },
+      },
+    ]);
+  });
+
+  test.each([
+    { remove: false, action: "setReaction", status: "Reaction set" },
+    { remove: true, action: "unsetReaction", status: "Reaction removed" },
+  ])(
+    "routes channel reactions to $action with the default reaction",
+    async ({ remove, action, status }) => {
+      const { harness, graph } = registerChatHarness([{}]);
+      const hostileTeamId = "../team/id#fragment";
+      const hostileChannelId = "../channel/id?query";
+      const hostileMessageId = "../message/id%";
+
+      expect(
+        dataFrom(
+          await harness.invoke("graph_react_to_message", {
+            message_id: hostileMessageId,
+            team_id: hostileTeamId,
+            channel_id: hostileChannelId,
+            remove,
+          }),
+        ),
+      ).toEqual({ status, reaction: "like" });
+      expect(graph.calls).toEqual([
+        {
+          method: "POST",
+          path: `/teams/${encodeURIComponent(hostileTeamId)}/channels/${encodeURIComponent(
+            hostileChannelId,
+          )}/messages/${encodeURIComponent(hostileMessageId)}/${action}`,
+          body: { reactionType: "like" },
+        },
+      ]);
+    },
+  );
+
+  test.each([
+    { label: "no target", args: {} },
+    { label: "only a team ID", args: { team_id: "team-1" } },
+    { label: "only a channel ID", args: { channel_id: "channel-1" } },
+  ])(
+    "returns the required-target error envelope with $label and makes no Graph call",
+    async ({ args }) => {
+      const { harness, graph } = registerChatHarness();
+
+      await expect(
+        harness.invoke("graph_react_to_message", { message_id: "message-1", ...args }),
+      ).resolves.toEqual({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              data: { error: "Provide either chat_id or both team_id and channel_id." },
+              message: "error",
+            }),
+          },
+        ],
+      });
+      expect(graph.calls).toEqual([]);
+    },
+  );
+
+  test.each([
+    {
+      label: "a chat ID and a full channel pair",
+      args: { chat_id: "chat-1", team_id: "team-1", channel_id: "channel-1" },
+    },
+    { label: "a chat ID and a team ID", args: { chat_id: "chat-1", team_id: "team-1" } },
+    { label: "a chat ID and a channel ID", args: { chat_id: "chat-1", channel_id: "channel-1" } },
+  ])(
+    "returns the conflicting-target error envelope with $label and makes no Graph call",
+    async ({ args }) => {
+      const { harness, graph } = registerChatHarness();
+
+      await expect(
+        harness.invoke("graph_react_to_message", { message_id: "message-1", ...args }),
+      ).resolves.toEqual({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              data: { error: "Provide either chat_id or team_id with channel_id, not both." },
+              message: "error",
+            }),
+          },
+        ],
+      });
+      expect(graph.calls).toEqual([]);
+    },
+  );
+});
+
+describe("chat message importance and subject", () => {
+  test("omits importance and subject at their defaults", async () => {
+    const { harness, graph } = registerChatHarness([{ id: "message-1" }]);
+
+    await harness.invoke("graph_send_chat_message", {
+      chat_id: "chat-1",
+      message: "hello",
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/chats/chat-1/messages",
+        body: { body: { contentType: "html", content: "hello" } },
+      },
+    ]);
+  });
+
+  test("sends importance and subject when supplied", async () => {
+    const { harness, graph } = registerChatHarness([{ id: "message-1" }, { id: "message-2" }]);
+
+    await harness.invoke("graph_send_chat_message", {
+      chat_id: "chat-1",
+      message: "hello",
+      importance: "urgent",
+      subject: "Incident 42",
+    });
+    await harness.invoke("graph_send_chat_message", {
+      chat_id: "chat-1",
+      message: "hello",
+      is_html: false,
+      mentions: [{ name: "Ada", user_id: "user-1" }],
+      importance: "high",
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/chats/chat-1/messages",
+        body: {
+          body: { contentType: "html", content: "hello" },
+          importance: "urgent",
+          subject: "Incident 42",
+        },
+      },
+      {
+        method: "POST",
+        path: "/chats/chat-1/messages",
+        body: {
+          body: { contentType: "text", content: "hello" },
+          mentions: [
+            {
+              id: 0,
+              mentionText: "Ada",
+              mentioned: {
+                user: { id: "user-1", displayName: "Ada", userIdentityType: "aadUser" },
+              },
+            },
+          ],
+          importance: "high",
+        },
+      },
+    ]);
+  });
+});
+
+describe("chat lifecycle authenticated wrapper errors", () => {
+  const LIFECYCLE_INVOCATIONS = [
+    { name: "graph_get_chat", args: { chat_id: "chat-1" } },
+    { name: "graph_update_chat_topic", args: { chat_id: "chat-1", topic: "Release room" } },
+    { name: "graph_add_chat_member", args: { chat_id: "chat-1", user_id: "user-1" } },
+    { name: "graph_remove_chat_member", args: { chat_id: "chat-1", membership_id: "member-1" } },
+    { name: "graph_mark_chat_read", args: { chat_id: "chat-1", user_id: "user-1" } },
+    {
+      name: "graph_update_chat_message",
+      args: { chat_id: "chat-1", message_id: "message-1", message: "edited" },
+    },
+    {
+      name: "graph_delete_chat_message",
+      args: { chat_id: "chat-1", message_id: "message-1", user_id: "user-1" },
+    },
+    {
+      name: "graph_react_to_message",
+      args: { message_id: "message-1", chat_id: "chat-1" },
+    },
+    {
+      name: "graph_react_to_message",
+      args: { message_id: "message-1", team_id: "team-1", channel_id: "channel-1" },
+    },
+  ] as const;
+
+  test.each(LIFECYCLE_INVOCATIONS)(
+    "$name returns the stable authentication error envelope",
+    async ({ name, args }) => {
+      const { harness } = registerChatHarness([new AuthenticationError("Not authenticated.")]);
+
+      await expect(harness.invoke(name, args)).resolves.toEqual(AUTHENTICATION_ERROR_RESULT);
+    },
+  );
+
+  test.each(LIFECYCLE_INVOCATIONS)(
+    "$name returns the stable Graph API error envelope",
+    async ({ name, args }) => {
+      const { harness } = registerChatHarness([new GraphApiError("403: Access denied", 403)]);
+
+      await expect(harness.invoke(name, args)).resolves.toEqual(GRAPH_API_ERROR_RESULT);
+    },
+  );
 });

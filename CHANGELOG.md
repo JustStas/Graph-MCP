@@ -6,32 +6,59 @@ All notable changes to Graph MCP are documented in this file.
 
 ### Added
 
-- Mail lifecycle tools so mailboxes can be tidied and not only read: `graph_move_mail`
-  (archive or move to any folder), `graph_delete_mail`, `graph_mark_mail_read`,
-  `graph_flag_mail`, `graph_list_mail_folders`, and `graph_create_mail_folder`. The batch
-  tools accept up to 50 message IDs per call and report per-message outcomes, so a partial
-  failure still says what succeeded.
-- Mail composition tools: `graph_forward_mail`, `graph_create_mail_draft`,
-  `graph_add_mail_attachment` (3MB limit), and `graph_send_mail_draft`. Together these give
-  outbound mail with attachments, which previously had no path at all.
-- Mailbox settings tools `graph_get_mailbox_settings` and `graph_set_automatic_replies` for
-  reading time zone and working hours and for setting or clearing out-of-office replies.
-- Calendar tools `graph_respond_to_event` (accept, decline, or tentatively accept an invite,
-  with an optional comment) and `graph_get_schedule` (free/busy for people and rooms).
-  `graph_update_event` now also accepts `attendees`.
-- OneDrive tools `graph_create_folder`, `graph_delete_file`, `graph_move_file` (move and
-  rename), and `graph_list_shared_files`.
-- A `skip` argument on `graph_list_mail`. Graph returns at most 50 messages per call and the
-  server exposed no way to page, so anything past the newest 50 messages in a folder was
-  unreachable.
-- Delegated scopes `Mail.ReadWrite` and `MailboxSettings.ReadWrite`, which the new write and
-  settings tools require.
+The tool inventory grows from 44 to 125 tools. Graph MCP could previously read a mailbox but
+not act on one, and whole domains a person uses daily were absent. Everything below is
+Microsoft Graph v1.0 with delegated permissions.
+
+- Mail lifecycle: move and archive, delete, mark read or unread, flag, categorize, list and
+  create folders, and list, create, or delete inbox rules. The batch tools accept up to 50
+  message IDs per call and report per-message outcomes, so a partial failure still says what
+  succeeded.
+- Mail composition: forward, create a draft, attach a file, send a draft, and reply or forward
+  as an unsent draft. Send and draft creation gained bcc, importance, reply-to, and control
+  over saving to Sent Items.
+- Shared and delegated mailboxes: every mail tool takes a `mailbox` argument that targets
+  `/users/{id}` instead of `/me`. Sending as a shared mailbox also needs Send As rights in
+  Exchange, not just the delegated permission.
+- Mail paging and sync: a `skip` argument on `graph_list_mail`, and `graph_get_mail_delta` for
+  incremental folder sync with a resumable delta token.
+- Mail tips, so an assistant can check whether someone is out of office before writing to them,
+  and master categories for reading and creating Outlook categories.
+- Mailbox settings: read settings, set or clear automatic replies, set the time zone and
+  working hours, and read a colleague's time zone and working hours.
+- Calendar: cancel a meeting with notification, list the occurrences of a series, suggested
+  meeting times, bookable rooms from the tenant place list, recurrence patterns on event
+  creation, and richer event fields (all-day, show-as, sensitivity, reminders, optional
+  attendees, categories, new-time proposals, response requested). Every calendar tool takes a
+  `user` argument for shared and delegated calendars.
+- Chats: get a single chat, rename a chat, add or remove members, mark read or unread, edit or
+  soft-delete your own messages, and set or remove emoji reactions on chat and channel
+  messages. Chat sends gained importance and subject.
+- Teams and channels: list team members, get a team or its primary channel, create channels,
+  edit or soft-delete channel messages, and reach a channel's SharePoint files folder.
+- Meetings: create an online meeting and get its join link, get a meeting by ID, and read
+  attendance reports showing who actually joined and for how long.
+- Presence: look up presence for up to 650 users in one call, set a status message with an
+  optional expiry, and clear presence.
+- Files: copy items, list and revoke permissions, invite people by email, list and restore
+  versions, list recent files, list drives, resolve a sharing link, search SharePoint sites,
+  and list a site's document libraries.
+- Excel: list worksheets and read or write worksheet ranges, so spreadsheets can be inspected
+  and updated in place.
+- People and contacts: relevance-ranked people search that also finds external contacts, and
+  list, create, update, or delete Outlook contacts plus contact folders.
+- Tasks: Microsoft To Do lists and tasks with create, update, complete, and delete, plus the
+  Planner tasks assigned to the user.
+- Org directory: look up a user's manager or direct reports.
+- Search: one relevance-ranked query across mail, calendar, files, and Teams.
+- Delegated scopes grew from 23 to 41 to cover the above. Several need administrator consent:
+  TeamMember.Read.All, OnlineMeetingArtifact.Read.All, User.Read.All, Sites.Read.All, and
+  Place.Read.All.
 
 ### Changed
 
-- The tool inventory is now 62 tools, up from 44.
 - `MAIL_LIST_FIELDS` now selects `webLink`, `conversationId`, and `parentFolderId` so listed
-  messages can be linked and grouped into threads without a second request per message.
+  messages can be linked and grouped into threads without a request per message.
 
 ## 0.6.1 - 2026-07-17
 

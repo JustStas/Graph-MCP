@@ -83,58 +83,113 @@ const FORBIDDEN_ENV_KEYS = [
 ];
 
 const expectedToolNames = [
+  "graph_add_chat_member",
   "graph_add_mail_attachment",
   "graph_auth_login",
   "graph_auth_logout",
   "graph_auth_status",
+  "graph_cancel_event",
+  "graph_categorize_mail",
+  "graph_clear_my_presence",
+  "graph_copy_file",
+  "graph_create_channel",
   "graph_create_chat",
+  "graph_create_contact",
   "graph_create_event",
   "graph_create_folder",
   "graph_create_mail_draft",
   "graph_create_mail_folder",
+  "graph_create_master_category",
+  "graph_create_message_rule",
+  "graph_create_online_meeting",
+  "graph_create_todo_task",
+  "graph_delete_channel_message",
+  "graph_delete_chat_message",
+  "graph_delete_contact",
   "graph_delete_event",
   "graph_delete_file",
+  "graph_delete_file_permission",
   "graph_delete_mail",
+  "graph_delete_message_rule",
+  "graph_delete_todo_task",
+  "graph_find_meeting_times",
   "graph_flag_mail",
   "graph_forward_mail",
+  "graph_get_channel_files_folder",
   "graph_get_channel_message_replies",
   "graph_get_channel_messages",
+  "graph_get_chat",
   "graph_get_chat_messages",
   "graph_get_event",
   "graph_get_file_content",
   "graph_get_mail_attachment",
+  "graph_get_mail_delta",
+  "graph_get_mail_tips",
   "graph_get_mailbox_settings",
+  "graph_get_manager",
+  "graph_get_meeting_attendance",
   "graph_get_meeting_recording_url",
   "graph_get_meeting_transcript_content",
   "graph_get_my_presence",
+  "graph_get_online_meeting",
+  "graph_get_presences_by_user_ids",
+  "graph_get_primary_channel",
   "graph_get_profile",
   "graph_get_schedule",
+  "graph_get_team",
   "graph_get_user_presence",
+  "graph_get_worksheet_range",
+  "graph_invite_to_file",
   "graph_list_calendars",
   "graph_list_channel_members",
   "graph_list_channels",
   "graph_list_chat_members",
   "graph_list_chats",
+  "graph_list_contact_folders",
+  "graph_list_contacts",
+  "graph_list_direct_reports",
+  "graph_list_drives",
+  "graph_list_event_instances",
   "graph_list_events",
+  "graph_list_file_permissions",
+  "graph_list_file_versions",
   "graph_list_files",
   "graph_list_mail",
   "graph_list_mail_attachments",
   "graph_list_mail_folders",
+  "graph_list_master_categories",
   "graph_list_meeting_recordings",
   "graph_list_meeting_transcripts",
+  "graph_list_message_rules",
+  "graph_list_my_planner_tasks",
   "graph_list_online_meetings",
+  "graph_list_recent_files",
+  "graph_list_rooms",
   "graph_list_shared_files",
+  "graph_list_site_drives",
+  "graph_list_team_members",
   "graph_list_teams",
+  "graph_list_todo_lists",
+  "graph_list_todo_tasks",
+  "graph_list_worksheets",
+  "graph_mark_chat_read",
   "graph_mark_mail_read",
   "graph_move_file",
   "graph_move_mail",
+  "graph_react_to_message",
   "graph_read_mail",
+  "graph_remove_chat_member",
   "graph_reply_mail",
   "graph_reply_to_channel_message",
+  "graph_resolve_share_link",
   "graph_respond_to_event",
+  "graph_restore_file_version",
+  "graph_search_all",
   "graph_search_files",
   "graph_search_mail",
   "graph_search_messages",
+  "graph_search_people",
+  "graph_search_sites",
   "graph_search_users",
   "graph_send_channel_message",
   "graph_send_chat_message",
@@ -142,8 +197,16 @@ const expectedToolNames = [
   "graph_send_mail_draft",
   "graph_set_automatic_replies",
   "graph_set_my_presence",
+  "graph_set_status_message",
   "graph_share_file",
+  "graph_update_channel_message",
+  "graph_update_chat_message",
+  "graph_update_chat_topic",
+  "graph_update_contact",
   "graph_update_event",
+  "graph_update_mailbox_settings",
+  "graph_update_todo_task",
+  "graph_update_worksheet_range",
   "graph_upload_file",
 ];
 
@@ -794,7 +857,7 @@ async function runMcpSmoke({ label, pluginRoot, server, environment }) {
       .map((tool) => requireString(tool.name, "tool name", `${label} MCP tools/list`))
       .sort();
     const names = [...expectedToolNames].sort();
-    if (actualNames.length !== 62 || actualNames.some((name, index) => name !== names[index])) {
+    if (actualNames.length !== 125 || actualNames.some((name, index) => name !== names[index])) {
       throw new Error(`${label} MCP tools mismatch: got ${actualNames.length} names.`);
     }
     result = {
@@ -1036,7 +1099,7 @@ async function main() {
       process.stdout.write(
         `CLAUDE_PLUGIN_INSTALL_PATH ${await relativeToTempRoot(tempRoot, claudeInstalled.installedPluginRoot)}\n`,
       );
-      process.stdout.write("CLAUDE_PLUGIN_INSTALL_OK 62\n");
+      process.stdout.write("CLAUDE_PLUGIN_INSTALL_OK 125\n");
 
       const codexEnvironment = environmentFor({ home, claudeConfigDir, codexHome, tempRoot });
       const expectedCodexInstall = join(
@@ -1124,7 +1187,7 @@ async function main() {
       process.stdout.write(
         `CODEX_PLUGIN_INSTALL_PATH ${await relativeToTempRoot(tempRoot, codexInstalled.installedPluginRoot)}\n`,
       );
-      process.stdout.write("CODEX_PLUGIN_INSTALL_OK 62\n");
+      process.stdout.write("CODEX_PLUGIN_INSTALL_OK 125\n");
     });
   });
 }

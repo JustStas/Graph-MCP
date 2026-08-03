@@ -210,8 +210,8 @@ test(
 
       expect(result.code).toBe(0);
       expect(result.stderr).toBe("");
-      expect(result.stdout).toContain("CLAUDE_PLUGIN_INSTALL_OK 62");
-      expect(result.stdout).toContain("CODEX_PLUGIN_INSTALL_OK 62");
+      expect(result.stdout).toContain("CLAUDE_PLUGIN_INSTALL_OK 125");
+      expect(result.stdout).toContain("CODEX_PLUGIN_INSTALL_OK 125");
     });
   },
   INSTALL_TEST_TIMEOUT_MS,

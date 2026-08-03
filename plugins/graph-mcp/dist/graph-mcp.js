@@ -23093,26 +23093,42 @@ var SCOPES = Object.freeze([
   "profile",
   "User.Read",
   "User.ReadBasic.All",
+  "User.Read.All",
   "Chat.Read",
   "Chat.ReadWrite",
+  "ChatMember.ReadWrite",
   "ChatMessage.Send",
   "ChannelMessage.Read.All",
   "ChannelMessage.Send",
+  "ChannelMessage.ReadWrite",
+  "Channel.Create",
+  "TeamMember.Read.All",
   "Team.ReadBasic.All",
   "Channel.ReadBasic.All",
   "ChannelMember.Read.All",
   "Calendars.ReadWrite",
+  "Calendars.Read.Shared",
+  "Calendars.ReadWrite.Shared",
+  "Place.Read.All",
   "Mail.Read",
   "Mail.ReadWrite",
   "Mail.Send",
   "MailboxSettings.ReadWrite",
+  "Mail.ReadWrite.Shared",
+  "Mail.Send.Shared",
   "Presence.Read",
   "Presence.Read.All",
   "Presence.ReadWrite",
   "OnlineMeetings.Read",
+  "OnlineMeetings.ReadWrite",
+  "OnlineMeetingArtifact.Read.All",
   "OnlineMeetingTranscript.Read.All",
   "OnlineMeetingRecording.Read.All",
-  "Files.ReadWrite.All"
+  "Files.ReadWrite.All",
+  "Sites.Read.All",
+  "People.Read",
+  "Contacts.ReadWrite",
+  "Tasks.ReadWrite"
 ]);
 function configPaths(homeDir) {
   const configDir = join(homeDir, ".graph-mcp");
@@ -34972,8 +34988,26 @@ var RESOURCE_ID_SCHEMA = external_exports.string().refine((value) => value !== "
 var OPTIONAL_RESOURCE_ID_SCHEMA = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
   message: "Resource IDs must not be '.' or '..'."
 }).default("");
+var USER_SCHEMA = OPTIONAL_RESOURCE_ID_SCHEMA;
+var USER_ARGS_DOC = `    user: Shared or delegated calendar owner address or user ID to act on. Empty
+        targets your own calendar. Requires the delegated Calendars.Read.Shared or
+        Calendars.ReadWrite.Shared permissions.`;
 var TOP_SCHEMA = external_exports.number().int().default(50);
 var ATTENDEES_SCHEMA = external_exports.array(external_exports.string()).nullable().optional().default(null);
+var SHOW_AS_SCHEMA = external_exports.enum(["free", "tentative", "busy", "oof", "workingElsewhere", "unknown"]).default("busy");
+var SENSITIVITY_SCHEMA = external_exports.enum(["normal", "personal", "private", "confidential"]).default("normal");
+var REMINDER_SCHEMA = external_exports.number().int().default(-1);
+var CATEGORIES_SCHEMA = external_exports.array(external_exports.string()).default([]);
+var REPEAT_SCHEMA = external_exports.enum(["none", "daily", "weekly", "monthly", "yearly"]).default("none");
+var MISSING_INSTANCE_WINDOW_MESSAGE = "start_datetime and end_datetime are required to list event instances.";
+var MISSING_REPEAT_DAYS_MESSAGE = "repeat_days is required when repeat is weekly.";
+var CONFLICTING_REPEAT_END_MESSAGE = "Provide either repeat_until or repeat_count, not both.";
+var RECURRENCE_PATTERN_TYPES = {
+  daily: "daily",
+  weekly: "weekly",
+  monthly: "absoluteMonthly",
+  yearly: "absoluteYearly"
+};
 function isNonArrayObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -35001,27 +35035,116 @@ function requireGraphObjectWithId(response) {
   }
   return response;
 }
-function eventPath(eventId) {
-  return `/me/events/${encodeURIComponent(eventId)}`;
+function calendarRoot(user) {
+  return user === "" ? "/me" : `/users/${encodeURIComponent(user)}`;
+}
+function eventPath(user, eventId) {
+  return `${calendarRoot(user)}/events/${encodeURIComponent(eventId)}`;
 }
 var EVENT_RESPONSE_ACTIONS = {
   accept: { action: "accept", status: "Event accepted" },
   decline: { action: "decline", status: "Event declined" },
   tentative: { action: "tentativelyAccept", status: "Event tentatively accepted" }
 };
-function calendarCollectionPath(calendarId, collection) {
-  return calendarId === "" ? `/me/${collection}` : `/me/calendars/${encodeURIComponent(calendarId)}/${collection}`;
+function calendarCollectionPath(user, calendarId, collection) {
+  const root = calendarRoot(user);
+  return calendarId === "" ? `${root}/${collection}` : `${root}/calendars/${encodeURIComponent(calendarId)}/${collection}`;
+}
+function attendee(address, type) {
+  return { emailAddress: { address }, type };
+}
+function attendeeList(required2, optional2) {
+  return [
+    ...(required2 ?? []).map((address) => attendee(address, "required")),
+    ...(optional2 ?? []).map((address) => attendee(address, "optional"))
+  ];
+}
+function applyRichEventFields(event, fields) {
+  if (fields.is_all_day) {
+    event.isAllDay = true;
+  }
+  if (fields.show_as !== "busy") {
+    event.showAs = fields.show_as;
+  }
+  if (fields.sensitivity !== "normal") {
+    event.sensitivity = fields.sensitivity;
+  }
+  if (fields.reminder_minutes_before_start >= 0) {
+    event.reminderMinutesBeforeStart = fields.reminder_minutes_before_start;
+    event.isReminderOn = true;
+  }
+  if (fields.categories.length > 0) {
+    event.categories = [...fields.categories];
+  }
+  if (!fields.allow_new_time_proposals) {
+    event.allowNewTimeProposals = false;
+  }
+  if (!fields.response_requested) {
+    event.responseRequested = false;
+  }
+}
+function datePart(dateTime) {
+  return dateTime.split("T")[0] ?? dateTime;
+}
+function recurrenceRange(fields, startDate) {
+  if (fields.repeat_until !== "") {
+    return { type: "endDate", startDate, endDate: fields.repeat_until };
+  }
+  if (fields.repeat_count > 0) {
+    return { type: "numbered", startDate, numberOfOccurrences: fields.repeat_count };
+  }
+  return { type: "noEnd", startDate };
+}
+function recurrencePattern(repeat, fields, startDate) {
+  const pattern = {
+    type: RECURRENCE_PATTERN_TYPES[repeat],
+    interval: fields.repeat_interval
+  };
+  if (repeat === "weekly") {
+    pattern.daysOfWeek = [...fields.repeat_days];
+  }
+  if (repeat === "monthly" || repeat === "yearly") {
+    pattern.dayOfMonth = Number(startDate.slice(8, 10));
+  }
+  if (repeat === "yearly") {
+    pattern.month = Number(startDate.slice(5, 7));
+  }
+  return pattern;
+}
+function recurrenceError(fields) {
+  if (fields.repeat === "none") {
+    return null;
+  }
+  if (fields.repeat === "weekly" && fields.repeat_days.length === 0) {
+    return MISSING_REPEAT_DAYS_MESSAGE;
+  }
+  if (fields.repeat_until !== "" && fields.repeat_count > 0) {
+    return CONFLICTING_REPEAT_END_MESSAGE;
+  }
+  return null;
+}
+function buildRecurrence(repeat, fields, startDateTime) {
+  const startDate = datePart(startDateTime);
+  return {
+    pattern: recurrencePattern(repeat, fields, startDate),
+    range: recurrenceRange(fields, startDate)
+  };
 }
 function registerCalendarTools(server, dependencies) {
   registerAuthenticatedTool(
     server,
     "graph_list_calendars",
     {
-      description: "List the authenticated user's calendars.",
-      inputSchema: {}
+      description: `List the authenticated user's calendars.
+
+Args:
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        user: USER_SCHEMA
+      }
     },
-    async () => {
-      const result = await dependencies.graphClient.get("/me/calendars", {
+    async ({ user }) => {
+      const result = await dependencies.graphClient.get(`${calendarRoot(user)}/calendars`, {
         $select: "id,name,color,isDefaultCalendar"
       });
       return successResponse(collectionValue(result));
@@ -35037,15 +35160,17 @@ Args:
     start_datetime: Start of date range (ISO 8601, e.g. "2025-01-01T00:00:00Z"). Required with end_datetime for date range queries.
     end_datetime: End of date range (ISO 8601). Required with start_datetime.
     calendar_id: Optional calendar ID. Defaults to primary calendar.
-    top: Maximum number of events to return (default 50).`,
+    top: Maximum number of events to return (default 50).
+${USER_ARGS_DOC}`,
       inputSchema: {
         start_datetime: external_exports.string().default(""),
         end_datetime: external_exports.string().default(""),
         calendar_id: OPTIONAL_RESOURCE_ID_SCHEMA,
-        top: TOP_SCHEMA
+        top: TOP_SCHEMA,
+        user: USER_SCHEMA
       }
     },
-    async ({ start_datetime, end_datetime, calendar_id, top }) => {
+    async ({ start_datetime, end_datetime, calendar_id, top, user }) => {
       const params = {
         $select: EVENT_LIST_FIELDS,
         $top: String(Math.min(top, 50))
@@ -35054,10 +35179,10 @@ Args:
       if (start_datetime !== "" && end_datetime !== "") {
         params.startDateTime = start_datetime;
         params.endDateTime = end_datetime;
-        path2 = calendarCollectionPath(calendar_id, "calendarView");
+        path2 = calendarCollectionPath(user, calendar_id, "calendarView");
       } else {
         params.$orderby = "start/dateTime desc";
-        path2 = calendarCollectionPath(calendar_id, "events");
+        path2 = calendarCollectionPath(user, calendar_id, "events");
       }
       const result = await dependencies.graphClient.get(path2, params);
       return successResponse(collectionValue(result));
@@ -35070,13 +35195,15 @@ Args:
       description: `Get full details of a specific calendar event.
 
 Args:
-    event_id: The event ID.`,
+    event_id: The event ID.
+${USER_ARGS_DOC}`,
       inputSchema: {
-        event_id: RESOURCE_ID_SCHEMA
+        event_id: RESOURCE_ID_SCHEMA,
+        user: USER_SCHEMA
       }
     },
-    async ({ event_id }) => {
-      const result = await dependencies.graphClient.get(eventPath(event_id));
+    async ({ event_id, user }) => {
+      const result = await dependencies.graphClient.get(eventPath(user, event_id));
       return successResponse(requireGraphObject(result));
     }
   );
@@ -35093,9 +35220,30 @@ Args:
     timezone: Timezone (default "UTC"). Examples: "Pacific Standard Time", "Europe/London".
     body: Optional event body/description.
     location: Optional location name.
-    attendees: Optional list of attendee email addresses.
+    attendees: Optional list of required attendee email addresses.
     is_online_meeting: Whether to create a Teams online meeting (default false).
-    is_html: Whether the body is HTML (default: plain text).`,
+    is_html: Whether the body is HTML (default: plain text).
+    is_all_day: Whether the event lasts all day (default false). Graph expects
+        midnight start and end times for all-day events.
+    show_as: Free/busy status: "free", "tentative", "busy", "oof",
+        "workingElsewhere", or "unknown" (default "busy").
+    sensitivity: Sensitivity: "normal", "personal", "private", or "confidential"
+        (default "normal").
+    reminder_minutes_before_start: Reminder lead time in minutes. Negative keeps
+        the mailbox default (default -1).
+    optional_attendees: Optional list of optional attendee email addresses.
+    categories: Outlook category names to tag the event with.
+    allow_new_time_proposals: Whether attendees may propose new times (default true).
+    response_requested: Whether attendees are asked to respond (default true).
+    repeat: Recurrence pattern: "none", "daily", "weekly", "monthly", or "yearly"
+        (default "none").
+    repeat_interval: Interval between occurrences (default 1).
+    repeat_days: Weekday names for weekly recurrence, e.g. ["monday", "thursday"].
+        Required when repeat is "weekly".
+    repeat_until: Last date of the recurrence (YYYY-MM-DD). Mutually exclusive
+        with repeat_count.
+    repeat_count: Number of occurrences. Mutually exclusive with repeat_until.
+${USER_ARGS_DOC}`,
       inputSchema: {
         subject: external_exports.string(),
         start_datetime: external_exports.string(),
@@ -35105,20 +35253,42 @@ Args:
         location: external_exports.string().default(""),
         attendees: ATTENDEES_SCHEMA,
         is_online_meeting: external_exports.boolean().default(false),
-        is_html: external_exports.boolean().default(false)
+        is_html: external_exports.boolean().default(false),
+        is_all_day: external_exports.boolean().default(false),
+        show_as: SHOW_AS_SCHEMA,
+        sensitivity: SENSITIVITY_SCHEMA,
+        reminder_minutes_before_start: REMINDER_SCHEMA,
+        optional_attendees: ATTENDEES_SCHEMA,
+        categories: CATEGORIES_SCHEMA,
+        allow_new_time_proposals: external_exports.boolean().default(true),
+        response_requested: external_exports.boolean().default(true),
+        repeat: REPEAT_SCHEMA,
+        repeat_interval: external_exports.number().int().default(1),
+        repeat_days: external_exports.array(external_exports.string()).default([]),
+        repeat_until: external_exports.string().default(""),
+        repeat_count: external_exports.number().int().default(0),
+        user: USER_SCHEMA
       }
     },
-    async ({
-      subject,
-      start_datetime,
-      end_datetime,
-      timezone,
-      body,
-      location,
-      attendees,
-      is_online_meeting,
-      is_html
-    }) => {
+    async (args) => {
+      const {
+        subject,
+        start_datetime,
+        end_datetime,
+        timezone,
+        body,
+        location,
+        attendees,
+        is_online_meeting,
+        is_html,
+        optional_attendees,
+        repeat,
+        user
+      } = args;
+      const invalidRecurrence = recurrenceError(args);
+      if (invalidRecurrence !== null) {
+        return successResponse({ error: invalidRecurrence }, "error");
+      }
       const event = {
         subject,
         start: { dateTime: start_datetime, timeZone: timezone },
@@ -35133,17 +35303,19 @@ Args:
       if (location !== "") {
         event.location = { displayName: location };
       }
-      if (attendees !== null && attendees.length > 0) {
-        event.attendees = attendees.map((address) => ({
-          emailAddress: { address },
-          type: "required"
-        }));
+      const eventAttendees = attendeeList(attendees, optional_attendees);
+      if (eventAttendees.length > 0) {
+        event.attendees = eventAttendees;
       }
       if (is_online_meeting) {
         event.isOnlineMeeting = true;
         event.onlineMeetingProvider = "teamsForBusiness";
       }
-      const result = await dependencies.graphClient.post("/me/events", event);
+      applyRichEventFields(event, args);
+      if (repeat !== "none") {
+        event.recurrence = buildRecurrence(repeat, args, start_datetime);
+      }
+      const result = await dependencies.graphClient.post(`${calendarRoot(user)}/events`, event);
       return successResponse(requireGraphObjectWithId(result));
     }
   );
@@ -35161,8 +35333,22 @@ Args:
     timezone: Timezone for start/end times.
     body: New body/description.
     location: New location name.
-    attendees: New list of attendee email addresses.
-    is_html: Whether the body is HTML (default: plain text).`,
+    attendees: New list of required attendee email addresses.
+    is_html: Whether the body is HTML (default: plain text).
+    is_all_day: Whether the event lasts all day (default false). Graph expects
+        midnight start and end times for all-day events.
+    show_as: Free/busy status: "free", "tentative", "busy", "oof",
+        "workingElsewhere", or "unknown" (default "busy").
+    sensitivity: Sensitivity: "normal", "personal", "private", or "confidential"
+        (default "normal").
+    reminder_minutes_before_start: Reminder lead time in minutes. Negative leaves
+        the reminder unchanged (default -1).
+    optional_attendees: New list of optional attendee email addresses, merged with
+        attendees.
+    categories: Outlook category names to tag the event with.
+    allow_new_time_proposals: Whether attendees may propose new times (default true).
+    response_requested: Whether attendees are asked to respond (default true).
+${USER_ARGS_DOC}`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
         subject: external_exports.string().default(""),
@@ -35172,20 +35358,32 @@ Args:
         body: external_exports.string().default(""),
         location: external_exports.string().default(""),
         attendees: ATTENDEES_SCHEMA,
-        is_html: external_exports.boolean().default(false)
+        is_html: external_exports.boolean().default(false),
+        is_all_day: external_exports.boolean().default(false),
+        show_as: SHOW_AS_SCHEMA,
+        sensitivity: SENSITIVITY_SCHEMA,
+        reminder_minutes_before_start: REMINDER_SCHEMA,
+        optional_attendees: ATTENDEES_SCHEMA,
+        categories: CATEGORIES_SCHEMA,
+        allow_new_time_proposals: external_exports.boolean().default(true),
+        response_requested: external_exports.boolean().default(true),
+        user: USER_SCHEMA
       }
     },
-    async ({
-      event_id,
-      subject,
-      start_datetime,
-      end_datetime,
-      timezone,
-      body,
-      location,
-      attendees,
-      is_html
-    }) => {
+    async (args) => {
+      const {
+        event_id,
+        subject,
+        start_datetime,
+        end_datetime,
+        timezone,
+        body,
+        location,
+        attendees,
+        is_html,
+        optional_attendees,
+        user
+      } = args;
       const updates = {};
       if (subject !== "") {
         updates.subject = subject;
@@ -35205,13 +35403,12 @@ Args:
       if (location !== "") {
         updates.location = { displayName: location };
       }
-      if (attendees !== null && attendees.length > 0) {
-        updates.attendees = attendees.map((address) => ({
-          emailAddress: { address },
-          type: "required"
-        }));
+      const updatedAttendees = attendeeList(attendees, optional_attendees);
+      if (updatedAttendees.length > 0) {
+        updates.attendees = updatedAttendees;
       }
-      const result = await dependencies.graphClient.patch(eventPath(event_id), updates);
+      applyRichEventFields(updates, args);
+      const result = await dependencies.graphClient.patch(eventPath(user, event_id), updates);
       return successResponse(requireGraphObject(result));
     }
   );
@@ -35222,13 +35419,15 @@ Args:
       description: `Delete a calendar event.
 
 Args:
-    event_id: The event ID to delete.`,
+    event_id: The event ID to delete.
+${USER_ARGS_DOC}`,
       inputSchema: {
-        event_id: RESOURCE_ID_SCHEMA
+        event_id: RESOURCE_ID_SCHEMA,
+        user: USER_SCHEMA
       }
     },
-    async ({ event_id }) => {
-      await dependencies.graphClient.delete(eventPath(event_id));
+    async ({ event_id, user }) => {
+      await dependencies.graphClient.delete(eventPath(user, event_id));
       return successResponse({ status: "Event deleted" });
     }
   );
@@ -35242,22 +35441,24 @@ Args:
     event_id: The event ID to respond to.
     response: Response type: "accept", "decline", or "tentative".
     comment: Optional comment to send with the response.
-    send_response: Whether to send the response to the organizer (default true).`,
+    send_response: Whether to send the response to the organizer (default true).
+${USER_ARGS_DOC}`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
         response: external_exports.enum(["accept", "decline", "tentative"]),
         comment: external_exports.string().default(""),
-        send_response: external_exports.boolean().default(true)
+        send_response: external_exports.boolean().default(true),
+        user: USER_SCHEMA
       }
     },
-    async ({ event_id, response, comment, send_response }) => {
+    async ({ event_id, response, comment, send_response, user }) => {
       const { action, status } = EVENT_RESPONSE_ACTIONS[response];
       const payload = {};
       if (comment !== "") {
         payload.comment = comment;
       }
       payload.sendResponse = send_response;
-      await dependencies.graphClient.post(`${eventPath(event_id)}/${action}`, payload);
+      await dependencies.graphClient.post(`${eventPath(user, event_id)}/${action}`, payload);
       return successResponse({ status });
     }
   );
@@ -35272,21 +35473,191 @@ Args:
     start_datetime: Start of the lookup window (ISO 8601, e.g. "2025-03-01T09:00:00").
     end_datetime: End of the lookup window (ISO 8601).
     timezone: Timezone for the window (default "UTC").
-    availability_view_interval: Availability view interval in minutes (default 30).`,
+    availability_view_interval: Availability view interval in minutes (default 30).
+${USER_ARGS_DOC}`,
       inputSchema: {
         schedules: external_exports.array(external_exports.string()),
         start_datetime: external_exports.string(),
         end_datetime: external_exports.string(),
         timezone: external_exports.string().default("UTC"),
-        availability_view_interval: external_exports.number().int().default(30)
+        availability_view_interval: external_exports.number().int().default(30),
+        user: USER_SCHEMA
       }
     },
-    async ({ schedules, start_datetime, end_datetime, timezone, availability_view_interval }) => {
-      const result = await dependencies.graphClient.post("/me/calendar/getSchedule", {
-        schedules,
-        startTime: { dateTime: start_datetime, timeZone: timezone },
-        endTime: { dateTime: end_datetime, timeZone: timezone },
-        availabilityViewInterval: availability_view_interval
+    async ({
+      schedules,
+      start_datetime,
+      end_datetime,
+      timezone,
+      availability_view_interval,
+      user
+    }) => {
+      const result = await dependencies.graphClient.post(
+        `${calendarRoot(user)}/calendar/getSchedule`,
+        {
+          schedules,
+          startTime: { dateTime: start_datetime, timeZone: timezone },
+          endTime: { dateTime: end_datetime, timeZone: timezone },
+          availabilityViewInterval: availability_view_interval
+        }
+      );
+      return successResponse(collectionValue(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_find_meeting_times",
+    {
+      description: `Suggest meeting times that work for the attendees.
+
+Graph scores candidate slots from the attendees' free/busy data, so use this to
+pick a time and graph_create_event to book it.
+
+Args:
+    attendees: Attendee email addresses to fit the meeting around.
+    duration_minutes: Meeting length in minutes (default 30).
+    start_datetime: Start of the search window (ISO 8601). Empty lets Graph choose.
+    end_datetime: End of the search window (ISO 8601). Empty lets Graph choose.
+        The window is only sent when both ends are supplied.
+    timezone: Timezone for the search window (default "UTC").
+    minimum_attendee_percentage: Minimum percentage of attendees that must be
+        free (default 100).
+    max_candidates: Maximum number of suggestions to return (default 10).
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        attendees: external_exports.array(external_exports.string()),
+        duration_minutes: external_exports.number().int().default(30),
+        start_datetime: external_exports.string().default(""),
+        end_datetime: external_exports.string().default(""),
+        timezone: external_exports.string().default("UTC"),
+        minimum_attendee_percentage: external_exports.number().default(100),
+        max_candidates: external_exports.number().int().default(10),
+        user: USER_SCHEMA
+      }
+    },
+    async ({
+      attendees,
+      duration_minutes,
+      start_datetime,
+      end_datetime,
+      timezone,
+      minimum_attendee_percentage,
+      max_candidates,
+      user
+    }) => {
+      const payload = {
+        attendees: attendees.map((address) => attendee(address, "required")),
+        meetingDuration: `PT${String(duration_minutes)}M`,
+        maxCandidates: max_candidates,
+        minimumAttendeePercentage: minimum_attendee_percentage,
+        isOrganizerOptional: false
+      };
+      if (start_datetime !== "" && end_datetime !== "") {
+        payload.timeConstraint = {
+          activityDomain: "work",
+          timeSlots: [
+            {
+              start: { dateTime: start_datetime, timeZone: timezone },
+              end: { dateTime: end_datetime, timeZone: timezone }
+            }
+          ]
+        };
+      }
+      const result = await dependencies.graphClient.post(
+        `${calendarRoot(user)}/findMeetingTimes`,
+        payload
+      );
+      return successResponse(requireGraphObject(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_cancel_event",
+    {
+      description: `Cancel a meeting you organize and notify the attendees.
+
+Unlike graph_delete_event, which removes the event without telling anyone,
+cancelling sends a cancellation notice to every attendee. Only the organizer can
+cancel a meeting; attendees should decline with graph_respond_to_event instead.
+
+Args:
+    event_id: The event ID to cancel.
+    comment: Optional note to include in the cancellation notice.
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        event_id: RESOURCE_ID_SCHEMA,
+        comment: external_exports.string().default(""),
+        user: USER_SCHEMA
+      }
+    },
+    async ({ event_id, comment, user }) => {
+      const payload = {};
+      if (comment !== "") {
+        payload.comment = comment;
+      }
+      await dependencies.graphClient.post(`${eventPath(user, event_id)}/cancel`, payload);
+      return successResponse({ status: "Event cancelled" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_event_instances",
+    {
+      description: `List the occurrences of a recurring event in a date range.
+
+Pass the series master event ID from graph_list_events, then use the returned
+occurrence IDs to update or cancel a single occurrence.
+
+Args:
+    event_id: The recurring series master event ID.
+    start_datetime: Start of the occurrence window (ISO 8601). Required by Graph.
+    end_datetime: End of the occurrence window (ISO 8601). Required by Graph.
+    top: Maximum number of occurrences to return (default 50, maximum 50).
+${USER_ARGS_DOC}`,
+      inputSchema: {
+        event_id: RESOURCE_ID_SCHEMA,
+        start_datetime: external_exports.string(),
+        end_datetime: external_exports.string(),
+        top: TOP_SCHEMA,
+        user: USER_SCHEMA
+      }
+    },
+    async ({ event_id, start_datetime, end_datetime, top, user }) => {
+      if (start_datetime === "" || end_datetime === "") {
+        return successResponse({ error: MISSING_INSTANCE_WINDOW_MESSAGE }, "error");
+      }
+      const result = await dependencies.graphClient.get(`${eventPath(user, event_id)}/instances`, {
+        startDateTime: start_datetime,
+        endDateTime: end_datetime,
+        $select: EVENT_LIST_FIELDS,
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_rooms",
+    {
+      description: `List bookable meeting rooms in the tenant.
+
+Requires the delegated Place.Read.All permission. Use the returned email
+addresses with graph_get_schedule to check availability, or as attendees on
+graph_create_event to book a room.
+
+Args:
+    room_list: Room list email address to list rooms from. Empty lists every
+        room in the tenant.
+    top: Maximum number of rooms to return (default 50, maximum 50).`,
+      inputSchema: {
+        room_list: OPTIONAL_RESOURCE_ID_SCHEMA,
+        top: TOP_SCHEMA
+      }
+    },
+    async ({ room_list, top }) => {
+      const path2 = room_list === "" ? "/places/microsoft.graph.room" : `/places/${encodeURIComponent(room_list)}/microsoft.graph.roomlist/rooms`;
+      const result = await dependencies.graphClient.get(path2, {
+        $top: String(Math.min(top, 50))
       });
       return successResponse(collectionValue(result));
     }
@@ -35334,18 +35705,16 @@ function buildRichTextBody(message, isHtml = true, options = {}) {
     content: message
   };
 }
-function buildChatMessagePayload(message, isHtml = true, mentions = void 0) {
-  const payload = {
-    body: buildRichTextBody(message, isHtml)
-  };
+function buildChatMessagePayload(message, isHtml = true, mentions = void 0, options = {}) {
   const normalizedMentions = normalizeMentions(mentions);
-  if (normalizedMentions.length > 0) {
-    return {
-      ...payload,
-      mentions: normalizedMentions
-    };
-  }
-  return payload;
+  const importance = options.importance ?? "normal";
+  const subject = options.subject ?? "";
+  return {
+    body: buildRichTextBody(message, isHtml),
+    ...normalizedMentions.length > 0 ? { mentions: normalizedMentions } : {},
+    ...importance === "normal" ? {} : { importance },
+    ...subject === "" ? {} : { subject }
+  };
 }
 
 // src/tools/chat-tools.ts
@@ -35353,7 +35722,14 @@ var INVALID_GRAPH_RESPONSE_MESSAGE2 = "Invalid Microsoft Graph response.";
 var RESOURCE_ID_SCHEMA2 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
+var OPTIONAL_RESOURCE_ID_SCHEMA2 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
+  message: "Resource IDs must not be '.' or '..'."
+}).default("");
 var TOP_SCHEMA2 = external_exports.number().int().default(50);
+var IMPORTANCE_SCHEMA = external_exports.enum(["normal", "high", "urgent"]).default("normal");
+var SUBJECT_SCHEMA = external_exports.string().default("");
+var REACTION_TARGET_REQUIRED_MESSAGE = "Provide either chat_id or both team_id and channel_id.";
+var REACTION_TARGET_CONFLICT_MESSAGE = "Provide either chat_id or team_id with channel_id, not both.";
 var MENTIONS_SCHEMA = external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())).nullable().optional().default(null);
 function isNonArrayObject2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -35370,11 +35746,28 @@ function collectionValue2(response) {
   }
   return response.value;
 }
+function requireGraphObject2(response) {
+  if (!isNonArrayObject2(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
+  }
+  return response;
+}
 function requireGraphObjectWithId2(response) {
   if (!isNonArrayObject2(response) || typeof response.id !== "string" || response.id.length === 0) {
     throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
   }
   return response;
+}
+function chatPath(chatId) {
+  return `/chats/${encodeURIComponent(chatId)}`;
+}
+function chatMessagePath(chatId, messageId) {
+  return `${chatPath(chatId)}/messages/${encodeURIComponent(messageId)}`;
+}
+function channelMessagePath(teamId, channelId, messageId) {
+  return `/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(
+    channelId
+  )}/messages/${encodeURIComponent(messageId)}`;
 }
 function memberBinding(member) {
   const encodedMember = encodeURIComponent(member).replace(/%40/gi, "@").replaceAll("'", "''");
@@ -35420,19 +35813,32 @@ function registerChatTools(server, dependencies) {
     server,
     "graph_send_chat_message",
     {
-      description: "Send a message to a chat.",
+      description: `Send a message to a chat.
+
+Args:
+    chat_id: The chat ID.
+    message: Message body. When \`is_html\` is true, send explicit HTML;
+        markdown is not converted.
+    is_html: Whether the body is HTML content (default: True). Use false for
+        plain text.
+    mentions: Optional mentions. Each entry accepts raw Graph mention fields or
+        a simplified shape with \`name\`/\`display_name\` and \`user_id\`.
+    importance: Message importance: "normal", "high", or "urgent"
+        (default "normal").
+    subject: Optional subject line. Empty omits it.`,
       inputSchema: {
         chat_id: RESOURCE_ID_SCHEMA2,
         message: external_exports.string(),
         is_html: external_exports.boolean().default(true),
-        mentions: MENTIONS_SCHEMA
+        mentions: MENTIONS_SCHEMA,
+        importance: IMPORTANCE_SCHEMA,
+        subject: SUBJECT_SCHEMA
       }
     },
-    async ({ chat_id, message, is_html, mentions }) => {
-      const encodedChatId = encodeURIComponent(chat_id);
+    async ({ chat_id, message, is_html, mentions, importance, subject }) => {
       const result = await dependencies.graphClient.post(
-        `/chats/${encodedChatId}/messages`,
-        buildChatMessagePayload(message, is_html, mentions)
+        `${chatPath(chat_id)}/messages`,
+        buildChatMessagePayload(message, is_html, mentions, { importance, subject })
       );
       return successResponse(result);
     }
@@ -35487,36 +35893,249 @@ function registerChatTools(server, dependencies) {
       return successResponse(collectionValue2(result));
     }
   );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_chat",
+    {
+      description: `Get a single chat, including its members.
+
+Args:
+    chat_id: The chat ID.`,
+      inputSchema: {
+        chat_id: RESOURCE_ID_SCHEMA2
+      }
+    },
+    async ({ chat_id }) => {
+      const result = await dependencies.graphClient.get(chatPath(chat_id), {
+        $select: CHAT_FIELDS,
+        $expand: "members"
+      });
+      return successResponse(requireGraphObject2(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_update_chat_topic",
+    {
+      description: `Rename a chat by setting its topic.
+
+Only group chats have a topic; Graph rejects this for one-on-one chats.
+
+Args:
+    chat_id: The chat ID.
+    topic: New topic for the chat.`,
+      inputSchema: {
+        chat_id: RESOURCE_ID_SCHEMA2,
+        topic: external_exports.string()
+      }
+    },
+    async ({ chat_id, topic }) => {
+      await dependencies.graphClient.patch(chatPath(chat_id), { topic });
+      return successResponse({ status: "Chat topic updated", topic });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_add_chat_member",
+    {
+      description: `Add a user to a group chat.
+
+Requires the delegated ChatMember.ReadWrite permission.
+
+Args:
+    chat_id: The chat ID.
+    user_id: User ID or user principal name to add.
+    share_history_from: ISO 8601 timestamp (e.g. "2026-07-14T12:00:00Z") to
+        share chat history from. Empty shares no history.`,
+      inputSchema: {
+        chat_id: RESOURCE_ID_SCHEMA2,
+        user_id: RESOURCE_ID_SCHEMA2,
+        share_history_from: external_exports.string().default("")
+      }
+    },
+    async ({ chat_id, user_id, share_history_from }) => {
+      const body = {
+        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+        roles: ["owner"],
+        "user@odata.bind": memberBinding(user_id)
+      };
+      if (share_history_from !== "") {
+        body.visibleHistoryStartDateTime = share_history_from;
+      }
+      await dependencies.graphClient.post(`${chatPath(chat_id)}/members`, body);
+      return successResponse({ status: "Chat member added", user_id });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_remove_chat_member",
+    {
+      description: `Remove a member from a group chat.
+
+Requires the delegated ChatMember.ReadWrite permission.
+
+Args:
+    chat_id: The chat ID.
+    membership_id: The membership ID (from graph_list_chat_members).`,
+      inputSchema: {
+        chat_id: RESOURCE_ID_SCHEMA2,
+        membership_id: RESOURCE_ID_SCHEMA2
+      }
+    },
+    async ({ chat_id, membership_id }) => {
+      await dependencies.graphClient.delete(
+        `${chatPath(chat_id)}/members/${encodeURIComponent(membership_id)}`
+      );
+      return successResponse({ status: "Chat member removed", membership_id });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_mark_chat_read",
+    {
+      description: `Mark a chat as read or unread for a user.
+
+Args:
+    chat_id: The chat ID.
+    user_id: The user ID to mark the chat for.
+    is_read: Whether the chat is read (default true). Use false to mark it
+        unread.`,
+      inputSchema: {
+        chat_id: RESOURCE_ID_SCHEMA2,
+        user_id: RESOURCE_ID_SCHEMA2,
+        is_read: external_exports.boolean().default(true)
+      }
+    },
+    async ({ chat_id, user_id, is_read }) => {
+      const action = is_read ? "markChatReadForUser" : "markChatUnreadForUser";
+      await dependencies.graphClient.post(`${chatPath(chat_id)}/${action}`, {
+        user: { id: user_id }
+      });
+      return successResponse({ status: is_read ? "Chat marked read" : "Chat marked unread" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_update_chat_message",
+    {
+      description: `Edit the body of a chat message.
+
+You can only edit messages you sent.
+
+Args:
+    chat_id: The chat ID.
+    message_id: The message ID to edit.
+    message: New message body. When \`is_html\` is true, send explicit HTML;
+        markdown is not converted.
+    is_html: Whether the body is HTML content (default: True). Use false for
+        plain text.`,
+      inputSchema: {
+        chat_id: RESOURCE_ID_SCHEMA2,
+        message_id: RESOURCE_ID_SCHEMA2,
+        message: external_exports.string(),
+        is_html: external_exports.boolean().default(true)
+      }
+    },
+    async ({ chat_id, message_id, message, is_html }) => {
+      await dependencies.graphClient.patch(chatMessagePath(chat_id, message_id), {
+        body: buildRichTextBody(message, is_html)
+      });
+      return successResponse({ status: "Message updated", message_id });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_chat_message",
+    {
+      description: `Soft delete a chat message, or restore one with \`restore\`.
+
+Graph only exposes this action under /users/{user_id}, so the user ID is
+required. There is no hard delete, so a deleted message stays recoverable.
+
+Args:
+    chat_id: The chat ID.
+    message_id: The message ID to delete.
+    user_id: The user ID that sent the message.
+    restore: Whether to restore a previously deleted message (default false).`,
+      inputSchema: {
+        chat_id: RESOURCE_ID_SCHEMA2,
+        message_id: RESOURCE_ID_SCHEMA2,
+        user_id: RESOURCE_ID_SCHEMA2,
+        restore: external_exports.boolean().default(false)
+      }
+    },
+    async ({ chat_id, message_id, user_id, restore }) => {
+      const action = restore ? "undoSoftDelete" : "softDelete";
+      await dependencies.graphClient.post(
+        `/users/${encodeURIComponent(user_id)}${chatMessagePath(chat_id, message_id)}/${action}`
+      );
+      return successResponse({
+        status: restore ? "Message restored" : "Message deleted",
+        message_id
+      });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_react_to_message",
+    {
+      description: `Set or remove an emoji reaction on a chat or channel message.
+
+Supply either \`chat_id\` for a chat message or both \`team_id\` and
+\`channel_id\` for a channel message, never both.
+
+Args:
+    message_id: The message ID to react to.
+    chat_id: Chat ID for a chat message. Empty when targeting a channel.
+    team_id: Team ID for a channel message. Empty when targeting a chat.
+    channel_id: Channel ID for a channel message. Empty when targeting a chat.
+    reaction: Reaction type (default "like"). Common: like, heart, laugh,
+        surprised, sad, angry.
+    remove: Whether to remove the reaction instead of setting it
+        (default false).`,
+      inputSchema: {
+        message_id: RESOURCE_ID_SCHEMA2,
+        chat_id: OPTIONAL_RESOURCE_ID_SCHEMA2,
+        team_id: OPTIONAL_RESOURCE_ID_SCHEMA2,
+        channel_id: OPTIONAL_RESOURCE_ID_SCHEMA2,
+        reaction: external_exports.string().default("like"),
+        remove: external_exports.boolean().default(false)
+      }
+    },
+    async ({ message_id, chat_id, team_id, channel_id, reaction, remove }) => {
+      const hasChat = chat_id !== "";
+      const hasChannel = team_id !== "" && channel_id !== "";
+      if (hasChat && (team_id !== "" || channel_id !== "")) {
+        return successResponse({ error: REACTION_TARGET_CONFLICT_MESSAGE }, "error");
+      }
+      if (!hasChat && !hasChannel) {
+        return successResponse({ error: REACTION_TARGET_REQUIRED_MESSAGE }, "error");
+      }
+      const action = remove ? "unsetReaction" : "setReaction";
+      const basePath = hasChat ? chatMessagePath(chat_id, message_id) : channelMessagePath(team_id, channel_id, message_id);
+      await dependencies.graphClient.post(`${basePath}/${action}`, {
+        reactionType: reaction
+      });
+      return successResponse({
+        status: remove ? "Reaction removed" : "Reaction set",
+        reaction
+      });
+    }
+  );
 }
 
-// src/tools/files-tools.ts
-var DRIVE_ITEM_FIELDS = "id,name,size,createdDateTime,lastModifiedDateTime,file,folder,webUrl,parentReference";
+// src/tools/contacts-tools.ts
 var INVALID_GRAPH_RESPONSE_MESSAGE3 = "Invalid Microsoft Graph response.";
-var INVALID_BASE64_MESSAGE = "Invalid base64 content.";
-var FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
-var MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
-var MAX_STANDARD_BASE64_LENGTH = 4 * Math.ceil(MAX_UPLOAD_BYTES / 3);
-var TEXT_MIME_PREFIXES = [
-  "text/",
-  "application/json",
-  "application/xml",
-  "application/javascript",
-  "application/csv"
-];
+var MISSING_CONTACT_UPDATE_MESSAGE = "At least one contact field is required.";
+var PERSON_FIELDS = "id,displayName,scoredEmailAddresses,jobTitle,companyName,personType";
+var CONTACT_FIELDS = "id,displayName,emailAddresses,mobilePhone,businessPhones,companyName,jobTitle";
 var RESOURCE_ID_SCHEMA3 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
-var OPTIONAL_RESOURCE_ID_SCHEMA2 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
+var OPTIONAL_RESOURCE_ID_SCHEMA3 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
   message: "Resource IDs must not be '.' or '..'."
 }).default("");
 var TOP_SCHEMA3 = external_exports.number().int().default(25);
-var FILE_PATH_SCHEMA = external_exports.string().refine(isSafeDestinationPath, {
-  message: "File path must be relative and contain no empty, '.' or '..' segments."
-});
-var FOLDER_NAME_SCHEMA = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
-  message: "Folder names must not be empty, '.' or '..'."
-});
-var MISSING_MOVE_TARGET_MESSAGE = "At least one of new_parent_folder_id or new_name is required.";
 function isNonArrayObject3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -35532,15 +36151,254 @@ function collectionValue3(response) {
   }
   return response.value;
 }
-function requireGraphObject2(response) {
+function requireGraphObject3(response) {
   if (!isNonArrayObject3(response)) {
     throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
   }
   return response;
 }
+function contactName(givenName, surname) {
+  return [givenName, surname].filter((part) => part !== "").join(" ");
+}
+function contactPayload(fields) {
+  const payload = {};
+  if (fields.given_name !== "") {
+    payload.givenName = fields.given_name;
+  }
+  if (fields.surname !== "") {
+    payload.surname = fields.surname;
+  }
+  if (fields.email !== "") {
+    payload.emailAddresses = [
+      {
+        address: fields.email,
+        name: contactName(fields.given_name, fields.surname)
+      }
+    ];
+  }
+  if (fields.mobile_phone !== "") {
+    payload.mobilePhone = fields.mobile_phone;
+  }
+  if (fields.company_name !== "") {
+    payload.companyName = fields.company_name;
+  }
+  if (fields.job_title !== "") {
+    payload.jobTitle = fields.job_title;
+  }
+  return payload;
+}
+function registerContactsTools(server, dependencies) {
+  registerAuthenticatedTool(
+    server,
+    "graph_search_people",
+    {
+      description: `Search people the user works with, ranked by relevance.
+
+Covers colleagues, saved contacts, and external people the user has mailed,
+so prefer this over graph_search_users when looking someone up by name.
+\`$search\` on /me/people only works for the signed-in user. Requires the
+People.Read permission.
+
+Args:
+    query: Name, email address, or partial text to look up.
+    top: Maximum number of people to return (default 10, maximum 50).`,
+      inputSchema: {
+        query: external_exports.string(),
+        top: external_exports.number().int().default(10)
+      }
+    },
+    async ({ query, top }) => {
+      const escapedQuery = query.replaceAll('"', '""');
+      const result = await dependencies.graphClient.get("/me/people", {
+        $search: `"${escapedQuery}"`,
+        $select: PERSON_FIELDS,
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue3(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_contacts",
+    {
+      description: `List the user's saved Outlook contacts.
+
+Args:
+    top: Maximum number of contacts to return (default 25, maximum 50).
+    folder_id: Contact folder ID. Empty lists the default contacts folder.`,
+      inputSchema: {
+        top: TOP_SCHEMA3,
+        folder_id: OPTIONAL_RESOURCE_ID_SCHEMA3
+      }
+    },
+    async ({ top, folder_id }) => {
+      const path2 = folder_id === "" ? "/me/contacts" : `/me/contactFolders/${encodeURIComponent(folder_id)}/contacts`;
+      const result = await dependencies.graphClient.get(path2, {
+        $select: CONTACT_FIELDS,
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue3(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_create_contact",
+    {
+      description: `Create an Outlook contact. Requires the Contacts.ReadWrite permission.
+
+Empty fields are omitted from the created contact.
+
+Args:
+    given_name: First name of the contact.
+    surname: Last name of the contact.
+    email: Primary email address.
+    mobile_phone: Mobile phone number.
+    company_name: Company the contact works for.
+    job_title: Job title of the contact.`,
+      inputSchema: {
+        given_name: external_exports.string(),
+        surname: external_exports.string().default(""),
+        email: external_exports.string().default(""),
+        mobile_phone: external_exports.string().default(""),
+        company_name: external_exports.string().default(""),
+        job_title: external_exports.string().default("")
+      }
+    },
+    async (fields) => {
+      const result = await dependencies.graphClient.post("/me/contacts", contactPayload(fields));
+      return successResponse(requireGraphObject3(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_update_contact",
+    {
+      description: `Update an Outlook contact. Only the supplied fields are changed.
+
+Args:
+    contact_id: The contact ID to update.
+    given_name: New first name.
+    surname: New last name.
+    email: New primary email address.
+    mobile_phone: New mobile phone number.
+    company_name: New company name.
+    job_title: New job title.`,
+      inputSchema: {
+        contact_id: RESOURCE_ID_SCHEMA3,
+        given_name: external_exports.string().default(""),
+        surname: external_exports.string().default(""),
+        email: external_exports.string().default(""),
+        mobile_phone: external_exports.string().default(""),
+        company_name: external_exports.string().default(""),
+        job_title: external_exports.string().default("")
+      }
+    },
+    async ({ contact_id, ...fields }) => {
+      const updates = contactPayload(fields);
+      if (Object.keys(updates).length === 0) {
+        return successResponse({ error: MISSING_CONTACT_UPDATE_MESSAGE }, "error");
+      }
+      const result = await dependencies.graphClient.patch(
+        `/me/contacts/${encodeURIComponent(contact_id)}`,
+        updates
+      );
+      return successResponse(requireGraphObject3(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_contact",
+    {
+      description: `Delete an Outlook contact.
+
+Args:
+    contact_id: The contact ID to delete.`,
+      inputSchema: {
+        contact_id: RESOURCE_ID_SCHEMA3
+      }
+    },
+    async ({ contact_id }) => {
+      await dependencies.graphClient.delete(`/me/contacts/${encodeURIComponent(contact_id)}`);
+      return successResponse({ status: "Contact deleted" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_contact_folders",
+    {
+      description: `List contact folders.
+
+Use the returned folder IDs with graph_list_contacts.
+
+Args:
+    top: Maximum number of folders to return (default 25, maximum 50).`,
+      inputSchema: {
+        top: TOP_SCHEMA3
+      }
+    },
+    async ({ top }) => {
+      const result = await dependencies.graphClient.get("/me/contactFolders", {
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue3(result));
+    }
+  );
+}
+
+// src/tools/files-tools.ts
+var DRIVE_ITEM_FIELDS = "id,name,size,createdDateTime,lastModifiedDateTime,file,folder,webUrl,parentReference";
+var INVALID_GRAPH_RESPONSE_MESSAGE4 = "Invalid Microsoft Graph response.";
+var INVALID_BASE64_MESSAGE = "Invalid base64 content.";
+var FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
+var MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+var MAX_STANDARD_BASE64_LENGTH = 4 * Math.ceil(MAX_UPLOAD_BYTES / 3);
+var TEXT_MIME_PREFIXES = [
+  "text/",
+  "application/json",
+  "application/xml",
+  "application/javascript",
+  "application/csv"
+];
+var RESOURCE_ID_SCHEMA4 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
+  message: "Resource IDs must not be empty, '.' or '..'."
+});
+var OPTIONAL_RESOURCE_ID_SCHEMA4 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
+  message: "Resource IDs must not be '.' or '..'."
+}).default("");
+var TOP_SCHEMA4 = external_exports.number().int().default(25);
+var FILE_PATH_SCHEMA = external_exports.string().refine(isSafeDestinationPath, {
+  message: "File path must be relative and contain no empty, '.' or '..' segments."
+});
+var FOLDER_NAME_SCHEMA = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
+  message: "Folder names must not be empty, '.' or '..'."
+});
+var MISSING_MOVE_TARGET_MESSAGE = "At least one of new_parent_folder_id or new_name is required.";
+var MISSING_VALUES_MESSAGE = "values must contain at least one row.";
+var DRIVE_ID_ARGS_DOC = `    drive_id: Drive ID to act on. Empty targets your own OneDrive.`;
+function isNonArrayObject4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function collectionValue4(response) {
+  if (!isNonArrayObject4(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+  }
+  if (!Object.hasOwn(response, "value")) {
+    return [];
+  }
+  if (!Array.isArray(response.value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+  }
+  return response.value;
+}
+function requireGraphObject4(response) {
+  if (!isNonArrayObject4(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+  }
+  return response;
+}
 function requireGraphString(response) {
   if (typeof response !== "string") {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
   }
   return response;
 }
@@ -35548,14 +36406,14 @@ function mimeTypeFrom(metadata) {
   if (!Object.hasOwn(metadata, "file")) {
     return "";
   }
-  if (!isNonArrayObject3(metadata.file)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
+  if (!isNonArrayObject4(metadata.file)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
   }
   if (!Object.hasOwn(metadata.file, "mimeType")) {
     return "";
   }
   if (typeof metadata.file.mimeType !== "string") {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
   }
   return metadata.file.mimeType;
 }
@@ -35601,6 +36459,22 @@ function decodeStrictBase64(contentBase64) {
   }
   return new Uint8Array(decoded);
 }
+function driveRoot(driveId) {
+  return driveId === "" ? "/me/drive" : `/drives/${encodeURIComponent(driveId)}`;
+}
+function driveItemPath(driveId, itemId) {
+  return `${driveRoot(driveId)}/items/${encodeURIComponent(itemId)}`;
+}
+function worksheetPath(driveId, itemId, worksheet) {
+  return `${driveItemPath(driveId, itemId)}/workbook/worksheets/${encodeURIComponent(worksheet)}`;
+}
+function encodeSharingUrl(shareUrl) {
+  const base643 = Buffer.from(shareUrl, "utf8").toString("base64");
+  return `u!${base643.replaceAll("/", "_").replaceAll("+", "-").replace(/=+$/, "")}`;
+}
+function escapedRangeAddress(address) {
+  return address.replaceAll("'", "''");
+}
 function registerFilesTools(server, dependencies) {
   registerAuthenticatedTool(
     server,
@@ -35612,8 +36486,8 @@ Args:
     folder_id: Folder ID to list contents of. Empty for root folder.
     top: Maximum number of items to return (default 25).`,
       inputSchema: {
-        folder_id: OPTIONAL_RESOURCE_ID_SCHEMA2,
-        top: TOP_SCHEMA3
+        folder_id: OPTIONAL_RESOURCE_ID_SCHEMA4,
+        top: TOP_SCHEMA4
       }
     },
     async ({ folder_id, top }) => {
@@ -35622,7 +36496,7 @@ Args:
         $select: DRIVE_ITEM_FIELDS,
         $top: String(Math.min(top, 50))
       });
-      return successResponse(collectionValue3(result));
+      return successResponse(collectionValue4(result));
     }
   );
   registerAuthenticatedTool(
@@ -35636,7 +36510,7 @@ Args:
     top: Maximum number of results (default 25).`,
       inputSchema: {
         query: external_exports.string(),
-        top: TOP_SCHEMA3
+        top: TOP_SCHEMA4
       }
     },
     async ({ query, top }) => {
@@ -35647,7 +36521,7 @@ Args:
           $top: String(Math.min(top, 25))
         }
       );
-      return successResponse(collectionValue3(result));
+      return successResponse(collectionValue4(result));
     }
   );
   registerAuthenticatedTool(
@@ -35663,12 +36537,12 @@ temporary download URL instead.
 Args:
     file_id: The file ID (from graph_list_files or graph_search_files).`,
       inputSchema: {
-        file_id: RESOURCE_ID_SCHEMA3
+        file_id: RESOURCE_ID_SCHEMA4
       }
     },
     async ({ file_id }) => {
       const path2 = `/me/drive/items/${encodeURIComponent(file_id)}`;
-      const metadata = requireGraphObject2(
+      const metadata = requireGraphObject4(
         await dependencies.graphClient.get(path2, { $select: FILE_METADATA_FIELDS })
       );
       const mimeType = mimeTypeFrom(metadata);
@@ -35718,7 +36592,7 @@ Args:
         void 0,
         { "Content-Type": "application/octet-stream" }
       );
-      return successResponse(requireGraphObject2(result));
+      return successResponse(requireGraphObject4(result));
     }
   );
   registerAuthenticatedTool(
@@ -35732,7 +36606,7 @@ Args:
     share_type: Permission type: "view", "edit", or "embed" (default "view").
     scope: Share scope: "anonymous", "organization", or "users" (default "organization").`,
       inputSchema: {
-        file_id: RESOURCE_ID_SCHEMA3,
+        file_id: RESOURCE_ID_SCHEMA4,
         share_type: external_exports.string().default("view"),
         scope: external_exports.string().default("organization")
       }
@@ -35742,7 +36616,7 @@ Args:
         `/me/drive/items/${encodeURIComponent(file_id)}/createLink`,
         { type: share_type, scope }
       );
-      return successResponse(requireGraphObject2(result));
+      return successResponse(requireGraphObject4(result));
     }
   );
   registerAuthenticatedTool(
@@ -35756,7 +36630,7 @@ Args:
     parent_folder_id: Parent folder ID. Empty for the drive root.`,
       inputSchema: {
         folder_name: FOLDER_NAME_SCHEMA,
-        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA2
+        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA4
       }
     },
     async ({ folder_name, parent_folder_id }) => {
@@ -35766,7 +36640,7 @@ Args:
         folder: {},
         "@microsoft.graph.conflictBehavior": "rename"
       });
-      return successResponse(requireGraphObject2(result));
+      return successResponse(requireGraphObject4(result));
     }
   );
   registerAuthenticatedTool(
@@ -35780,7 +36654,7 @@ The item is moved to the OneDrive recycle bin.
 Args:
     item_id: The file or folder ID to delete.`,
       inputSchema: {
-        item_id: RESOURCE_ID_SCHEMA3
+        item_id: RESOURCE_ID_SCHEMA4
       }
     },
     async ({ item_id }) => {
@@ -35801,8 +36675,8 @@ Args:
     new_parent_folder_id: Destination folder ID. Empty to keep the current parent.
     new_name: New name for the item. Empty to keep the current name.`,
       inputSchema: {
-        item_id: RESOURCE_ID_SCHEMA3,
-        new_parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA2,
+        item_id: RESOURCE_ID_SCHEMA4,
+        new_parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA4,
         new_name: external_exports.string().default("")
       }
     },
@@ -35821,7 +36695,7 @@ Args:
         `/me/drive/items/${encodeURIComponent(item_id)}`,
         updates
       );
-      return successResponse(requireGraphObject2(result));
+      return successResponse(requireGraphObject4(result));
     }
   );
   registerAuthenticatedTool(
@@ -35835,31 +36709,390 @@ Only $top is passed because sharedWithMe does not support $select reliably.
 Args:
     top: Maximum number of items to return (default 25).`,
       inputSchema: {
-        top: TOP_SCHEMA3
+        top: TOP_SCHEMA4
       }
     },
     async ({ top }) => {
       const result = await dependencies.graphClient.get("/me/drive/sharedWithMe", {
         $top: String(Math.min(top, 50))
       });
-      return successResponse(collectionValue3(result));
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_copy_file",
+    {
+      description: `Copy a file or folder in OneDrive.
+
+The copy is asynchronous: Graph returns 202 with a monitor URL rather than the
+finished item, so the new item may not exist yet when this call returns.
+
+Args:
+    item_id: The file or folder ID to copy.
+    destination_folder_id: Destination folder ID. Empty to copy into the current parent.
+    new_name: Name for the copy. Empty to keep the current name.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA4,
+        destination_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA4,
+        new_name: external_exports.string().default(""),
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ item_id, destination_folder_id, new_name, drive_id }) => {
+      const body = {};
+      if (new_name !== "") {
+        body.name = new_name;
+      }
+      if (destination_folder_id !== "") {
+        body.parentReference = { id: destination_folder_id };
+      }
+      await dependencies.graphClient.post(`${driveItemPath(drive_id, item_id)}/copy`, body);
+      return successResponse({ status: "Copy accepted" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_file_permissions",
+    {
+      description: `List who currently has access to a file or folder.
+
+Args:
+    item_id: The file or folder ID.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA4,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ item_id, drive_id }) => {
+      const result = await dependencies.graphClient.get(
+        `${driveItemPath(drive_id, item_id)}/permissions`
+      );
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_file_permission",
+    {
+      description: `Revoke a sharing link or a person's access to a file or folder.
+
+Args:
+    item_id: The file or folder ID.
+    permission_id: The permission ID (from graph_list_file_permissions).
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA4,
+        permission_id: RESOURCE_ID_SCHEMA4,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ item_id, permission_id, drive_id }) => {
+      await dependencies.graphClient.delete(
+        `${driveItemPath(drive_id, item_id)}/permissions/${encodeURIComponent(permission_id)}`
+      );
+      return successResponse({ status: "Permission deleted" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_invite_to_file",
+    {
+      description: `Invite people to a file or folder by email.
+
+Args:
+    item_id: The file or folder ID to share.
+    emails: Email addresses of the people to invite.
+    role: Access to grant: "read" or "write" (default "read").
+    send_email: Whether Graph should email the invitation (default false).
+    message: Optional message to include with the invitation.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA4,
+        emails: external_exports.array(external_exports.string()),
+        role: external_exports.enum(["read", "write"]).default("read"),
+        send_email: external_exports.boolean().default(false),
+        message: external_exports.string().default(""),
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ item_id, emails, role, send_email, message, drive_id }) => {
+      const body = {
+        recipients: emails.map((email3) => ({ email: email3 })),
+        roles: [role],
+        requireSignIn: true,
+        sendInvitation: send_email
+      };
+      if (message !== "") {
+        body.message = message;
+      }
+      const result = await dependencies.graphClient.post(
+        `${driveItemPath(drive_id, item_id)}/invite`,
+        body
+      );
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_file_versions",
+    {
+      description: `List the stored versions of a file.
+
+Args:
+    item_id: The file ID.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA4,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ item_id, drive_id }) => {
+      const result = await dependencies.graphClient.get(
+        `${driveItemPath(drive_id, item_id)}/versions`
+      );
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_restore_file_version",
+    {
+      description: `Restore a file to an earlier version.
+
+Args:
+    item_id: The file ID.
+    version_id: The version ID (from graph_list_file_versions).
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA4,
+        version_id: RESOURCE_ID_SCHEMA4,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ item_id, version_id, drive_id }) => {
+      await dependencies.graphClient.post(
+        `${driveItemPath(drive_id, item_id)}/versions/${encodeURIComponent(
+          version_id
+        )}/restoreVersion`
+      );
+      return successResponse({ status: "Version restored" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_recent_files",
+    {
+      description: `List what the user worked on recently across their OneDrive.
+
+Args:
+    top: Maximum number of items to return (default 25, maximum 50).`,
+      inputSchema: {
+        top: TOP_SCHEMA4
+      }
+    },
+    async ({ top }) => {
+      const result = await dependencies.graphClient.get("/me/drive/recent", {
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_drives",
+    {
+      description: `List the drives the user can reach, including their OneDrive and followed document libraries.`,
+      inputSchema: {}
+    },
+    async () => {
+      const result = await dependencies.graphClient.get("/me/drives", {
+        $select: "id,name,driveType,owner,quota"
+      });
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_resolve_share_link",
+    {
+      description: `Resolve a sharing link to the file or folder it points to.
+
+Args:
+    share_url: The sharing URL to resolve.`,
+      inputSchema: {
+        share_url: external_exports.string()
+      }
+    },
+    async ({ share_url }) => {
+      const result = await dependencies.graphClient.get(
+        `/shares/${encodeSharingUrl(share_url)}/driveItem`,
+        { $select: DRIVE_ITEM_FIELDS }
+      );
+      return successResponse(requireGraphObject4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_search_sites",
+    {
+      description: `Search SharePoint sites by keyword.
+
+Needs the Sites.Read.All permission, which requires admin consent. Listing every
+site without a search term is application-only, so a query is always sent.
+
+Args:
+    query: Search query string.
+    top: Maximum number of results (default 25, maximum 50).`,
+      inputSchema: {
+        query: external_exports.string(),
+        top: TOP_SCHEMA4
+      }
+    },
+    async ({ query, top }) => {
+      const result = await dependencies.graphClient.get("/sites", {
+        search: query,
+        $select: "id,name,displayName,webUrl",
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_site_drives",
+    {
+      description: `List the document libraries of a SharePoint site.
+
+Args:
+    site_id: The SharePoint site ID (from graph_search_sites).`,
+      inputSchema: {
+        site_id: RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ site_id }) => {
+      const result = await dependencies.graphClient.get(
+        `/sites/${encodeURIComponent(site_id)}/drives`,
+        { $select: "id,name,driveType,webUrl" }
+      );
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_worksheets",
+    {
+      description: `List the worksheets in an Excel workbook.
+
+Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx files.
+
+Args:
+    item_id: The workbook file ID.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA4,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ item_id, drive_id }) => {
+      const result = await dependencies.graphClient.get(
+        `${driveItemPath(drive_id, item_id)}/workbook/worksheets`,
+        { $select: "id,name,position,visibility" }
+      );
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_worksheet_range",
+    {
+      description: `Read cell values from a worksheet range.
+
+The response \`values\` array holds the cell values, one inner array per row.
+Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx files.
+
+Args:
+    item_id: The workbook file ID.
+    worksheet: Worksheet ID or name.
+    address: Range address (e.g. "A1:D10"). Empty reads the used range.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA4,
+        worksheet: RESOURCE_ID_SCHEMA4,
+        address: external_exports.string().default(""),
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ item_id, worksheet, address, drive_id }) => {
+      const base = worksheetPath(drive_id, item_id, worksheet);
+      const path2 = address === "" ? `${base}/usedRange` : `${base}/range(address='${escapedRangeAddress(address)}')`;
+      const result = await dependencies.graphClient.get(path2);
+      return successResponse(requireGraphObject4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_update_worksheet_range",
+    {
+      description: `Write cell values to a worksheet range.
+
+Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx files.
+
+Args:
+    item_id: The workbook file ID.
+    worksheet: Worksheet ID or name.
+    address: Range address to write (e.g. "A1:D10"). Its shape must match values.
+    values: Cell values as a 2D array, one inner array per row. Cells may be
+        strings, numbers, booleans, or null.
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA4,
+        worksheet: RESOURCE_ID_SCHEMA4,
+        address: external_exports.string(),
+        values: external_exports.array(external_exports.array(external_exports.union([external_exports.string(), external_exports.number(), external_exports.boolean(), external_exports.null()]))),
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ item_id, worksheet, address, values, drive_id }) => {
+      if (values.length === 0) {
+        return successResponse({ error: MISSING_VALUES_MESSAGE }, "error");
+      }
+      const result = await dependencies.graphClient.patch(
+        `${worksheetPath(drive_id, item_id, worksheet)}/range(address='${escapedRangeAddress(
+          address
+        )}')`,
+        { values }
+      );
+      return successResponse(requireGraphObject4(result));
     }
   );
 }
 
 // src/tools/mail-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE4 = "Invalid Microsoft Graph response.";
-var RESOURCE_ID_SCHEMA4 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
+var INVALID_GRAPH_RESPONSE_MESSAGE5 = "Invalid Microsoft Graph response.";
+var RESOURCE_ID_SCHEMA5 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
 var LIST_TOP_SCHEMA = external_exports.number().int().default(25);
 var RECIPIENTS_SCHEMA = external_exports.array(external_exports.string());
 var CC_SCHEMA = external_exports.array(external_exports.string()).nullable().optional().default(null);
-var OPTIONAL_RESOURCE_ID_SCHEMA3 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
+var OPTIONAL_RESOURCE_ID_SCHEMA5 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
   message: "Resource IDs must not be '.' or '..'."
 }).default("");
+var MAILBOX_SCHEMA = OPTIONAL_RESOURCE_ID_SCHEMA5;
+var MAILBOX_ARGS_DOC = `    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`;
 var SKIP_SCHEMA = external_exports.number().int().min(0).default(0);
-var MESSAGE_IDS_SCHEMA = external_exports.array(RESOURCE_ID_SCHEMA4).min(1).max(50);
+var MESSAGE_IDS_SCHEMA = external_exports.array(RESOURCE_ID_SCHEMA5).min(1).max(50);
+var IMPORTANCE_SCHEMA2 = external_exports.enum(["low", "normal", "high"]);
+var INCOMPLETE_MESSAGE_RULE_MESSAGE = "A message rule needs at least one condition and at least one action.";
+var DEFAULT_MAIL_TIPS_OPTIONS = [
+  "automaticReplies",
+  "mailboxFullStatus",
+  "recipientScope"
+];
 var FLAG_STATUS_SCHEMA = external_exports.enum(["notFlagged", "flagged", "complete"]);
 var MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
 var MAX_ATTACHMENT_BASE64_LENGTH = 4 * Math.ceil(MAX_ATTACHMENT_BYTES / 3);
@@ -35869,38 +37102,79 @@ var RICH_TEXT_OPTIONS = {
   htmlContentType: "HTML",
   textContentType: "Text"
 };
-function isNonArrayObject4(value) {
+function isNonArrayObject5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function collectionValue4(response) {
-  if (!isNonArrayObject4(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+function collectionValue5(response) {
+  if (!isNonArrayObject5(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   return response.value;
 }
-function requireGraphObject3(response) {
-  if (!isNonArrayObject4(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+function requireGraphObject5(response) {
+  if (!isNonArrayObject5(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   return response;
 }
 function requireGraphObjectWithId3(response) {
-  if (!isNonArrayObject4(response) || typeof response.id !== "string" || response.id.length === 0) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+  if (!isNonArrayObject5(response) || typeof response.id !== "string" || response.id.length === 0) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   return response;
 }
-function messagePath(messageId) {
-  return `/me/messages/${encodeURIComponent(messageId)}`;
+function deltaToken(response) {
+  if (!isNonArrayObject5(response)) {
+    return "";
+  }
+  const deltaLink = response["@odata.deltaLink"];
+  if (typeof deltaLink !== "string") {
+    return "";
+  }
+  const queryStart = deltaLink.indexOf("?");
+  if (queryStart === -1) {
+    return "";
+  }
+  return new URLSearchParams(deltaLink.slice(queryStart + 1)).get("$deltatoken") ?? "";
+}
+function mailboxRoot(mailbox) {
+  return mailbox === "" ? "/me" : `/users/${encodeURIComponent(mailbox)}`;
+}
+function messagePath(mailbox, messageId) {
+  return `${mailboxRoot(mailbox)}/messages/${encodeURIComponent(messageId)}`;
+}
+function mailFolderPath(mailbox, parentFolderId) {
+  const root = `${mailboxRoot(mailbox)}/mailFolders`;
+  return parentFolderId === "" ? root : `${root}/${encodeURIComponent(parentFolderId)}/childFolders`;
 }
 function recipient(address) {
   return { emailAddress: { address } };
+}
+function composeMessage(input) {
+  const message = {
+    subject: input.subject,
+    body: buildRichTextBody(input.body, input.is_html, RICH_TEXT_OPTIONS),
+    toRecipients: input.to.map(recipient)
+  };
+  if (input.cc !== null && input.cc.length > 0) {
+    message.ccRecipients = input.cc.map(recipient);
+  }
+  if (input.bcc !== null && input.bcc.length > 0) {
+    message.bccRecipients = input.bcc.map(recipient);
+  }
+  if (input.reply_to !== null && input.reply_to.length > 0) {
+    message.replyTo = input.reply_to.map(recipient);
+  }
+  if (input.importance !== "normal") {
+    message.importance = input.importance;
+  }
+  return message;
 }
 function failureMessage(error51) {
   return error51 instanceof Error ? error51.message : "Unknown error.";
@@ -35942,15 +37216,17 @@ Args:
     skip: Number of emails to skip before returning results (default 0). Graph
         returns at most 50 per call, so page through larger folders by raising
         skip in steps of top.
-    filter_query: Optional OData filter (e.g. "isRead eq false").`,
+    filter_query: Optional OData filter (e.g. "isRead eq false").
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        folder: RESOURCE_ID_SCHEMA4.default("inbox"),
+        folder: RESOURCE_ID_SCHEMA5.default("inbox"),
         top: LIST_TOP_SCHEMA,
         skip: SKIP_SCHEMA,
-        filter_query: external_exports.string().default("")
+        filter_query: external_exports.string().default(""),
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ folder, top, skip, filter_query }) => {
+    async ({ folder, top, skip, filter_query, mailbox }) => {
       const params = {
         $select: MAIL_LIST_FIELDS,
         $top: String(Math.min(top, 50)),
@@ -35963,10 +37239,10 @@ Args:
         params.$filter = filter_query;
       }
       const result = await dependencies.graphClient.get(
-        `/me/mailFolders/${encodeURIComponent(folder)}/messages`,
+        `${mailboxRoot(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages`,
         params
       );
-      return successResponse(collectionValue4(result));
+      return successResponse(collectionValue5(result));
     }
   );
   registerAuthenticatedTool(
@@ -35976,14 +37252,16 @@ Args:
       description: `Read full details of a specific email.
 
 Args:
-    message_id: The email message ID.`,
+    message_id: The email message ID.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        message_id: RESOURCE_ID_SCHEMA4
+        message_id: RESOURCE_ID_SCHEMA5,
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_id }) => {
-      const result = await dependencies.graphClient.get(messagePath(message_id));
-      return successResponse(requireGraphObject3(result));
+    async ({ message_id, mailbox }) => {
+      const result = await dependencies.graphClient.get(messagePath(mailbox, message_id));
+      return successResponse(requireGraphObject5(result));
     }
   );
   registerAuthenticatedTool(
@@ -35994,20 +37272,22 @@ Args:
 
 Args:
     query: Search query string.
-    top: Maximum number of results (default 25).`,
+    top: Maximum number of results (default 25).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         query: external_exports.string(),
-        top: LIST_TOP_SCHEMA
+        top: LIST_TOP_SCHEMA,
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ query, top }) => {
+    async ({ query, top, mailbox }) => {
       const escapedQuery = query.replaceAll('"', '""');
-      const result = await dependencies.graphClient.get("/me/messages", {
+      const result = await dependencies.graphClient.get(`${mailboxRoot(mailbox)}/messages`, {
         $search: `"${escapedQuery}"`,
         $select: MAIL_LIST_FIELDS,
         $top: String(Math.min(top, 50))
       });
-      return successResponse(collectionValue4(result));
+      return successResponse(collectionValue5(result));
     }
   );
   registerAuthenticatedTool(
@@ -36016,34 +37296,61 @@ Args:
     {
       description: `Send an email.
 
+A non-empty \`mailbox\` posts to /users/{mailbox}/sendMail, so the message is
+sent as that shared mailbox and needs the delegated Mail.Send.Shared permission.
+
 Args:
     to: List of recipient email addresses.
     subject: Email subject.
     body: Email body content. When \`is_html\` is true, send explicit
         HTML; markdown is not converted.
     cc: Optional list of CC email addresses.
+    bcc: Optional list of BCC email addresses.
     is_html: Whether to send the email body as HTML content (default:
-        True). Use false for plain text.`,
+        True). Use false for plain text.
+    importance: Message importance: "low", "normal", or "high" (default
+        "normal").
+    reply_to: Optional list of addresses that replies should be sent to.
+    save_to_sent_items: Whether to keep a copy in Sent Items (default true).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         to: RECIPIENTS_SCHEMA,
         subject: external_exports.string(),
         body: external_exports.string(),
         cc: CC_SCHEMA,
-        is_html: external_exports.boolean().default(true)
+        bcc: CC_SCHEMA,
+        is_html: external_exports.boolean().default(true),
+        importance: IMPORTANCE_SCHEMA2.default("normal"),
+        reply_to: CC_SCHEMA,
+        save_to_sent_items: external_exports.boolean().default(true),
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ to, subject, body, cc, is_html }) => {
-      const message = {
+    async ({
+      to,
+      subject,
+      body,
+      cc,
+      bcc,
+      is_html,
+      importance,
+      reply_to,
+      save_to_sent_items,
+      mailbox
+    }) => {
+      const message = composeMessage({
+        to,
         subject,
-        body: buildRichTextBody(body, is_html, RICH_TEXT_OPTIONS),
-        toRecipients: to.map(recipient)
-      };
-      if (cc !== null && cc.length > 0) {
-        message.ccRecipients = cc.map(recipient);
-      }
-      await dependencies.graphClient.post("/me/sendMail", {
+        body,
+        cc,
+        bcc,
+        is_html,
+        importance,
+        reply_to
+      });
+      await dependencies.graphClient.post(`${mailboxRoot(mailbox)}/sendMail`, {
         message,
-        saveToSentItems: true
+        saveToSentItems: save_to_sent_items
       });
       return successResponse({ status: "Email sent" });
     }
@@ -36060,24 +37367,32 @@ Args:
         HTML; markdown is not converted.
     reply_all: Whether to reply to all recipients (default: reply to sender only).
     is_html: Whether to send the reply body as HTML content (default:
-        True). Use false for plain text.`,
+        True). Use false for plain text.
+    as_draft: Whether to leave the reply as an unsent draft (default false).
+        Returns the created draft instead of a sent status.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        message_id: RESOURCE_ID_SCHEMA4,
+        message_id: RESOURCE_ID_SCHEMA5,
         body: external_exports.string(),
         reply_all: external_exports.boolean().default(false),
-        is_html: external_exports.boolean().default(true)
+        is_html: external_exports.boolean().default(true),
+        as_draft: external_exports.boolean().default(false),
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_id, body, reply_all, is_html }) => {
+    async ({ message_id, body, reply_all, is_html, as_draft, mailbox }) => {
       const action = reply_all ? "createReplyAll" : "createReply";
       const draftResult = await dependencies.graphClient.post(
-        `${messagePath(message_id)}/${action}`
+        `${messagePath(mailbox, message_id)}/${action}`
       );
       const draft = requireGraphObjectWithId3(draftResult);
-      const draftPath = messagePath(draft.id);
+      const draftPath = messagePath(mailbox, draft.id);
       await dependencies.graphClient.patch(draftPath, {
         body: buildRichTextBody(body, is_html, RICH_TEXT_OPTIONS)
       });
+      if (as_draft) {
+        return successResponse(draft);
+      }
       await dependencies.graphClient.post(`${draftPath}/send`);
       return successResponse({ status: reply_all ? "Reply all sent" : "Reply sent" });
     }
@@ -36089,16 +37404,21 @@ Args:
       description: `List attachments on an email message.
 
 Args:
-    message_id: The email message ID.`,
+    message_id: The email message ID.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        message_id: RESOURCE_ID_SCHEMA4
+        message_id: RESOURCE_ID_SCHEMA5,
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_id }) => {
-      const result = await dependencies.graphClient.get(`${messagePath(message_id)}/attachments`, {
-        $select: "id,name,contentType,size,isInline"
-      });
-      return successResponse(collectionValue4(result));
+    async ({ message_id, mailbox }) => {
+      const result = await dependencies.graphClient.get(
+        `${messagePath(mailbox, message_id)}/attachments`,
+        {
+          $select: "id,name,contentType,size,isInline"
+        }
+      );
+      return successResponse(collectionValue5(result));
     }
   );
   registerAuthenticatedTool(
@@ -36112,17 +37432,19 @@ The attachment content is returned as base64-encoded data in the
 
 Args:
     message_id: The email message ID.
-    attachment_id: The attachment ID (from graph_list_mail_attachments).`,
+    attachment_id: The attachment ID (from graph_list_mail_attachments).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        message_id: RESOURCE_ID_SCHEMA4,
-        attachment_id: RESOURCE_ID_SCHEMA4
+        message_id: RESOURCE_ID_SCHEMA5,
+        attachment_id: RESOURCE_ID_SCHEMA5,
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_id, attachment_id }) => {
+    async ({ message_id, attachment_id, mailbox }) => {
       const result = await dependencies.graphClient.get(
-        `${messagePath(message_id)}/attachments/${encodeURIComponent(attachment_id)}`
+        `${messagePath(mailbox, message_id)}/attachments/${encodeURIComponent(attachment_id)}`
       );
-      return successResponse(requireGraphObject3(result));
+      return successResponse(requireGraphObject5(result));
     }
   );
   registerAuthenticatedTool(
@@ -36137,15 +37459,17 @@ partial failure still tells you what moved.
 Args:
     message_ids: Message IDs to move (1-50 per call).
     destination_folder: Destination folder ID or well-known name
-        (default "archive"). Common: archive, inbox, deleteditems, junkemail.`,
+        (default "archive"). Common: archive, inbox, deleteditems, junkemail.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_ids: MESSAGE_IDS_SCHEMA,
-        destination_folder: RESOURCE_ID_SCHEMA4.default("archive")
+        destination_folder: RESOURCE_ID_SCHEMA5.default("archive"),
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_ids, destination_folder }) => {
+    async ({ message_ids, destination_folder, mailbox }) => {
       const outcome = await applyToMessages(message_ids, async (messageId) => {
-        await dependencies.graphClient.post(`${messagePath(messageId)}/move`, {
+        await dependencies.graphClient.post(`${messagePath(mailbox, messageId)}/move`, {
           destinationId: destination_folder
         });
       });
@@ -36164,14 +37488,16 @@ Args:
 Processes each message in order and reports per-message outcomes.
 
 Args:
-    message_ids: Message IDs to delete (1-50 per call).`,
+    message_ids: Message IDs to delete (1-50 per call).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        message_ids: MESSAGE_IDS_SCHEMA
+        message_ids: MESSAGE_IDS_SCHEMA,
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_ids }) => {
+    async ({ message_ids, mailbox }) => {
       const outcome = await applyToMessages(message_ids, async (messageId) => {
-        await dependencies.graphClient.delete(messagePath(messageId));
+        await dependencies.graphClient.delete(messagePath(mailbox, messageId));
       });
       return batchResponse(outcome, { action: "deleted" });
     }
@@ -36187,15 +37513,17 @@ Processes each message in order and reports per-message outcomes.
 Args:
     message_ids: Message IDs to update (1-50 per call).
     is_read: Whether the messages are read (default true). Use false to
-        mark them unread.`,
+        mark them unread.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_ids: MESSAGE_IDS_SCHEMA,
-        is_read: external_exports.boolean().default(true)
+        is_read: external_exports.boolean().default(true),
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_ids, is_read }) => {
+    async ({ message_ids, is_read, mailbox }) => {
       const outcome = await applyToMessages(message_ids, async (messageId) => {
-        await dependencies.graphClient.patch(messagePath(messageId), { isRead: is_read });
+        await dependencies.graphClient.patch(messagePath(mailbox, messageId), { isRead: is_read });
       });
       return batchResponse(outcome, { action: is_read ? "marked read" : "marked unread" });
     }
@@ -36211,15 +37539,17 @@ Processes each message in order and reports per-message outcomes.
 Args:
     message_ids: Message IDs to update (1-50 per call).
     flag_status: Flag state: "notFlagged", "flagged", or "complete"
-        (default "flagged").`,
+        (default "flagged").
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_ids: MESSAGE_IDS_SCHEMA,
-        flag_status: FLAG_STATUS_SCHEMA.default("flagged")
+        flag_status: FLAG_STATUS_SCHEMA.default("flagged"),
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_ids, flag_status }) => {
+    async ({ message_ids, flag_status, mailbox }) => {
       const outcome = await applyToMessages(message_ids, async (messageId) => {
-        await dependencies.graphClient.patch(messagePath(messageId), {
+        await dependencies.graphClient.patch(messagePath(mailbox, messageId), {
           flag: { flagStatus: flag_status }
         });
       });
@@ -36236,19 +37566,20 @@ Use the returned folder IDs with graph_list_mail or graph_move_mail.
 
 Args:
     parent_folder_id: Parent folder ID. Empty lists top-level folders.
-    top: Maximum number of folders to return (default 25).`,
+    top: Maximum number of folders to return (default 25).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA3,
-        top: LIST_TOP_SCHEMA
+        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA5,
+        top: LIST_TOP_SCHEMA,
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ parent_folder_id, top }) => {
-      const path2 = parent_folder_id === "" ? "/me/mailFolders" : `/me/mailFolders/${encodeURIComponent(parent_folder_id)}/childFolders`;
-      const result = await dependencies.graphClient.get(path2, {
+    async ({ parent_folder_id, top, mailbox }) => {
+      const result = await dependencies.graphClient.get(mailFolderPath(mailbox, parent_folder_id), {
         $select: MAIL_FOLDER_FIELDS,
         $top: String(Math.min(top, 50))
       });
-      return successResponse(collectionValue4(result));
+      return successResponse(collectionValue5(result));
     }
   );
   registerAuthenticatedTool(
@@ -36259,15 +37590,19 @@ Args:
 
 Args:
     display_name: Name of the new folder.
-    parent_folder_id: Parent folder ID. Empty creates a top-level folder.`,
+    parent_folder_id: Parent folder ID. Empty creates a top-level folder.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        display_name: RESOURCE_ID_SCHEMA4,
-        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA3
+        display_name: RESOURCE_ID_SCHEMA5,
+        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA5,
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ display_name, parent_folder_id }) => {
-      const path2 = parent_folder_id === "" ? "/me/mailFolders" : `/me/mailFolders/${encodeURIComponent(parent_folder_id)}/childFolders`;
-      const result = await dependencies.graphClient.post(path2, { displayName: display_name });
+    async ({ display_name, parent_folder_id, mailbox }) => {
+      const result = await dependencies.graphClient.post(
+        mailFolderPath(mailbox, parent_folder_id),
+        { displayName: display_name }
+      );
       return successResponse(requireGraphObjectWithId3(result));
     }
   );
@@ -36283,25 +37618,33 @@ Args:
     comment: Optional note to add above the forwarded message. When
         \`is_html\` is true, send explicit HTML; markdown is not converted.
     is_html: Whether the comment is HTML content (default: True). Use
-        false for plain text.`,
+        false for plain text.
+    as_draft: Whether to leave the forward as an unsent draft (default false).
+        Returns the created draft instead of a sent status.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        message_id: RESOURCE_ID_SCHEMA4,
+        message_id: RESOURCE_ID_SCHEMA5,
         to: RECIPIENTS_SCHEMA,
         comment: external_exports.string().default(""),
-        is_html: external_exports.boolean().default(true)
+        is_html: external_exports.boolean().default(true),
+        as_draft: external_exports.boolean().default(false),
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_id, to, comment, is_html }) => {
+    async ({ message_id, to, comment, is_html, as_draft, mailbox }) => {
       const draftResult = await dependencies.graphClient.post(
-        `${messagePath(message_id)}/createForward`
+        `${messagePath(mailbox, message_id)}/createForward`
       );
       const draft = requireGraphObjectWithId3(draftResult);
-      const draftPath = messagePath(draft.id);
+      const draftPath = messagePath(mailbox, draft.id);
       const updates = { toRecipients: to.map(recipient) };
       if (comment !== "") {
         updates.body = buildRichTextBody(comment, is_html, RICH_TEXT_OPTIONS);
       }
       await dependencies.graphClient.patch(draftPath, updates);
+      if (as_draft) {
+        return successResponse(draft);
+      }
       await dependencies.graphClient.post(`${draftPath}/send`);
       return successResponse({ status: "Message forwarded" });
     }
@@ -36321,26 +37664,40 @@ Args:
     body: Email body content. When \`is_html\` is true, send explicit
         HTML; markdown is not converted.
     cc: Optional list of CC email addresses.
+    bcc: Optional list of BCC email addresses.
     is_html: Whether the body is HTML content (default: True). Use false
-        for plain text.`,
+        for plain text.
+    importance: Message importance: "low", "normal", or "high" (default
+        "normal").
+    reply_to: Optional list of addresses that replies should be sent to.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         to: RECIPIENTS_SCHEMA,
         subject: external_exports.string(),
         body: external_exports.string(),
         cc: CC_SCHEMA,
-        is_html: external_exports.boolean().default(true)
+        bcc: CC_SCHEMA,
+        is_html: external_exports.boolean().default(true),
+        importance: IMPORTANCE_SCHEMA2.default("normal"),
+        reply_to: CC_SCHEMA,
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ to, subject, body, cc, is_html }) => {
-      const message = {
+    async ({ to, subject, body, cc, bcc, is_html, importance, reply_to, mailbox }) => {
+      const message = composeMessage({
+        to,
         subject,
-        body: buildRichTextBody(body, is_html, RICH_TEXT_OPTIONS),
-        toRecipients: to.map(recipient)
-      };
-      if (cc !== null && cc.length > 0) {
-        message.ccRecipients = cc.map(recipient);
-      }
-      const result = await dependencies.graphClient.post("/me/messages", message);
+        body,
+        cc,
+        bcc,
+        is_html,
+        importance,
+        reply_to
+      });
+      const result = await dependencies.graphClient.post(
+        `${mailboxRoot(mailbox)}/messages`,
+        message
+      );
       return successResponse(requireGraphObjectWithId3(result));
     }
   );
@@ -36354,27 +37711,32 @@ Args:
     message_id: The draft message ID (from graph_create_mail_draft).
     file_name: File name to show on the attachment.
     content_base64: File content encoded as base64.
-    content_type: MIME type (default "application/octet-stream").`,
+    content_type: MIME type (default "application/octet-stream").
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        message_id: RESOURCE_ID_SCHEMA4,
-        file_name: RESOURCE_ID_SCHEMA4,
+        message_id: RESOURCE_ID_SCHEMA5,
+        file_name: RESOURCE_ID_SCHEMA5,
         content_base64: external_exports.string(),
-        content_type: external_exports.string().default("application/octet-stream")
+        content_type: external_exports.string().default("application/octet-stream"),
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_id, file_name, content_base64, content_type }) => {
+    async ({ message_id, file_name, content_base64, content_type, mailbox }) => {
       if (!/^[A-Za-z0-9+/]*={0,2}$/.test(content_base64) || content_base64.length % 4 !== 0) {
         return successResponse({ error: INVALID_ATTACHMENT_BASE64_MESSAGE }, "error");
       }
       if (content_base64.length > MAX_ATTACHMENT_BASE64_LENGTH) {
         return successResponse({ error: ATTACHMENT_TOO_LARGE_MESSAGE }, "error");
       }
-      const result = await dependencies.graphClient.post(`${messagePath(message_id)}/attachments`, {
-        "@odata.type": "#microsoft.graph.fileAttachment",
-        name: file_name,
-        contentType: content_type,
-        contentBytes: content_base64
-      });
+      const result = await dependencies.graphClient.post(
+        `${messagePath(mailbox, message_id)}/attachments`,
+        {
+          "@odata.type": "#microsoft.graph.fileAttachment",
+          name: file_name,
+          contentType: content_type,
+          contentBytes: content_base64
+        }
+      );
       return successResponse(requireGraphObjectWithId3(result));
     }
   );
@@ -36385,29 +37747,299 @@ Args:
       description: `Send an existing draft message.
 
 Args:
-    message_id: The draft message ID (from graph_create_mail_draft).`,
+    message_id: The draft message ID (from graph_create_mail_draft).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
-        message_id: RESOURCE_ID_SCHEMA4
+        message_id: RESOURCE_ID_SCHEMA5,
+        mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_id }) => {
-      await dependencies.graphClient.post(`${messagePath(message_id)}/send`);
+    async ({ message_id, mailbox }) => {
+      await dependencies.graphClient.post(`${messagePath(mailbox, message_id)}/send`);
       return successResponse({ status: "Draft sent" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_message_rules",
+    {
+      description: `List the inbox rules, including their conditions, actions, and order.
+
+Args:
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({ mailbox }) => {
+      const result = await dependencies.graphClient.get(
+        `${mailboxRoot(mailbox)}/mailFolders/inbox/messageRules`
+      );
+      return successResponse(collectionValue5(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_create_message_rule",
+    {
+      description: `Create an inbox rule that Exchange runs on incoming mail.
+
+At least one condition and at least one action are required; only the parts you
+supply are sent to Graph.
+
+Args:
+    display_name: Name of the rule.
+    sequence: Order in which the rule runs, lowest first (default 1).
+    from_addresses: Sender addresses the rule matches.
+    subject_contains: Strings the subject must contain.
+    body_contains: Strings the body must contain.
+    move_to_folder: Destination folder ID for matching messages.
+    mark_as_read: Whether matching messages are marked read (default false).
+    delete_message: Whether matching messages move to Deleted Items
+        (default false).
+    is_enabled: Whether the rule is active (default true).
+    stop_processing: Whether later rules are skipped once this rule matches
+        (default false).
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        display_name: RESOURCE_ID_SCHEMA5,
+        sequence: external_exports.number().int().default(1),
+        from_addresses: external_exports.array(external_exports.string()).default([]),
+        subject_contains: external_exports.array(external_exports.string()).default([]),
+        body_contains: external_exports.array(external_exports.string()).default([]),
+        move_to_folder: OPTIONAL_RESOURCE_ID_SCHEMA5,
+        mark_as_read: external_exports.boolean().default(false),
+        delete_message: external_exports.boolean().default(false),
+        is_enabled: external_exports.boolean().default(true),
+        stop_processing: external_exports.boolean().default(false),
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({
+      display_name,
+      sequence,
+      from_addresses,
+      subject_contains,
+      body_contains,
+      move_to_folder,
+      mark_as_read,
+      delete_message,
+      is_enabled,
+      stop_processing,
+      mailbox
+    }) => {
+      const conditions = {};
+      if (from_addresses.length > 0) {
+        conditions.fromAddresses = from_addresses.map(recipient);
+      }
+      if (subject_contains.length > 0) {
+        conditions.subjectContains = [...subject_contains];
+      }
+      if (body_contains.length > 0) {
+        conditions.bodyContains = [...body_contains];
+      }
+      const actions = {};
+      if (move_to_folder !== "") {
+        actions.moveToFolder = move_to_folder;
+      }
+      if (mark_as_read) {
+        actions.markAsRead = true;
+      }
+      if (delete_message) {
+        actions.delete = true;
+      }
+      if (stop_processing) {
+        actions.stopProcessingRules = true;
+      }
+      if (Object.keys(conditions).length === 0 || Object.keys(actions).length === 0) {
+        return successResponse({ error: INCOMPLETE_MESSAGE_RULE_MESSAGE }, "error");
+      }
+      const result = await dependencies.graphClient.post(
+        `${mailboxRoot(mailbox)}/mailFolders/inbox/messageRules`,
+        {
+          displayName: display_name,
+          sequence,
+          isEnabled: is_enabled,
+          conditions,
+          actions
+        }
+      );
+      return successResponse(requireGraphObjectWithId3(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_message_rule",
+    {
+      description: `Delete an inbox rule.
+
+Args:
+    rule_id: The rule ID (from graph_list_message_rules).
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        rule_id: RESOURCE_ID_SCHEMA5,
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({ rule_id, mailbox }) => {
+      await dependencies.graphClient.delete(
+        `${mailboxRoot(mailbox)}/mailFolders/inbox/messageRules/${encodeURIComponent(rule_id)}`
+      );
+      return successResponse({ status: "Message rule deleted" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_categorize_mail",
+    {
+      description: `Set the categories on messages, replacing the categories already set.
+
+Each category must match the display name of a master category, so create it
+with graph_create_master_category first. Processes each message in order and
+reports per-message outcomes.
+
+Args:
+    message_ids: Message IDs to update (1-50 per call).
+    categories: Category display names to apply. An empty list clears them.
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        message_ids: MESSAGE_IDS_SCHEMA,
+        categories: external_exports.array(external_exports.string()),
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({ message_ids, categories, mailbox }) => {
+      const outcome = await applyToMessages(message_ids, async (messageId) => {
+        await dependencies.graphClient.patch(messagePath(mailbox, messageId), {
+          categories: [...categories]
+        });
+      });
+      return batchResponse(outcome, { action: "categorized", categories: [...categories] });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_master_categories",
+    {
+      description: `List the master categories available for mail and events.
+
+Args:
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({ mailbox }) => {
+      const result = await dependencies.graphClient.get(
+        `${mailboxRoot(mailbox)}/outlook/masterCategories`
+      );
+      return successResponse(collectionValue5(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_create_master_category",
+    {
+      description: `Create a master category so it can be applied to mail and events.
+
+The displayName is immutable after creation: to rename a category, delete it and
+create a new one. Colors are the presets preset0 through preset24.
+
+Args:
+    display_name: Name of the new category.
+    color: Color preset, preset0 through preset24 (default "preset0").
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        display_name: RESOURCE_ID_SCHEMA5,
+        color: external_exports.string().default("preset0"),
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({ display_name, color, mailbox }) => {
+      const result = await dependencies.graphClient.post(
+        `${mailboxRoot(mailbox)}/outlook/masterCategories`,
+        { displayName: display_name, color }
+      );
+      return successResponse(requireGraphObjectWithId3(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_mail_tips",
+    {
+      description: `Get mail tips for recipients. Use this to check whether someone is out of office.
+
+Args:
+    email_addresses: Recipient addresses to look up.
+    options: Mail tips to request (default "automaticReplies",
+        "mailboxFullStatus", "recipientScope"). Other values: customMailTip,
+        deliveryRestriction, externalMemberCount, maxMessageSize,
+        moderationStatus, totalMemberCount.
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        email_addresses: external_exports.array(external_exports.string()),
+        options: external_exports.array(external_exports.string()).default([...DEFAULT_MAIL_TIPS_OPTIONS]),
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({ email_addresses, options, mailbox }) => {
+      const result = await dependencies.graphClient.post(`${mailboxRoot(mailbox)}/getMailTips`, {
+        emailAddresses: [...email_addresses],
+        mailTipsOptions: options.join(",")
+      });
+      return successResponse(collectionValue5(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_mail_delta",
+    {
+      description: `List the changes in a mail folder since a previous delta token.
+
+Call it once without delta_link to seed a token, then pass the returned
+delta_token to receive only what changed since, including read-state changes and
+removals. Graph tracks one folder at a time and rejects $search on a delta
+query, so page through the folder you care about.
+
+Args:
+    folder: Mail folder name or ID (default "inbox").
+    delta_link: Opaque delta token from a previous call. Empty starts a new
+        sync of the folder.
+    top: Maximum number of messages per page (default 50).
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        folder: RESOURCE_ID_SCHEMA5.default("inbox"),
+        delta_link: external_exports.string().default(""),
+        top: external_exports.number().int().default(50),
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({ folder, delta_link, top, mailbox }) => {
+      const params = delta_link === "" ? { $select: MAIL_LIST_FIELDS, $top: String(top) } : { $deltatoken: delta_link, $top: String(top) };
+      const result = await dependencies.graphClient.get(
+        `${mailboxRoot(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages/delta`,
+        params
+      );
+      return successResponse({ value: collectionValue5(result), delta_token: deltaToken(result) });
     }
   );
 }
 
 // src/tools/mailbox-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE5 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE6 = "Invalid Microsoft Graph response.";
 var MISSING_SCHEDULE_MESSAGE = 'start_datetime and end_datetime are required when status is "scheduled".';
+var MISSING_MAILBOX_SETTINGS_MESSAGE = "At least one mailbox setting is required.";
+var OPTIONAL_RESOURCE_ID_SCHEMA6 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
+  message: "Resource IDs must not be '.' or '..'."
+}).default("");
 var AUTOMATIC_REPLIES_STATUS_SCHEMA = external_exports.enum(["disabled", "alwaysEnabled", "scheduled"]);
 var EXTERNAL_AUDIENCE_SCHEMA = external_exports.enum(["none", "contactsOnly", "all"]);
-function isNonArrayObject5(value) {
+function isNonArrayObject6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function requireGraphObject4(response) {
-  if (!isNonArrayObject5(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
+function requireGraphObject6(response) {
+  if (!isNonArrayObject6(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
   }
   return response;
 }
@@ -36416,12 +38048,21 @@ function registerMailboxTools(server, dependencies) {
     server,
     "graph_get_mailbox_settings",
     {
-      description: `Get mailbox settings, including automatic replies, time zone, and working hours.`,
-      inputSchema: {}
+      description: `Get mailbox settings, including automatic replies, time zone, and working hours.
+
+Args:
+    user: Colleague's address or user ID whose settings to read. Empty targets
+        your own mailbox. Reading someone else needs delegate rights on that
+        mailbox plus the MailboxSettings.Read permission.`,
+      inputSchema: {
+        user: OPTIONAL_RESOURCE_ID_SCHEMA6
+      }
     },
-    async () => {
-      const result = await dependencies.graphClient.get("/me/mailboxSettings");
-      return successResponse(requireGraphObject4(result));
+    async ({ user }) => {
+      const result = await dependencies.graphClient.get(
+        user === "" ? "/me/mailboxSettings" : `/users/${encodeURIComponent(user)}/mailboxSettings`
+      );
+      return successResponse(requireGraphObject6(result));
     }
   );
   registerAuthenticatedTool(
@@ -36485,7 +38126,65 @@ Args:
       const result = await dependencies.graphClient.patch("/me/mailboxSettings", {
         automaticRepliesSetting: setting
       });
-      return successResponse(requireGraphObject4(result));
+      return successResponse(requireGraphObject6(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_update_mailbox_settings",
+    {
+      description: `Update the mailbox time zone and working hours.
+
+Only the parts you supply are sent, so the rest of the mailbox settings stay as
+they are. This always targets your own mailbox: Graph exposes no shared variant
+of mailbox settings.
+
+Args:
+    time_zone: Mailbox time zone name (e.g. "Pacific Standard Time").
+    working_days: Working days, lowercase (e.g. ["monday", "tuesday"]).
+    working_hours_start: Start of the working day (e.g. "09:00:00").
+    working_hours_end: End of the working day (e.g. "17:00:00").
+    working_hours_timezone: Time zone name for the working hours.`,
+      inputSchema: {
+        time_zone: external_exports.string().default(""),
+        working_days: external_exports.array(external_exports.string()).default([]),
+        working_hours_start: external_exports.string().default(""),
+        working_hours_end: external_exports.string().default(""),
+        working_hours_timezone: external_exports.string().default("")
+      }
+    },
+    async ({
+      time_zone,
+      working_days,
+      working_hours_start,
+      working_hours_end,
+      working_hours_timezone
+    }) => {
+      const settings = {};
+      if (time_zone !== "") {
+        settings.timeZone = time_zone;
+      }
+      const workingHours = {};
+      if (working_days.length > 0) {
+        workingHours.daysOfWeek = [...working_days];
+      }
+      if (working_hours_start !== "") {
+        workingHours.startTime = working_hours_start;
+      }
+      if (working_hours_end !== "") {
+        workingHours.endTime = working_hours_end;
+      }
+      if (working_hours_timezone !== "") {
+        workingHours.timeZone = { name: working_hours_timezone };
+      }
+      if (Object.keys(workingHours).length > 0) {
+        settings.workingHours = workingHours;
+      }
+      if (Object.keys(settings).length === 0) {
+        return successResponse({ error: MISSING_MAILBOX_SETTINGS_MESSAGE }, "error");
+      }
+      const result = await dependencies.graphClient.patch("/me/mailboxSettings", settings);
+      return successResponse(requireGraphObject6(result));
     }
   );
 }
@@ -36494,35 +38193,36 @@ function escapeAsPlainText(value) {
 }
 
 // src/tools/meeting-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE6 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE7 = "Invalid Microsoft Graph response.";
 var MEETING_METADATA_FIELDS = "id,meetingId,createdDateTime,meetingOrganizer";
-var RESOURCE_ID_SCHEMA5 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
+var ALLOWED_PRESENTERS_SCHEMA = external_exports.enum(["everyone", "organization", "roleIsPresenter", "organizer"]).default("everyone");
+var RESOURCE_ID_SCHEMA6 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
-function isNonArrayObject6(value) {
+function isNonArrayObject7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function collectionValue5(response) {
-  if (!isNonArrayObject6(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+function collectionValue6(response) {
+  if (!isNonArrayObject7(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
   }
   return response.value;
 }
-function requireGraphObject5(response) {
-  if (!isNonArrayObject6(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+function requireGraphObject7(response) {
+  if (!isNonArrayObject7(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
   }
   return response;
 }
 function requireGraphString2(response) {
   if (typeof response !== "string") {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
   }
   return response;
 }
@@ -36550,7 +38250,7 @@ Args:
         params.$filter = `JoinWebUrl eq '${encodeURIComponent(escapedJoinUrl)}'`;
       }
       const result = await dependencies.graphClient.get("/me/onlineMeetings", params);
-      return successResponse(collectionValue5(result));
+      return successResponse(collectionValue6(result));
     }
   );
   registerAuthenticatedTool(
@@ -36562,14 +38262,14 @@ Args:
 Args:
     meeting_id: The online meeting ID (from graph_list_online_meetings).`,
       inputSchema: {
-        meeting_id: RESOURCE_ID_SCHEMA5
+        meeting_id: RESOURCE_ID_SCHEMA6
       }
     },
     async ({ meeting_id }) => {
       const result = await dependencies.graphClient.get(`${meetingPath(meeting_id)}/transcripts`, {
         $select: MEETING_METADATA_FIELDS
       });
-      return successResponse(collectionValue5(result));
+      return successResponse(collectionValue6(result));
     }
   );
   registerAuthenticatedTool(
@@ -36585,8 +38285,8 @@ Args:
     meeting_id: The online meeting ID.
     transcript_id: The transcript ID (from graph_list_meeting_transcripts).`,
       inputSchema: {
-        meeting_id: RESOURCE_ID_SCHEMA5,
-        transcript_id: RESOURCE_ID_SCHEMA5
+        meeting_id: RESOURCE_ID_SCHEMA6,
+        transcript_id: RESOURCE_ID_SCHEMA6
       }
     },
     async ({ meeting_id, transcript_id }) => {
@@ -36606,14 +38306,14 @@ Args:
 Args:
     meeting_id: The online meeting ID (from graph_list_online_meetings).`,
       inputSchema: {
-        meeting_id: RESOURCE_ID_SCHEMA5
+        meeting_id: RESOURCE_ID_SCHEMA6
       }
     },
     async ({ meeting_id }) => {
       const result = await dependencies.graphClient.get(`${meetingPath(meeting_id)}/recordings`, {
         $select: MEETING_METADATA_FIELDS
       });
-      return successResponse(collectionValue5(result));
+      return successResponse(collectionValue6(result));
     }
   );
   registerAuthenticatedTool(
@@ -36629,15 +38329,111 @@ Args:
     meeting_id: The online meeting ID.
     recording_id: The recording ID (from graph_list_meeting_recordings).`,
       inputSchema: {
-        meeting_id: RESOURCE_ID_SCHEMA5,
-        recording_id: RESOURCE_ID_SCHEMA5
+        meeting_id: RESOURCE_ID_SCHEMA6,
+        recording_id: RESOURCE_ID_SCHEMA6
       }
     },
     async ({ meeting_id, recording_id }) => {
       const result = await dependencies.graphClient.get(
         `${meetingPath(meeting_id)}/recordings/${encodeURIComponent(recording_id)}`
       );
-      return successResponse(requireGraphObject5(result));
+      return successResponse(requireGraphObject7(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_create_online_meeting",
+    {
+      description: `Create a Teams online meeting and get its join link.
+
+The \`joinWebUrl\` field in the response is the link to share. This creates a
+meeting without a calendar event; use graph_create_event with
+is_online_meeting for a meeting that also appears on calendars. Needs the
+OnlineMeetings.ReadWrite permission.
+
+Args:
+    subject: Meeting subject.
+    start_datetime: Start time in ISO 8601 with an offset or Z
+        (e.g. "2026-03-01T10:00:00Z").
+    end_datetime: End time in ISO 8601 with an offset or Z.
+    attendees: Optional list of attendee email addresses or user IDs.
+    allowed_presenters: Who can present: "everyone", "organization",
+        "roleIsPresenter", or "organizer" (default "everyone").`,
+      inputSchema: {
+        subject: external_exports.string(),
+        start_datetime: external_exports.string(),
+        end_datetime: external_exports.string(),
+        attendees: external_exports.array(external_exports.string()).nullable().optional().default(null),
+        allowed_presenters: ALLOWED_PRESENTERS_SCHEMA
+      }
+    },
+    async ({ subject, start_datetime, end_datetime, attendees, allowed_presenters }) => {
+      const payload = {
+        subject,
+        startDateTime: start_datetime,
+        endDateTime: end_datetime
+      };
+      if (attendees !== null && attendees !== void 0 && attendees.length > 0) {
+        payload.participants = {
+          attendees: attendees.map((attendee2) => ({ upn: attendee2 }))
+        };
+      }
+      if (allowed_presenters !== "everyone") {
+        payload.allowedPresenters = allowed_presenters;
+      }
+      const result = await dependencies.graphClient.post("/me/onlineMeetings", payload);
+      return successResponse(requireGraphObject7(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_online_meeting",
+    {
+      description: `Get a single online meeting, including its join link and settings.
+
+Args:
+    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+      inputSchema: {
+        meeting_id: RESOURCE_ID_SCHEMA6
+      }
+    },
+    async ({ meeting_id }) => {
+      const result = await dependencies.graphClient.get(meetingPath(meeting_id));
+      return successResponse(requireGraphObject7(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_meeting_attendance",
+    {
+      description: `Get meeting attendance: who actually joined and for how long.
+
+Without report_id this lists the available attendance reports. With
+report_id it returns that report expanded with per-attendee join and leave
+times. Needs the OnlineMeetingArtifact.Read.All permission, which requires
+admin consent.
+
+Args:
+    meeting_id: The online meeting ID (from graph_list_online_meetings).
+    report_id: Attendance report ID. Empty lists the available reports.`,
+      inputSchema: {
+        meeting_id: RESOURCE_ID_SCHEMA6,
+        report_id: external_exports.string().refine((value) => value !== "." && value !== "..", {
+          message: "Resource IDs must not be '.' or '..'."
+        }).default("")
+      }
+    },
+    async ({ meeting_id, report_id }) => {
+      const reportsPath = `${meetingPath(meeting_id)}/attendanceReports`;
+      if (report_id === "") {
+        const result2 = await dependencies.graphClient.get(reportsPath);
+        return successResponse(collectionValue6(result2));
+      }
+      const result = await dependencies.graphClient.get(
+        `${reportsPath}/${encodeURIComponent(report_id)}`,
+        { $expand: "attendanceRecords" }
+      );
+      return successResponse(requireGraphObject7(result));
     }
   );
 }
@@ -36646,6 +38442,23 @@ Args:
 var USER_ID_SCHEMA = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "user_id must not be empty, '.' or '..'."
 });
+var USER_IDS_SCHEMA = external_exports.array(USER_ID_SCHEMA).min(1).max(650);
+var INVALID_GRAPH_RESPONSE_MESSAGE8 = "Invalid Microsoft Graph response.";
+function isNonArrayObject8(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function collectionValue7(response) {
+  if (!isNonArrayObject8(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
+  }
+  if (!Object.hasOwn(response, "value")) {
+    return [];
+  }
+  if (!Array.isArray(response.value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
+  }
+  return response.value;
+}
 function registerPresenceTools(server, dependencies) {
   registerAuthenticatedTool(
     server,
@@ -36699,6 +38512,86 @@ function registerPresenceTools(server, dependencies) {
       });
     }
   );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_presences_by_user_ids",
+    {
+      description: `Get presence for up to 650 users in one round trip.
+
+Use this instead of calling graph_get_user_presence once per person. Needs
+the Presence.Read.All permission.
+
+Args:
+    user_ids: User IDs to look up (1-650 per call).`,
+      inputSchema: {
+        user_ids: USER_IDS_SCHEMA
+      }
+    },
+    async ({ user_ids }) => {
+      const result = await dependencies.graphClient.post("/communications/getPresencesByUserId", {
+        ids: user_ids
+      });
+      return successResponse(collectionValue7(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_set_status_message",
+    {
+      description: `Set your Teams status message, the note shown under your name.
+
+This is separate from availability, which graph_set_my_presence controls.
+
+Args:
+    message: The status message text.
+    expiry_datetime: Optional expiry in ISO 8601
+        (e.g. "2026-03-01T17:00:00"). Empty means the message does not expire.
+    timezone: Timezone for expiry_datetime (default "UTC").`,
+      inputSchema: {
+        message: external_exports.string(),
+        expiry_datetime: external_exports.string().default(""),
+        timezone: external_exports.string().default("UTC")
+      }
+    },
+    async ({ message, expiry_datetime, timezone }) => {
+      const statusMessage = {
+        message: { content: message, contentType: "text" }
+      };
+      if (expiry_datetime !== "") {
+        statusMessage.expiryDateTime = { dateTime: expiry_datetime, timeZone: timezone };
+      }
+      await dependencies.graphClient.post("/me/presence/setStatusMessage", { statusMessage });
+      return successResponse({ status: "Status message updated" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_clear_my_presence",
+    {
+      description: `Clear your presence. This is how you undo graph_set_my_presence.
+
+graph_set_my_presence sets a preferred presence, so pass preferred=true to
+undo it and let Teams calculate your availability again.
+
+Args:
+    preferred: Whether to clear the preferred presence set by
+        graph_set_my_presence (default false clears only this app's session
+        presence).`,
+      inputSchema: {
+        preferred: external_exports.boolean().default(false)
+      }
+    },
+    async ({ preferred }) => {
+      if (preferred) {
+        await dependencies.graphClient.post("/me/presence/clearUserPreferredPresence", {});
+        return successResponse({ status: "Preferred presence cleared" });
+      }
+      await dependencies.graphClient.post("/me/presence/clearPresence", {
+        sessionId: "Graph-MCP"
+      });
+      return successResponse({ status: "Presence cleared" });
+    }
+  );
 }
 
 // src/tools/profile-tools.ts
@@ -36720,13 +38613,27 @@ function registerProfileTools(server, dependencies) {
 }
 
 // src/tools/search-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE7 = "Invalid Microsoft Graph response.";
-function isNonArrayObject7(value) {
+var INVALID_GRAPH_RESPONSE_MESSAGE9 = "Invalid Microsoft Graph response.";
+var INVALID_ENTITY_TYPE_COMBINATION_MESSAGE = "chatMessage cannot be combined with SharePoint entity types.";
+var SHAREPOINT_ENTITY_TYPES = /* @__PURE__ */ new Set(["drive", "driveItem", "site", "list", "listItem"]);
+var UNKNOWN_ENUM_ENTITY_TYPES = /* @__PURE__ */ new Set(["chatMessage", "person"]);
+var ENTITY_TYPE_SCHEMA = external_exports.enum([
+  "message",
+  "event",
+  "driveItem",
+  "drive",
+  "site",
+  "list",
+  "listItem",
+  "chatMessage",
+  "person"
+]);
+function isNonArrayObject9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function requireGraphObject6(value) {
-  if (!isNonArrayObject7(value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
+function requireGraphObject8(value) {
+  if (!isNonArrayObject9(value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
   }
   return value;
 }
@@ -36736,7 +38643,7 @@ function optionalGraphArray(response, property) {
   }
   const value = response[property];
   if (!Array.isArray(value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
   }
   return value;
 }
@@ -36763,12 +38670,12 @@ function registerSearchTools(server, dependencies) {
         ]
       });
       const hits = [];
-      for (const responseValue of optionalGraphArray(requireGraphObject6(result), "value")) {
-        const response = requireGraphObject6(responseValue);
+      for (const responseValue of optionalGraphArray(requireGraphObject8(result), "value")) {
+        const response = requireGraphObject8(responseValue);
         for (const containerValue of optionalGraphArray(response, "hitsContainers")) {
-          const container = requireGraphObject6(containerValue);
+          const container = requireGraphObject8(containerValue);
           for (const hitValue of optionalGraphArray(container, "hits")) {
-            const hit = requireGraphObject6(hitValue);
+            const hit = requireGraphObject8(hitValue);
             hits.push(Object.hasOwn(hit, "resource") ? hit.resource : hit);
           }
         }
@@ -36776,29 +38683,330 @@ function registerSearchTools(server, dependencies) {
       return successResponse(hits);
     }
   );
+  registerAuthenticatedTool(
+    server,
+    "graph_search_all",
+    {
+      description: `Search mail, calendar, files, and Teams in one relevance-ranked query.
+
+Use this when you do not know where something lives. chatMessage cannot be
+combined with SharePoint entity types like site, list, listItem, drive, or
+driveItem, so search Teams messages separately.
+
+Args:
+    query: Search query string (KQL is supported).
+    entity_types: Resource types to search (default ["message", "event", "driveItem"]).
+        One or more of: message, event, driveItem, drive, site, list, listItem,
+        chatMessage, person.
+    size: Maximum number of hits to return (default 25, maximum 50).
+    from: Number of hits to skip for paging (default 0).`,
+      inputSchema: {
+        query: external_exports.string(),
+        entity_types: external_exports.array(ENTITY_TYPE_SCHEMA).default(["message", "event", "driveItem"]),
+        size: external_exports.number().int().default(25),
+        from: external_exports.number().int().default(0)
+      }
+    },
+    async ({ query, entity_types, size, from }) => {
+      const hasSharePointType = entity_types.some(
+        (entityType) => SHAREPOINT_ENTITY_TYPES.has(entityType)
+      );
+      if (entity_types.includes("chatMessage") && hasSharePointType) {
+        return successResponse({ error: INVALID_ENTITY_TYPE_COMBINATION_MESSAGE }, "error");
+      }
+      const needsUnknownEnumMembers = entity_types.some(
+        (entityType) => UNKNOWN_ENUM_ENTITY_TYPES.has(entityType)
+      );
+      const result = await dependencies.graphClient.post(
+        "/search/query",
+        {
+          requests: [
+            {
+              entityTypes: entity_types,
+              query: { queryString: query },
+              from,
+              size: Math.min(size, 50)
+            }
+          ]
+        },
+        void 0,
+        needsUnknownEnumMembers ? { Prefer: "include-unknown-enum-members" } : void 0
+      );
+      return successResponse(requireGraphObject8(result));
+    }
+  );
 }
 
-// src/tools/teams-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE8 = "Invalid Microsoft Graph response.";
-var RESOURCE_ID_SCHEMA6 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
+// src/tools/tasks-tools.ts
+var INVALID_GRAPH_RESPONSE_MESSAGE10 = "Invalid Microsoft Graph response.";
+var MISSING_TASK_UPDATE_MESSAGE = "At least one task field is required.";
+var INCOMPLETE_FILTER = "status ne 'completed'";
+var RESOURCE_ID_SCHEMA7 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
-var TOP_SCHEMA4 = external_exports.number().int().default(50);
-var MENTIONS_SCHEMA2 = external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())).nullable().optional().default(null);
-function isNonArrayObject8(value) {
+var TOP_SCHEMA5 = external_exports.number().int().default(25);
+var IMPORTANCE_SCHEMA3 = external_exports.enum(["low", "normal", "high"]);
+var UPDATE_IMPORTANCE_SCHEMA = external_exports.enum(["low", "normal", "high", ""]);
+var STATUS_SCHEMA = external_exports.enum([
+  "notStarted",
+  "inProgress",
+  "completed",
+  "waitingOnOthers",
+  "deferred",
+  ""
+]);
+function isNonArrayObject10(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function collectionValue6(response) {
-  if (!isNonArrayObject8(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
+function collectionValue8(response) {
+  if (!isNonArrayObject10(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE10);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE10);
   }
   return response.value;
+}
+function requireGraphObject9(response) {
+  if (!isNonArrayObject10(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE10);
+  }
+  return response;
+}
+function taskListPath(listId) {
+  return `/me/todo/lists/${encodeURIComponent(listId)}/tasks`;
+}
+function taskPath(listId, taskId) {
+  return `${taskListPath(listId)}/${encodeURIComponent(taskId)}`;
+}
+function registerTasksTools(server, dependencies) {
+  registerAuthenticatedTool(
+    server,
+    "graph_list_todo_lists",
+    {
+      description: `List Microsoft To Do task lists.
+
+Use the returned list IDs with the other To Do tools.
+
+Args:
+    top: Maximum number of lists to return (default 25, maximum 50).`,
+      inputSchema: {
+        top: TOP_SCHEMA5
+      }
+    },
+    async ({ top }) => {
+      const result = await dependencies.graphClient.get("/me/todo/lists", {
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue8(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_todo_tasks",
+    {
+      description: `List tasks in a Microsoft To Do list.
+
+Args:
+    list_id: The task list ID (from graph_list_todo_lists).
+    top: Maximum number of tasks to return (default 25, maximum 50).
+    filter_query: Optional OData filter (e.g. "status eq 'completed'"). Replaces
+        the default incomplete-only filter.
+    include_completed: Whether to include completed tasks (default false). When
+        false and no filter_query is given, only incomplete tasks are returned.`,
+      inputSchema: {
+        list_id: RESOURCE_ID_SCHEMA7,
+        top: TOP_SCHEMA5,
+        filter_query: external_exports.string().default(""),
+        include_completed: external_exports.boolean().default(false)
+      }
+    },
+    async ({ list_id, top, filter_query, include_completed }) => {
+      const params = {
+        $top: String(Math.min(top, 50))
+      };
+      if (filter_query !== "") {
+        params.$filter = filter_query;
+      } else if (!include_completed) {
+        params.$filter = INCOMPLETE_FILTER;
+      }
+      const result = await dependencies.graphClient.get(taskListPath(list_id), params);
+      return successResponse(collectionValue8(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_create_todo_task",
+    {
+      description: `Create a task in a Microsoft To Do list. Requires the Tasks.ReadWrite permission.
+
+Empty fields are omitted from the created task.
+
+Args:
+    list_id: The task list ID (from graph_list_todo_lists).
+    title: Task title.
+    notes: Optional plain-text notes stored in the task body.
+    due_datetime: Optional due date and time (ISO 8601, e.g. "2025-03-01T17:00:00").
+    timezone: Timezone for due_datetime and reminder_datetime (default "UTC").
+    importance: Task importance: "low", "normal", or "high" (default "normal").
+    reminder_datetime: Optional reminder date and time (ISO 8601).`,
+      inputSchema: {
+        list_id: RESOURCE_ID_SCHEMA7,
+        title: external_exports.string(),
+        notes: external_exports.string().default(""),
+        due_datetime: external_exports.string().default(""),
+        timezone: external_exports.string().default("UTC"),
+        importance: IMPORTANCE_SCHEMA3.default("normal"),
+        reminder_datetime: external_exports.string().default("")
+      }
+    },
+    async ({ list_id, title, notes, due_datetime, timezone, importance, reminder_datetime }) => {
+      const task = { title };
+      if (notes !== "") {
+        task.body = { content: notes, contentType: "text" };
+      }
+      if (due_datetime !== "") {
+        task.dueDateTime = { dateTime: due_datetime, timeZone: timezone };
+      }
+      if (importance !== "normal") {
+        task.importance = importance;
+      }
+      if (reminder_datetime !== "") {
+        task.reminderDateTime = { dateTime: reminder_datetime, timeZone: timezone };
+      }
+      const result = await dependencies.graphClient.post(taskListPath(list_id), task);
+      return successResponse(requireGraphObject9(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_update_todo_task",
+    {
+      description: `Update a task in a Microsoft To Do list. Only the supplied fields are changed.
+
+Complete a task by setting status to "completed".
+
+Args:
+    list_id: The task list ID (from graph_list_todo_lists).
+    task_id: The task ID to update.
+    title: New task title.
+    notes: New plain-text notes for the task body.
+    due_datetime: New due date and time (ISO 8601).
+    timezone: Timezone for due_datetime (default "UTC").
+    status: New status: "notStarted", "inProgress", "completed",
+        "waitingOnOthers", or "deferred". Empty leaves the status unchanged.
+    importance: New importance: "low", "normal", or "high". Empty leaves the
+        importance unchanged.`,
+      inputSchema: {
+        list_id: RESOURCE_ID_SCHEMA7,
+        task_id: RESOURCE_ID_SCHEMA7,
+        title: external_exports.string().default(""),
+        notes: external_exports.string().default(""),
+        due_datetime: external_exports.string().default(""),
+        timezone: external_exports.string().default("UTC"),
+        status: STATUS_SCHEMA.default(""),
+        importance: UPDATE_IMPORTANCE_SCHEMA.default("")
+      }
+    },
+    async ({ list_id, task_id, title, notes, due_datetime, timezone, status, importance }) => {
+      const updates = {};
+      if (title !== "") {
+        updates.title = title;
+      }
+      if (notes !== "") {
+        updates.body = { content: notes, contentType: "text" };
+      }
+      if (due_datetime !== "") {
+        updates.dueDateTime = { dateTime: due_datetime, timeZone: timezone };
+      }
+      if (status !== "") {
+        updates.status = status;
+      }
+      if (importance !== "") {
+        updates.importance = importance;
+      }
+      if (Object.keys(updates).length === 0) {
+        return successResponse({ error: MISSING_TASK_UPDATE_MESSAGE }, "error");
+      }
+      const result = await dependencies.graphClient.patch(taskPath(list_id, task_id), updates);
+      return successResponse(requireGraphObject9(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_todo_task",
+    {
+      description: `Delete a task from a Microsoft To Do list.
+
+Args:
+    list_id: The task list ID (from graph_list_todo_lists).
+    task_id: The task ID to delete.`,
+      inputSchema: {
+        list_id: RESOURCE_ID_SCHEMA7,
+        task_id: RESOURCE_ID_SCHEMA7
+      }
+    },
+    async ({ list_id, task_id }) => {
+      await dependencies.graphClient.delete(taskPath(list_id, task_id));
+      return successResponse({ status: "Task deleted" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_my_planner_tasks",
+    {
+      description: `List Microsoft Planner tasks assigned to the user.
+
+Planner tasks live on plans owned by Microsoft 365 groups, so this is separate
+from Microsoft To Do. Requires the Tasks.Read permission.
+
+Args:
+    top: Maximum number of tasks to return (default 25, maximum 50).`,
+      inputSchema: {
+        top: TOP_SCHEMA5
+      }
+    },
+    async ({ top }) => {
+      const result = await dependencies.graphClient.get("/me/planner/tasks", {
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue8(result));
+    }
+  );
+}
+
+// src/tools/teams-tools.ts
+var INVALID_GRAPH_RESPONSE_MESSAGE11 = "Invalid Microsoft Graph response.";
+var RESOURCE_ID_SCHEMA8 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
+  message: "Resource IDs must not be empty, '.' or '..'."
+});
+var TOP_SCHEMA6 = external_exports.number().int().default(50);
+var TEAM_DETAIL_FIELDS = "id,displayName,description,isArchived,visibility,webUrl";
+var MEMBERSHIP_TYPE_SCHEMA = external_exports.enum(["standard", "private", "shared"]).default("standard");
+var MENTIONS_SCHEMA2 = external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())).nullable().optional().default(null);
+function isNonArrayObject11(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function collectionValue9(response) {
+  if (!isNonArrayObject11(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE11);
+  }
+  if (!Object.hasOwn(response, "value")) {
+    return [];
+  }
+  if (!Array.isArray(response.value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE11);
+  }
+  return response.value;
+}
+function requireGraphObject10(response) {
+  if (!isNonArrayObject11(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE11);
+  }
+  return response;
 }
 function teamPath(teamId) {
   return `/teams/${encodeURIComponent(teamId)}`;
@@ -36822,7 +39030,7 @@ function registerTeamsTools(server, dependencies) {
       const result = await dependencies.graphClient.get("/me/joinedTeams", {
         $select: TEAM_FIELDS
       });
-      return successResponse(collectionValue6(result));
+      return successResponse(collectionValue9(result));
     }
   );
   registerAuthenticatedTool(
@@ -36831,14 +39039,14 @@ function registerTeamsTools(server, dependencies) {
     {
       description: "List channels in a team.",
       inputSchema: {
-        team_id: RESOURCE_ID_SCHEMA6
+        team_id: RESOURCE_ID_SCHEMA8
       }
     },
     async ({ team_id }) => {
       const result = await dependencies.graphClient.get(`${teamPath(team_id)}/channels`, {
         $select: CHANNEL_FIELDS
       });
-      return successResponse(collectionValue6(result));
+      return successResponse(collectionValue9(result));
     }
   );
   registerAuthenticatedTool(
@@ -36847,16 +39055,16 @@ function registerTeamsTools(server, dependencies) {
     {
       description: "Get messages from a channel.",
       inputSchema: {
-        team_id: RESOURCE_ID_SCHEMA6,
-        channel_id: RESOURCE_ID_SCHEMA6,
-        top: TOP_SCHEMA4
+        team_id: RESOURCE_ID_SCHEMA8,
+        channel_id: RESOURCE_ID_SCHEMA8,
+        top: TOP_SCHEMA6
       }
     },
     async ({ team_id, channel_id, top }) => {
       const result = await dependencies.graphClient.get(messagePath2(team_id, channel_id), {
         $top: String(Math.min(top, 50))
       });
-      return successResponse(collectionValue6(result));
+      return successResponse(collectionValue9(result));
     }
   );
   registerAuthenticatedTool(
@@ -36865,8 +39073,8 @@ function registerTeamsTools(server, dependencies) {
     {
       description: "Send a message to a channel.",
       inputSchema: {
-        team_id: RESOURCE_ID_SCHEMA6,
-        channel_id: RESOURCE_ID_SCHEMA6,
+        team_id: RESOURCE_ID_SCHEMA8,
+        channel_id: RESOURCE_ID_SCHEMA8,
         message: external_exports.string(),
         is_html: external_exports.boolean().default(true),
         mentions: MENTIONS_SCHEMA2
@@ -36886,15 +39094,15 @@ function registerTeamsTools(server, dependencies) {
     {
       description: "List members of a channel.",
       inputSchema: {
-        team_id: RESOURCE_ID_SCHEMA6,
-        channel_id: RESOURCE_ID_SCHEMA6
+        team_id: RESOURCE_ID_SCHEMA8,
+        channel_id: RESOURCE_ID_SCHEMA8
       }
     },
     async ({ team_id, channel_id }) => {
       const result = await dependencies.graphClient.get(
         `${channelPath(team_id, channel_id)}/members`
       );
-      return successResponse(collectionValue6(result));
+      return successResponse(collectionValue9(result));
     }
   );
   registerAuthenticatedTool(
@@ -36903,10 +39111,10 @@ function registerTeamsTools(server, dependencies) {
     {
       description: "Get replies to a channel message.",
       inputSchema: {
-        team_id: RESOURCE_ID_SCHEMA6,
-        channel_id: RESOURCE_ID_SCHEMA6,
-        message_id: RESOURCE_ID_SCHEMA6,
-        top: TOP_SCHEMA4
+        team_id: RESOURCE_ID_SCHEMA8,
+        channel_id: RESOURCE_ID_SCHEMA8,
+        message_id: RESOURCE_ID_SCHEMA8,
+        top: TOP_SCHEMA6
       }
     },
     async ({ team_id, channel_id, message_id, top }) => {
@@ -36914,7 +39122,7 @@ function registerTeamsTools(server, dependencies) {
         `${messagePath2(team_id, channel_id, message_id)}/replies`,
         { $top: String(Math.min(top, 50)) }
       );
-      return successResponse(collectionValue6(result));
+      return successResponse(collectionValue9(result));
     }
   );
   registerAuthenticatedTool(
@@ -36923,9 +39131,9 @@ function registerTeamsTools(server, dependencies) {
     {
       description: "Reply to a channel message.",
       inputSchema: {
-        team_id: RESOURCE_ID_SCHEMA6,
-        channel_id: RESOURCE_ID_SCHEMA6,
-        message_id: RESOURCE_ID_SCHEMA6,
+        team_id: RESOURCE_ID_SCHEMA8,
+        channel_id: RESOURCE_ID_SCHEMA8,
+        message_id: RESOURCE_ID_SCHEMA8,
         message: external_exports.string(),
         is_html: external_exports.boolean().default(true),
         mentions: MENTIONS_SCHEMA2
@@ -36939,27 +39147,227 @@ function registerTeamsTools(server, dependencies) {
       return successResponse(result);
     }
   );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_team_members",
+    {
+      description: `List members of a team.
+
+Needs the TeamMember.Read.All permission, which requires admin consent.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    top: Maximum number of members to return (default 50, maximum 50).`,
+      inputSchema: {
+        team_id: RESOURCE_ID_SCHEMA8,
+        top: TOP_SCHEMA6
+      }
+    },
+    async ({ team_id, top }) => {
+      const result = await dependencies.graphClient.get(`${teamPath(team_id)}/members`, {
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue9(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_team",
+    {
+      description: `Get a team's details, including whether it is archived.
+
+Args:
+    team_id: The team ID (from graph_list_teams).`,
+      inputSchema: {
+        team_id: RESOURCE_ID_SCHEMA8
+      }
+    },
+    async ({ team_id }) => {
+      const result = await dependencies.graphClient.get(teamPath(team_id), {
+        $select: TEAM_DETAIL_FIELDS
+      });
+      return successResponse(requireGraphObject10(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_primary_channel",
+    {
+      description: `Get a team's primary channel, the one named General.
+
+Use this as a shortcut for the default channel instead of listing every
+channel in the team.
+
+Args:
+    team_id: The team ID (from graph_list_teams).`,
+      inputSchema: {
+        team_id: RESOURCE_ID_SCHEMA8
+      }
+    },
+    async ({ team_id }) => {
+      const result = await dependencies.graphClient.get(`${teamPath(team_id)}/primaryChannel`, {
+        $select: CHANNEL_FIELDS
+      });
+      return successResponse(requireGraphObject10(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_create_channel",
+    {
+      description: `Create a channel in a team.
+
+Needs the Channel.Create permission.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    display_name: Name of the new channel.
+    description: Optional channel description.
+    membership_type: Channel type: "standard", "private", or "shared"
+        (default "standard").`,
+      inputSchema: {
+        team_id: RESOURCE_ID_SCHEMA8,
+        display_name: RESOURCE_ID_SCHEMA8,
+        description: external_exports.string().default(""),
+        membership_type: MEMBERSHIP_TYPE_SCHEMA
+      }
+    },
+    async ({ team_id, display_name, description, membership_type }) => {
+      const result = await dependencies.graphClient.post(`${teamPath(team_id)}/channels`, {
+        displayName: display_name,
+        description,
+        membershipType: membership_type
+      });
+      return successResponse(requireGraphObject10(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_channel_files_folder",
+    {
+      description: `Get the SharePoint folder that stores a channel's files.
+
+This is the bridge from a channel to its SharePoint folder: the returned
+folder ID works with the OneDrive file tools. Needs the Files.Read.All
+permission.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    include_children: Whether to also list the folder contents (default
+        false). When true the result is {"folder": ..., "children": [...]}.
+    top: Maximum number of children to return (default 50, maximum 50).`,
+      inputSchema: {
+        team_id: RESOURCE_ID_SCHEMA8,
+        channel_id: RESOURCE_ID_SCHEMA8,
+        include_children: external_exports.boolean().default(false),
+        top: TOP_SCHEMA6
+      }
+    },
+    async ({ team_id, channel_id, include_children, top }) => {
+      const folderPath = `${channelPath(team_id, channel_id)}/filesFolder`;
+      const folderResult = await dependencies.graphClient.get(folderPath);
+      const folder = requireGraphObject10(folderResult);
+      if (!include_children) {
+        return successResponse(folder);
+      }
+      const childrenResult = await dependencies.graphClient.get(`${folderPath}/children`, {
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse({ folder, children: collectionValue9(childrenResult) });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_update_channel_message",
+    {
+      description: `Edit a channel message you posted.
+
+Only your own messages can be edited; editing anyone else's message fails.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    message_id: The message ID to edit (from graph_get_channel_messages).
+    message: Replacement message content. When \`is_html\` is true, send
+        explicit HTML; markdown is not converted.
+    is_html: Whether the message is HTML content (default: True). Use false
+        for plain text.`,
+      inputSchema: {
+        team_id: RESOURCE_ID_SCHEMA8,
+        channel_id: RESOURCE_ID_SCHEMA8,
+        message_id: RESOURCE_ID_SCHEMA8,
+        message: external_exports.string(),
+        is_html: external_exports.boolean().default(true)
+      }
+    },
+    async ({ team_id, channel_id, message_id, message, is_html }) => {
+      await dependencies.graphClient.patch(messagePath2(team_id, channel_id, message_id), {
+        body: buildRichTextBody(message, is_html)
+      });
+      return successResponse({ status: "Message updated" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_channel_message",
+    {
+      description: `Soft-delete a channel message, or restore one you deleted.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    message_id: The message ID to delete (from graph_get_channel_messages).
+    restore: Whether to restore a previously soft-deleted message
+        (default false).`,
+      inputSchema: {
+        team_id: RESOURCE_ID_SCHEMA8,
+        channel_id: RESOURCE_ID_SCHEMA8,
+        message_id: RESOURCE_ID_SCHEMA8,
+        restore: external_exports.boolean().default(false)
+      }
+    },
+    async ({ team_id, channel_id, message_id, restore }) => {
+      const action = restore ? "undoSoftDelete" : "softDelete";
+      await dependencies.graphClient.post(
+        `${messagePath2(team_id, channel_id, message_id)}/${action}`
+      );
+      return successResponse({ status: restore ? "Message restored" : "Message deleted" });
+    }
+  );
 }
 
 // src/tools/user-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE9 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE12 = "Invalid Microsoft Graph response.";
+var OPTIONAL_RESOURCE_ID_SCHEMA7 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
+  message: "Resource IDs must not be '.' or '..'."
+}).default("");
 function escapeKqlStringToken(value) {
   return value.replaceAll('"', '""');
 }
-function isNonArrayObject9(value) {
+function isNonArrayObject12(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function userSearchValues(response) {
-  if (!isNonArrayObject9(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
+  if (!isNonArrayObject12(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE12);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE12);
   }
   return response.value;
+}
+function requireGraphObject11(response) {
+  if (!isNonArrayObject12(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE12);
+  }
+  return response;
+}
+function userRoot(userId) {
+  return userId === "" ? "/me" : `/users/${encodeURIComponent(userId)}`;
 }
 function registerUserTools(server, dependencies) {
   registerAuthenticatedTool(
@@ -36986,6 +39394,51 @@ function registerUserTools(server, dependencies) {
       return successResponse(userSearchValues(result));
     }
   );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_manager",
+    {
+      description: `Get a user's manager from the organization directory.
+
+Reading someone else's manager requires the User.Read.All permission.
+
+Args:
+    user_id: User ID or email address. Empty targets the signed-in user.`,
+      inputSchema: {
+        user_id: OPTIONAL_RESOURCE_ID_SCHEMA7
+      }
+    },
+    async ({ user_id }) => {
+      const result = await dependencies.graphClient.get(`${userRoot(user_id)}/manager`, {
+        $select: USER_PROFILE_FIELDS
+      });
+      return successResponse(requireGraphObject11(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_direct_reports",
+    {
+      description: `List the people who report directly to a user.
+
+Reading someone else's direct reports requires the User.Read.All permission.
+
+Args:
+    user_id: User ID or email address. Empty targets the signed-in user.
+    top: Maximum number of reports to return (default 50, maximum 50).`,
+      inputSchema: {
+        user_id: OPTIONAL_RESOURCE_ID_SCHEMA7,
+        top: external_exports.number().int().default(50)
+      }
+    },
+    async ({ user_id, top }) => {
+      const result = await dependencies.graphClient.get(`${userRoot(user_id)}/directReports`, {
+        $select: USER_PROFILE_FIELDS,
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(userSearchValues(result));
+    }
+  );
 }
 
 // src/tools/index.ts
@@ -37002,6 +39455,8 @@ function registerAllTools(server, dependencies) {
   registerSearchTools(server, dependencies);
   registerMeetingTools(server, dependencies);
   registerFilesTools(server, dependencies);
+  registerContactsTools(server, dependencies);
+  registerTasksTools(server, dependencies);
 }
 
 // src/server.ts

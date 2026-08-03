@@ -7,6 +7,9 @@ import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.j
 
 const INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
 const MEETING_METADATA_FIELDS = "id,meetingId,createdDateTime,meetingOrganizer";
+const ALLOWED_PRESENTERS_SCHEMA = z
+  .enum(["everyone", "organization", "roleIsPresenter", "organizer"])
+  .default("everyone");
 const RESOURCE_ID_SCHEMA = z
   .string()
   .refine((value) => value !== "" && value !== "." && value !== "..", {
@@ -164,6 +167,110 @@ Args:
     async ({ meeting_id, recording_id }) => {
       const result = await dependencies.graphClient.get(
         `${meetingPath(meeting_id)}/recordings/${encodeURIComponent(recording_id)}`,
+      );
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_create_online_meeting",
+    {
+      description: `Create a Teams online meeting and get its join link.
+
+The \`joinWebUrl\` field in the response is the link to share. This creates a
+meeting without a calendar event; use graph_create_event with
+is_online_meeting for a meeting that also appears on calendars. Needs the
+OnlineMeetings.ReadWrite permission.
+
+Args:
+    subject: Meeting subject.
+    start_datetime: Start time in ISO 8601 with an offset or Z
+        (e.g. "2026-03-01T10:00:00Z").
+    end_datetime: End time in ISO 8601 with an offset or Z.
+    attendees: Optional list of attendee email addresses or user IDs.
+    allowed_presenters: Who can present: "everyone", "organization",
+        "roleIsPresenter", or "organizer" (default "everyone").`,
+      inputSchema: {
+        subject: z.string(),
+        start_datetime: z.string(),
+        end_datetime: z.string(),
+        attendees: z.array(z.string()).nullable().optional().default(null),
+        allowed_presenters: ALLOWED_PRESENTERS_SCHEMA,
+      },
+    },
+    async ({ subject, start_datetime, end_datetime, attendees, allowed_presenters }) => {
+      const payload: GraphObject = {
+        subject,
+        startDateTime: start_datetime,
+        endDateTime: end_datetime,
+      };
+      if (attendees !== null && attendees !== undefined && attendees.length > 0) {
+        payload.participants = {
+          attendees: attendees.map((attendee) => ({ upn: attendee })),
+        };
+      }
+      if (allowed_presenters !== "everyone") {
+        payload.allowedPresenters = allowed_presenters;
+      }
+
+      const result = await dependencies.graphClient.post("/me/onlineMeetings", payload);
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_get_online_meeting",
+    {
+      description: `Get a single online meeting, including its join link and settings.
+
+Args:
+    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+      inputSchema: {
+        meeting_id: RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ meeting_id }) => {
+      const result = await dependencies.graphClient.get(meetingPath(meeting_id));
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_get_meeting_attendance",
+    {
+      description: `Get meeting attendance: who actually joined and for how long.
+
+Without report_id this lists the available attendance reports. With
+report_id it returns that report expanded with per-attendee join and leave
+times. Needs the OnlineMeetingArtifact.Read.All permission, which requires
+admin consent.
+
+Args:
+    meeting_id: The online meeting ID (from graph_list_online_meetings).
+    report_id: Attendance report ID. Empty lists the available reports.`,
+      inputSchema: {
+        meeting_id: RESOURCE_ID_SCHEMA,
+        report_id: z
+          .string()
+          .refine((value) => value !== "." && value !== "..", {
+            message: "Resource IDs must not be '.' or '..'.",
+          })
+          .default(""),
+      },
+    },
+    async ({ meeting_id, report_id }) => {
+      const reportsPath = `${meetingPath(meeting_id)}/attendanceReports`;
+      if (report_id === "") {
+        const result = await dependencies.graphClient.get(reportsPath);
+        return successResponse(collectionValue(result));
+      }
+
+      const result = await dependencies.graphClient.get(
+        `${reportsPath}/${encodeURIComponent(report_id)}`,
+        { $expand: "attendanceRecords" },
       );
       return successResponse(requireGraphObject(result));
     },

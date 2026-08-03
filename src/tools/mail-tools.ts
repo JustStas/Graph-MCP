@@ -22,8 +22,19 @@ const OPTIONAL_RESOURCE_ID_SCHEMA = z
     message: "Resource IDs must not be '.' or '..'.",
   })
   .default("");
+const MAILBOX_SCHEMA = OPTIONAL_RESOURCE_ID_SCHEMA;
+const MAILBOX_ARGS_DOC = `    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`;
 const SKIP_SCHEMA = z.number().int().min(0).default(0);
 const MESSAGE_IDS_SCHEMA = z.array(RESOURCE_ID_SCHEMA).min(1).max(50);
+const IMPORTANCE_SCHEMA = z.enum(["low", "normal", "high"]);
+const INCOMPLETE_MESSAGE_RULE_MESSAGE =
+  "A message rule needs at least one condition and at least one action.";
+const DEFAULT_MAIL_TIPS_OPTIONS = [
+  "automaticReplies",
+  "mailboxFullStatus",
+  "recipientScope",
+] as const;
 const FLAG_STATUS_SCHEMA = z.enum(["notFlagged", "flagged", "complete"]);
 const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
 const MAX_ATTACHMENT_BASE64_LENGTH = 4 * Math.ceil(MAX_ATTACHMENT_BYTES / 3);
@@ -68,12 +79,70 @@ function requireGraphObjectWithId(response: unknown): GraphObjectWithId {
   return response as GraphObjectWithId;
 }
 
-function messagePath(messageId: string): string {
-  return `/me/messages/${encodeURIComponent(messageId)}`;
+function deltaToken(response: unknown): string {
+  if (!isNonArrayObject(response)) {
+    return "";
+  }
+  const deltaLink = response["@odata.deltaLink"];
+  if (typeof deltaLink !== "string") {
+    return "";
+  }
+  const queryStart = deltaLink.indexOf("?");
+  if (queryStart === -1) {
+    return "";
+  }
+  return new URLSearchParams(deltaLink.slice(queryStart + 1)).get("$deltatoken") ?? "";
+}
+
+function mailboxRoot(mailbox: string): string {
+  return mailbox === "" ? "/me" : `/users/${encodeURIComponent(mailbox)}`;
+}
+
+function messagePath(mailbox: string, messageId: string): string {
+  return `${mailboxRoot(mailbox)}/messages/${encodeURIComponent(messageId)}`;
+}
+
+function mailFolderPath(mailbox: string, parentFolderId: string): string {
+  const root = `${mailboxRoot(mailbox)}/mailFolders`;
+  return parentFolderId === ""
+    ? root
+    : `${root}/${encodeURIComponent(parentFolderId)}/childFolders`;
 }
 
 function recipient(address: string): { readonly emailAddress: { readonly address: string } } {
   return { emailAddress: { address } };
+}
+
+interface ComposeMessageInput {
+  readonly to: readonly string[];
+  readonly subject: string;
+  readonly body: string;
+  readonly cc: readonly string[] | null;
+  readonly bcc: readonly string[] | null;
+  readonly is_html: boolean;
+  readonly importance: "low" | "normal" | "high";
+  readonly reply_to: readonly string[] | null;
+}
+
+function composeMessage(input: ComposeMessageInput): GraphObject {
+  const message: GraphObject = {
+    subject: input.subject,
+    body: buildRichTextBody(input.body, input.is_html, RICH_TEXT_OPTIONS),
+    toRecipients: input.to.map(recipient),
+  };
+  if (input.cc !== null && input.cc.length > 0) {
+    message.ccRecipients = input.cc.map(recipient);
+  }
+  if (input.bcc !== null && input.bcc.length > 0) {
+    message.bccRecipients = input.bcc.map(recipient);
+  }
+  if (input.reply_to !== null && input.reply_to.length > 0) {
+    message.replyTo = input.reply_to.map(recipient);
+  }
+  if (input.importance !== "normal") {
+    message.importance = input.importance;
+  }
+  return message;
 }
 
 interface BatchFailure {
@@ -135,15 +204,17 @@ Args:
     skip: Number of emails to skip before returning results (default 0). Graph
         returns at most 50 per call, so page through larger folders by raising
         skip in steps of top.
-    filter_query: Optional OData filter (e.g. "isRead eq false").`,
+    filter_query: Optional OData filter (e.g. "isRead eq false").
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         folder: RESOURCE_ID_SCHEMA.default("inbox"),
         top: LIST_TOP_SCHEMA,
         skip: SKIP_SCHEMA,
         filter_query: z.string().default(""),
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ folder, top, skip, filter_query }) => {
+    async ({ folder, top, skip, filter_query, mailbox }) => {
       const params: Record<string, string> = {
         $select: MAIL_LIST_FIELDS,
         $top: String(Math.min(top, 50)),
@@ -157,7 +228,7 @@ Args:
       }
 
       const result = await dependencies.graphClient.get(
-        `/me/mailFolders/${encodeURIComponent(folder)}/messages`,
+        `${mailboxRoot(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages`,
         params,
       );
       return successResponse(collectionValue(result));
@@ -171,13 +242,15 @@ Args:
       description: `Read full details of a specific email.
 
 Args:
-    message_id: The email message ID.`,
+    message_id: The email message ID.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_id: RESOURCE_ID_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_id }) => {
-      const result = await dependencies.graphClient.get(messagePath(message_id));
+    async ({ message_id, mailbox }) => {
+      const result = await dependencies.graphClient.get(messagePath(mailbox, message_id));
       return successResponse(requireGraphObject(result));
     },
   );
@@ -190,15 +263,17 @@ Args:
 
 Args:
     query: Search query string.
-    top: Maximum number of results (default 25).`,
+    top: Maximum number of results (default 25).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         query: z.string(),
         top: LIST_TOP_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ query, top }) => {
+    async ({ query, top, mailbox }) => {
       const escapedQuery = query.replaceAll('"', '""');
-      const result = await dependencies.graphClient.get("/me/messages", {
+      const result = await dependencies.graphClient.get(`${mailboxRoot(mailbox)}/messages`, {
         $search: `"${escapedQuery}"`,
         $select: MAIL_LIST_FIELDS,
         $top: String(Math.min(top, 50)),
@@ -213,35 +288,62 @@ Args:
     {
       description: `Send an email.
 
+A non-empty \`mailbox\` posts to /users/{mailbox}/sendMail, so the message is
+sent as that shared mailbox and needs the delegated Mail.Send.Shared permission.
+
 Args:
     to: List of recipient email addresses.
     subject: Email subject.
     body: Email body content. When \`is_html\` is true, send explicit
         HTML; markdown is not converted.
     cc: Optional list of CC email addresses.
+    bcc: Optional list of BCC email addresses.
     is_html: Whether to send the email body as HTML content (default:
-        True). Use false for plain text.`,
+        True). Use false for plain text.
+    importance: Message importance: "low", "normal", or "high" (default
+        "normal").
+    reply_to: Optional list of addresses that replies should be sent to.
+    save_to_sent_items: Whether to keep a copy in Sent Items (default true).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         to: RECIPIENTS_SCHEMA,
         subject: z.string(),
         body: z.string(),
         cc: CC_SCHEMA,
+        bcc: CC_SCHEMA,
         is_html: z.boolean().default(true),
+        importance: IMPORTANCE_SCHEMA.default("normal"),
+        reply_to: CC_SCHEMA,
+        save_to_sent_items: z.boolean().default(true),
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ to, subject, body, cc, is_html }) => {
-      const message: GraphObject = {
+    async ({
+      to,
+      subject,
+      body,
+      cc,
+      bcc,
+      is_html,
+      importance,
+      reply_to,
+      save_to_sent_items,
+      mailbox,
+    }) => {
+      const message = composeMessage({
+        to,
         subject,
-        body: buildRichTextBody(body, is_html, RICH_TEXT_OPTIONS),
-        toRecipients: to.map(recipient),
-      };
-      if (cc !== null && cc.length > 0) {
-        message.ccRecipients = cc.map(recipient);
-      }
+        body,
+        cc,
+        bcc,
+        is_html,
+        importance,
+        reply_to,
+      });
 
-      await dependencies.graphClient.post("/me/sendMail", {
+      await dependencies.graphClient.post(`${mailboxRoot(mailbox)}/sendMail`, {
         message,
-        saveToSentItems: true,
+        saveToSentItems: save_to_sent_items,
       });
       return successResponse({ status: "Email sent" });
     },
@@ -259,25 +361,33 @@ Args:
         HTML; markdown is not converted.
     reply_all: Whether to reply to all recipients (default: reply to sender only).
     is_html: Whether to send the reply body as HTML content (default:
-        True). Use false for plain text.`,
+        True). Use false for plain text.
+    as_draft: Whether to leave the reply as an unsent draft (default false).
+        Returns the created draft instead of a sent status.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_id: RESOURCE_ID_SCHEMA,
         body: z.string(),
         reply_all: z.boolean().default(false),
         is_html: z.boolean().default(true),
+        as_draft: z.boolean().default(false),
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_id, body, reply_all, is_html }) => {
+    async ({ message_id, body, reply_all, is_html, as_draft, mailbox }) => {
       const action = reply_all ? "createReplyAll" : "createReply";
       const draftResult = await dependencies.graphClient.post(
-        `${messagePath(message_id)}/${action}`,
+        `${messagePath(mailbox, message_id)}/${action}`,
       );
       const draft = requireGraphObjectWithId(draftResult);
-      const draftPath = messagePath(draft.id);
+      const draftPath = messagePath(mailbox, draft.id);
 
       await dependencies.graphClient.patch(draftPath, {
         body: buildRichTextBody(body, is_html, RICH_TEXT_OPTIONS),
       });
+      if (as_draft) {
+        return successResponse(draft);
+      }
       await dependencies.graphClient.post(`${draftPath}/send`);
 
       return successResponse({ status: reply_all ? "Reply all sent" : "Reply sent" });
@@ -291,15 +401,20 @@ Args:
       description: `List attachments on an email message.
 
 Args:
-    message_id: The email message ID.`,
+    message_id: The email message ID.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_id: RESOURCE_ID_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_id }) => {
-      const result = await dependencies.graphClient.get(`${messagePath(message_id)}/attachments`, {
-        $select: "id,name,contentType,size,isInline",
-      });
+    async ({ message_id, mailbox }) => {
+      const result = await dependencies.graphClient.get(
+        `${messagePath(mailbox, message_id)}/attachments`,
+        {
+          $select: "id,name,contentType,size,isInline",
+        },
+      );
       return successResponse(collectionValue(result));
     },
   );
@@ -315,15 +430,17 @@ The attachment content is returned as base64-encoded data in the
 
 Args:
     message_id: The email message ID.
-    attachment_id: The attachment ID (from graph_list_mail_attachments).`,
+    attachment_id: The attachment ID (from graph_list_mail_attachments).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_id: RESOURCE_ID_SCHEMA,
         attachment_id: RESOURCE_ID_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_id, attachment_id }) => {
+    async ({ message_id, attachment_id, mailbox }) => {
       const result = await dependencies.graphClient.get(
-        `${messagePath(message_id)}/attachments/${encodeURIComponent(attachment_id)}`,
+        `${messagePath(mailbox, message_id)}/attachments/${encodeURIComponent(attachment_id)}`,
       );
       return successResponse(requireGraphObject(result));
     },
@@ -341,15 +458,17 @@ partial failure still tells you what moved.
 Args:
     message_ids: Message IDs to move (1-50 per call).
     destination_folder: Destination folder ID or well-known name
-        (default "archive"). Common: archive, inbox, deleteditems, junkemail.`,
+        (default "archive"). Common: archive, inbox, deleteditems, junkemail.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_ids: MESSAGE_IDS_SCHEMA,
         destination_folder: RESOURCE_ID_SCHEMA.default("archive"),
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_ids, destination_folder }) => {
+    async ({ message_ids, destination_folder, mailbox }) => {
       const outcome = await applyToMessages(message_ids, async (messageId) => {
-        await dependencies.graphClient.post(`${messagePath(messageId)}/move`, {
+        await dependencies.graphClient.post(`${messagePath(mailbox, messageId)}/move`, {
           destinationId: destination_folder,
         });
       });
@@ -369,14 +488,16 @@ Args:
 Processes each message in order and reports per-message outcomes.
 
 Args:
-    message_ids: Message IDs to delete (1-50 per call).`,
+    message_ids: Message IDs to delete (1-50 per call).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_ids: MESSAGE_IDS_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_ids }) => {
+    async ({ message_ids, mailbox }) => {
       const outcome = await applyToMessages(message_ids, async (messageId) => {
-        await dependencies.graphClient.delete(messagePath(messageId));
+        await dependencies.graphClient.delete(messagePath(mailbox, messageId));
       });
       return batchResponse(outcome, { action: "deleted" });
     },
@@ -393,15 +514,17 @@ Processes each message in order and reports per-message outcomes.
 Args:
     message_ids: Message IDs to update (1-50 per call).
     is_read: Whether the messages are read (default true). Use false to
-        mark them unread.`,
+        mark them unread.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_ids: MESSAGE_IDS_SCHEMA,
         is_read: z.boolean().default(true),
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_ids, is_read }) => {
+    async ({ message_ids, is_read, mailbox }) => {
       const outcome = await applyToMessages(message_ids, async (messageId) => {
-        await dependencies.graphClient.patch(messagePath(messageId), { isRead: is_read });
+        await dependencies.graphClient.patch(messagePath(mailbox, messageId), { isRead: is_read });
       });
       return batchResponse(outcome, { action: is_read ? "marked read" : "marked unread" });
     },
@@ -418,15 +541,17 @@ Processes each message in order and reports per-message outcomes.
 Args:
     message_ids: Message IDs to update (1-50 per call).
     flag_status: Flag state: "notFlagged", "flagged", or "complete"
-        (default "flagged").`,
+        (default "flagged").
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_ids: MESSAGE_IDS_SCHEMA,
         flag_status: FLAG_STATUS_SCHEMA.default("flagged"),
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_ids, flag_status }) => {
+    async ({ message_ids, flag_status, mailbox }) => {
       const outcome = await applyToMessages(message_ids, async (messageId) => {
-        await dependencies.graphClient.patch(messagePath(messageId), {
+        await dependencies.graphClient.patch(messagePath(mailbox, messageId), {
           flag: { flagStatus: flag_status },
         });
       });
@@ -444,18 +569,16 @@ Use the returned folder IDs with graph_list_mail or graph_move_mail.
 
 Args:
     parent_folder_id: Parent folder ID. Empty lists top-level folders.
-    top: Maximum number of folders to return (default 25).`,
+    top: Maximum number of folders to return (default 25).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
         top: LIST_TOP_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ parent_folder_id, top }) => {
-      const path =
-        parent_folder_id === ""
-          ? "/me/mailFolders"
-          : `/me/mailFolders/${encodeURIComponent(parent_folder_id)}/childFolders`;
-      const result = await dependencies.graphClient.get(path, {
+    async ({ parent_folder_id, top, mailbox }) => {
+      const result = await dependencies.graphClient.get(mailFolderPath(mailbox, parent_folder_id), {
         $select: MAIL_FOLDER_FIELDS,
         $top: String(Math.min(top, 50)),
       });
@@ -471,18 +594,19 @@ Args:
 
 Args:
     display_name: Name of the new folder.
-    parent_folder_id: Parent folder ID. Empty creates a top-level folder.`,
+    parent_folder_id: Parent folder ID. Empty creates a top-level folder.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         display_name: RESOURCE_ID_SCHEMA,
         parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ display_name, parent_folder_id }) => {
-      const path =
-        parent_folder_id === ""
-          ? "/me/mailFolders"
-          : `/me/mailFolders/${encodeURIComponent(parent_folder_id)}/childFolders`;
-      const result = await dependencies.graphClient.post(path, { displayName: display_name });
+    async ({ display_name, parent_folder_id, mailbox }) => {
+      const result = await dependencies.graphClient.post(
+        mailFolderPath(mailbox, parent_folder_id),
+        { displayName: display_name },
+      );
       return successResponse(requireGraphObjectWithId(result));
     },
   );
@@ -499,26 +623,34 @@ Args:
     comment: Optional note to add above the forwarded message. When
         \`is_html\` is true, send explicit HTML; markdown is not converted.
     is_html: Whether the comment is HTML content (default: True). Use
-        false for plain text.`,
+        false for plain text.
+    as_draft: Whether to leave the forward as an unsent draft (default false).
+        Returns the created draft instead of a sent status.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_id: RESOURCE_ID_SCHEMA,
         to: RECIPIENTS_SCHEMA,
         comment: z.string().default(""),
         is_html: z.boolean().default(true),
+        as_draft: z.boolean().default(false),
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_id, to, comment, is_html }) => {
+    async ({ message_id, to, comment, is_html, as_draft, mailbox }) => {
       const draftResult = await dependencies.graphClient.post(
-        `${messagePath(message_id)}/createForward`,
+        `${messagePath(mailbox, message_id)}/createForward`,
       );
       const draft = requireGraphObjectWithId(draftResult);
-      const draftPath = messagePath(draft.id);
+      const draftPath = messagePath(mailbox, draft.id);
 
       const updates: GraphObject = { toRecipients: to.map(recipient) };
       if (comment !== "") {
         updates.body = buildRichTextBody(comment, is_html, RICH_TEXT_OPTIONS);
       }
       await dependencies.graphClient.patch(draftPath, updates);
+      if (as_draft) {
+        return successResponse(draft);
+      }
       await dependencies.graphClient.post(`${draftPath}/send`);
 
       return successResponse({ status: "Message forwarded" });
@@ -540,27 +672,41 @@ Args:
     body: Email body content. When \`is_html\` is true, send explicit
         HTML; markdown is not converted.
     cc: Optional list of CC email addresses.
+    bcc: Optional list of BCC email addresses.
     is_html: Whether the body is HTML content (default: True). Use false
-        for plain text.`,
+        for plain text.
+    importance: Message importance: "low", "normal", or "high" (default
+        "normal").
+    reply_to: Optional list of addresses that replies should be sent to.
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         to: RECIPIENTS_SCHEMA,
         subject: z.string(),
         body: z.string(),
         cc: CC_SCHEMA,
+        bcc: CC_SCHEMA,
         is_html: z.boolean().default(true),
+        importance: IMPORTANCE_SCHEMA.default("normal"),
+        reply_to: CC_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ to, subject, body, cc, is_html }) => {
-      const message: GraphObject = {
+    async ({ to, subject, body, cc, bcc, is_html, importance, reply_to, mailbox }) => {
+      const message = composeMessage({
+        to,
         subject,
-        body: buildRichTextBody(body, is_html, RICH_TEXT_OPTIONS),
-        toRecipients: to.map(recipient),
-      };
-      if (cc !== null && cc.length > 0) {
-        message.ccRecipients = cc.map(recipient);
-      }
+        body,
+        cc,
+        bcc,
+        is_html,
+        importance,
+        reply_to,
+      });
 
-      const result = await dependencies.graphClient.post("/me/messages", message);
+      const result = await dependencies.graphClient.post(
+        `${mailboxRoot(mailbox)}/messages`,
+        message,
+      );
       return successResponse(requireGraphObjectWithId(result));
     },
   );
@@ -575,15 +721,17 @@ Args:
     message_id: The draft message ID (from graph_create_mail_draft).
     file_name: File name to show on the attachment.
     content_base64: File content encoded as base64.
-    content_type: MIME type (default "application/octet-stream").`,
+    content_type: MIME type (default "application/octet-stream").
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_id: RESOURCE_ID_SCHEMA,
         file_name: RESOURCE_ID_SCHEMA,
         content_base64: z.string(),
         content_type: z.string().default("application/octet-stream"),
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_id, file_name, content_base64, content_type }) => {
+    async ({ message_id, file_name, content_base64, content_type, mailbox }) => {
       if (!/^[A-Za-z0-9+/]*={0,2}$/.test(content_base64) || content_base64.length % 4 !== 0) {
         return successResponse({ error: INVALID_ATTACHMENT_BASE64_MESSAGE }, "error");
       }
@@ -591,12 +739,15 @@ Args:
         return successResponse({ error: ATTACHMENT_TOO_LARGE_MESSAGE }, "error");
       }
 
-      const result = await dependencies.graphClient.post(`${messagePath(message_id)}/attachments`, {
-        "@odata.type": "#microsoft.graph.fileAttachment",
-        name: file_name,
-        contentType: content_type,
-        contentBytes: content_base64,
-      });
+      const result = await dependencies.graphClient.post(
+        `${messagePath(mailbox, message_id)}/attachments`,
+        {
+          "@odata.type": "#microsoft.graph.fileAttachment",
+          name: file_name,
+          contentType: content_type,
+          contentBytes: content_base64,
+        },
+      );
       return successResponse(requireGraphObjectWithId(result));
     },
   );
@@ -608,14 +759,295 @@ Args:
       description: `Send an existing draft message.
 
 Args:
-    message_id: The draft message ID (from graph_create_mail_draft).`,
+    message_id: The draft message ID (from graph_create_mail_draft).
+${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_id: RESOURCE_ID_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
       },
     },
-    async ({ message_id }) => {
-      await dependencies.graphClient.post(`${messagePath(message_id)}/send`);
+    async ({ message_id, mailbox }) => {
+      await dependencies.graphClient.post(`${messagePath(mailbox, message_id)}/send`);
       return successResponse({ status: "Draft sent" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_message_rules",
+    {
+      description: `List the inbox rules, including their conditions, actions, and order.
+
+Args:
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        mailbox: MAILBOX_SCHEMA,
+      },
+    },
+    async ({ mailbox }) => {
+      const result = await dependencies.graphClient.get(
+        `${mailboxRoot(mailbox)}/mailFolders/inbox/messageRules`,
+      );
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_create_message_rule",
+    {
+      description: `Create an inbox rule that Exchange runs on incoming mail.
+
+At least one condition and at least one action are required; only the parts you
+supply are sent to Graph.
+
+Args:
+    display_name: Name of the rule.
+    sequence: Order in which the rule runs, lowest first (default 1).
+    from_addresses: Sender addresses the rule matches.
+    subject_contains: Strings the subject must contain.
+    body_contains: Strings the body must contain.
+    move_to_folder: Destination folder ID for matching messages.
+    mark_as_read: Whether matching messages are marked read (default false).
+    delete_message: Whether matching messages move to Deleted Items
+        (default false).
+    is_enabled: Whether the rule is active (default true).
+    stop_processing: Whether later rules are skipped once this rule matches
+        (default false).
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        display_name: RESOURCE_ID_SCHEMA,
+        sequence: z.number().int().default(1),
+        from_addresses: z.array(z.string()).default([]),
+        subject_contains: z.array(z.string()).default([]),
+        body_contains: z.array(z.string()).default([]),
+        move_to_folder: OPTIONAL_RESOURCE_ID_SCHEMA,
+        mark_as_read: z.boolean().default(false),
+        delete_message: z.boolean().default(false),
+        is_enabled: z.boolean().default(true),
+        stop_processing: z.boolean().default(false),
+        mailbox: MAILBOX_SCHEMA,
+      },
+    },
+    async ({
+      display_name,
+      sequence,
+      from_addresses,
+      subject_contains,
+      body_contains,
+      move_to_folder,
+      mark_as_read,
+      delete_message,
+      is_enabled,
+      stop_processing,
+      mailbox,
+    }) => {
+      const conditions: GraphObject = {};
+      if (from_addresses.length > 0) {
+        conditions.fromAddresses = from_addresses.map(recipient);
+      }
+      if (subject_contains.length > 0) {
+        conditions.subjectContains = [...subject_contains];
+      }
+      if (body_contains.length > 0) {
+        conditions.bodyContains = [...body_contains];
+      }
+
+      const actions: GraphObject = {};
+      if (move_to_folder !== "") {
+        actions.moveToFolder = move_to_folder;
+      }
+      if (mark_as_read) {
+        actions.markAsRead = true;
+      }
+      if (delete_message) {
+        actions.delete = true;
+      }
+      if (stop_processing) {
+        actions.stopProcessingRules = true;
+      }
+
+      if (Object.keys(conditions).length === 0 || Object.keys(actions).length === 0) {
+        return successResponse({ error: INCOMPLETE_MESSAGE_RULE_MESSAGE }, "error");
+      }
+
+      const result = await dependencies.graphClient.post(
+        `${mailboxRoot(mailbox)}/mailFolders/inbox/messageRules`,
+        {
+          displayName: display_name,
+          sequence,
+          isEnabled: is_enabled,
+          conditions,
+          actions,
+        },
+      );
+      return successResponse(requireGraphObjectWithId(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_message_rule",
+    {
+      description: `Delete an inbox rule.
+
+Args:
+    rule_id: The rule ID (from graph_list_message_rules).
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        rule_id: RESOURCE_ID_SCHEMA,
+        mailbox: MAILBOX_SCHEMA,
+      },
+    },
+    async ({ rule_id, mailbox }) => {
+      await dependencies.graphClient.delete(
+        `${mailboxRoot(mailbox)}/mailFolders/inbox/messageRules/${encodeURIComponent(rule_id)}`,
+      );
+      return successResponse({ status: "Message rule deleted" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_categorize_mail",
+    {
+      description: `Set the categories on messages, replacing the categories already set.
+
+Each category must match the display name of a master category, so create it
+with graph_create_master_category first. Processes each message in order and
+reports per-message outcomes.
+
+Args:
+    message_ids: Message IDs to update (1-50 per call).
+    categories: Category display names to apply. An empty list clears them.
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        message_ids: MESSAGE_IDS_SCHEMA,
+        categories: z.array(z.string()),
+        mailbox: MAILBOX_SCHEMA,
+      },
+    },
+    async ({ message_ids, categories, mailbox }) => {
+      const outcome = await applyToMessages(message_ids, async (messageId) => {
+        await dependencies.graphClient.patch(messagePath(mailbox, messageId), {
+          categories: [...categories],
+        });
+      });
+      return batchResponse(outcome, { action: "categorized", categories: [...categories] });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_master_categories",
+    {
+      description: `List the master categories available for mail and events.
+
+Args:
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        mailbox: MAILBOX_SCHEMA,
+      },
+    },
+    async ({ mailbox }) => {
+      const result = await dependencies.graphClient.get(
+        `${mailboxRoot(mailbox)}/outlook/masterCategories`,
+      );
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_create_master_category",
+    {
+      description: `Create a master category so it can be applied to mail and events.
+
+The displayName is immutable after creation: to rename a category, delete it and
+create a new one. Colors are the presets preset0 through preset24.
+
+Args:
+    display_name: Name of the new category.
+    color: Color preset, preset0 through preset24 (default "preset0").
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        display_name: RESOURCE_ID_SCHEMA,
+        color: z.string().default("preset0"),
+        mailbox: MAILBOX_SCHEMA,
+      },
+    },
+    async ({ display_name, color, mailbox }) => {
+      const result = await dependencies.graphClient.post(
+        `${mailboxRoot(mailbox)}/outlook/masterCategories`,
+        { displayName: display_name, color },
+      );
+      return successResponse(requireGraphObjectWithId(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_get_mail_tips",
+    {
+      description: `Get mail tips for recipients. Use this to check whether someone is out of office.
+
+Args:
+    email_addresses: Recipient addresses to look up.
+    options: Mail tips to request (default "automaticReplies",
+        "mailboxFullStatus", "recipientScope"). Other values: customMailTip,
+        deliveryRestriction, externalMemberCount, maxMessageSize,
+        moderationStatus, totalMemberCount.
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        email_addresses: z.array(z.string()),
+        options: z.array(z.string()).default([...DEFAULT_MAIL_TIPS_OPTIONS]),
+        mailbox: MAILBOX_SCHEMA,
+      },
+    },
+    async ({ email_addresses, options, mailbox }) => {
+      const result = await dependencies.graphClient.post(`${mailboxRoot(mailbox)}/getMailTips`, {
+        emailAddresses: [...email_addresses],
+        mailTipsOptions: options.join(","),
+      });
+      return successResponse(collectionValue(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_get_mail_delta",
+    {
+      description: `List the changes in a mail folder since a previous delta token.
+
+Call it once without delta_link to seed a token, then pass the returned
+delta_token to receive only what changed since, including read-state changes and
+removals. Graph tracks one folder at a time and rejects $search on a delta
+query, so page through the folder you care about.
+
+Args:
+    folder: Mail folder name or ID (default "inbox").
+    delta_link: Opaque delta token from a previous call. Empty starts a new
+        sync of the folder.
+    top: Maximum number of messages per page (default 50).
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        folder: RESOURCE_ID_SCHEMA.default("inbox"),
+        delta_link: z.string().default(""),
+        top: z.number().int().default(50),
+        mailbox: MAILBOX_SCHEMA,
+      },
+    },
+    async ({ folder, delta_link, top, mailbox }) => {
+      const params: Record<string, string> =
+        delta_link === ""
+          ? { $select: MAIL_LIST_FIELDS, $top: String(top) }
+          : { $deltatoken: delta_link, $top: String(top) };
+
+      const result = await dependencies.graphClient.get(
+        `${mailboxRoot(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages/delta`,
+        params,
+      );
+      return successResponse({ value: collectionValue(result), delta_token: deltaToken(result) });
     },
   );
 }

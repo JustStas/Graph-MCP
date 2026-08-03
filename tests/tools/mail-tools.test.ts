@@ -54,14 +54,18 @@ Args:
     skip: Number of emails to skip before returning results (default 0). Graph
         returns at most 50 per call, so page through larger folders by raising
         skip in steps of top.
-    filter_query: Optional OData filter (e.g. "isRead eq false").`,
+    filter_query: Optional OData filter (e.g. "isRead eq false").
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_read_mail",
     description: `Read full details of a specific email.
 
 Args:
-    message_id: The email message ID.`,
+    message_id: The email message ID.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_search_mail",
@@ -69,11 +73,16 @@ Args:
 
 Args:
     query: Search query string.
-    top: Maximum number of results (default 25).`,
+    top: Maximum number of results (default 25).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_send_mail",
     description: `Send an email.
+
+A non-empty \`mailbox\` posts to /users/{mailbox}/sendMail, so the message is
+sent as that shared mailbox and needs the delegated Mail.Send.Shared permission.
 
 Args:
     to: List of recipient email addresses.
@@ -81,8 +90,15 @@ Args:
     body: Email body content. When \`is_html\` is true, send explicit
         HTML; markdown is not converted.
     cc: Optional list of CC email addresses.
+    bcc: Optional list of BCC email addresses.
     is_html: Whether to send the email body as HTML content (default:
-        True). Use false for plain text.`,
+        True). Use false for plain text.
+    importance: Message importance: "low", "normal", or "high" (default
+        "normal").
+    reply_to: Optional list of addresses that replies should be sent to.
+    save_to_sent_items: Whether to keep a copy in Sent Items (default true).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_reply_mail",
@@ -94,14 +110,20 @@ Args:
         HTML; markdown is not converted.
     reply_all: Whether to reply to all recipients (default: reply to sender only).
     is_html: Whether to send the reply body as HTML content (default:
-        True). Use false for plain text.`,
+        True). Use false for plain text.
+    as_draft: Whether to leave the reply as an unsent draft (default false).
+        Returns the created draft instead of a sent status.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_list_mail_attachments",
     description: `List attachments on an email message.
 
 Args:
-    message_id: The email message ID.`,
+    message_id: The email message ID.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_get_mail_attachment",
@@ -112,7 +134,9 @@ The attachment content is returned as base64-encoded data in the
 
 Args:
     message_id: The email message ID.
-    attachment_id: The attachment ID (from graph_list_mail_attachments).`,
+    attachment_id: The attachment ID (from graph_list_mail_attachments).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_move_mail",
@@ -124,7 +148,9 @@ partial failure still tells you what moved.
 Args:
     message_ids: Message IDs to move (1-50 per call).
     destination_folder: Destination folder ID or well-known name
-        (default "archive"). Common: archive, inbox, deleteditems, junkemail.`,
+        (default "archive"). Common: archive, inbox, deleteditems, junkemail.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_delete_mail",
@@ -133,7 +159,9 @@ Args:
 Processes each message in order and reports per-message outcomes.
 
 Args:
-    message_ids: Message IDs to delete (1-50 per call).`,
+    message_ids: Message IDs to delete (1-50 per call).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_mark_mail_read",
@@ -144,7 +172,9 @@ Processes each message in order and reports per-message outcomes.
 Args:
     message_ids: Message IDs to update (1-50 per call).
     is_read: Whether the messages are read (default true). Use false to
-        mark them unread.`,
+        mark them unread.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_flag_mail",
@@ -155,7 +185,9 @@ Processes each message in order and reports per-message outcomes.
 Args:
     message_ids: Message IDs to update (1-50 per call).
     flag_status: Flag state: "notFlagged", "flagged", or "complete"
-        (default "flagged").`,
+        (default "flagged").
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_list_mail_folders",
@@ -165,7 +197,9 @@ Use the returned folder IDs with graph_list_mail or graph_move_mail.
 
 Args:
     parent_folder_id: Parent folder ID. Empty lists top-level folders.
-    top: Maximum number of folders to return (default 25).`,
+    top: Maximum number of folders to return (default 25).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_create_mail_folder",
@@ -173,7 +207,9 @@ Args:
 
 Args:
     display_name: Name of the new folder.
-    parent_folder_id: Parent folder ID. Empty creates a top-level folder.`,
+    parent_folder_id: Parent folder ID. Empty creates a top-level folder.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_forward_mail",
@@ -185,7 +221,11 @@ Args:
     comment: Optional note to add above the forwarded message. When
         \`is_html\` is true, send explicit HTML; markdown is not converted.
     is_html: Whether the comment is HTML content (default: True). Use
-        false for plain text.`,
+        false for plain text.
+    as_draft: Whether to leave the forward as an unsent draft (default false).
+        Returns the created draft instead of a sent status.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_create_mail_draft",
@@ -200,8 +240,14 @@ Args:
     body: Email body content. When \`is_html\` is true, send explicit
         HTML; markdown is not converted.
     cc: Optional list of CC email addresses.
+    bcc: Optional list of BCC email addresses.
     is_html: Whether the body is HTML content (default: True). Use false
-        for plain text.`,
+        for plain text.
+    importance: Message importance: "low", "normal", or "high" (default
+        "normal").
+    reply_to: Optional list of addresses that replies should be sent to.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_add_mail_attachment",
@@ -211,14 +257,123 @@ Args:
     message_id: The draft message ID (from graph_create_mail_draft).
     file_name: File name to show on the attachment.
     content_base64: File content encoded as base64.
-    content_type: MIME type (default "application/octet-stream").`,
+    content_type: MIME type (default "application/octet-stream").
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
     name: "graph_send_mail_draft",
     description: `Send an existing draft message.
 
 Args:
-    message_id: The draft message ID (from graph_create_mail_draft).`,
+    message_id: The draft message ID (from graph_create_mail_draft).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
+    name: "graph_list_message_rules",
+    description: `List the inbox rules, including their conditions, actions, and order.
+
+Args:
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
+    name: "graph_create_message_rule",
+    description: `Create an inbox rule that Exchange runs on incoming mail.
+
+At least one condition and at least one action are required; only the parts you
+supply are sent to Graph.
+
+Args:
+    display_name: Name of the rule.
+    sequence: Order in which the rule runs, lowest first (default 1).
+    from_addresses: Sender addresses the rule matches.
+    subject_contains: Strings the subject must contain.
+    body_contains: Strings the body must contain.
+    move_to_folder: Destination folder ID for matching messages.
+    mark_as_read: Whether matching messages are marked read (default false).
+    delete_message: Whether matching messages move to Deleted Items
+        (default false).
+    is_enabled: Whether the rule is active (default true).
+    stop_processing: Whether later rules are skipped once this rule matches
+        (default false).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
+    name: "graph_delete_message_rule",
+    description: `Delete an inbox rule.
+
+Args:
+    rule_id: The rule ID (from graph_list_message_rules).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
+    name: "graph_categorize_mail",
+    description: `Set the categories on messages, replacing the categories already set.
+
+Each category must match the display name of a master category, so create it
+with graph_create_master_category first. Processes each message in order and
+reports per-message outcomes.
+
+Args:
+    message_ids: Message IDs to update (1-50 per call).
+    categories: Category display names to apply. An empty list clears them.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
+    name: "graph_list_master_categories",
+    description: `List the master categories available for mail and events.
+
+Args:
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
+    name: "graph_create_master_category",
+    description: `Create a master category so it can be applied to mail and events.
+
+The displayName is immutable after creation: to rename a category, delete it and
+create a new one. Colors are the presets preset0 through preset24.
+
+Args:
+    display_name: Name of the new category.
+    color: Color preset, preset0 through preset24 (default "preset0").
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
+    name: "graph_get_mail_tips",
+    description: `Get mail tips for recipients. Use this to check whether someone is out of office.
+
+Args:
+    email_addresses: Recipient addresses to look up.
+    options: Mail tips to request (default "automaticReplies",
+        "mailboxFullStatus", "recipientScope"). Other values: customMailTip,
+        deliveryRestriction, externalMemberCount, maxMessageSize,
+        moderationStatus, totalMemberCount.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
+    name: "graph_get_mail_delta",
+    description: `List the changes in a mail folder since a previous delta token.
+
+Call it once without delta_link to seed a token, then pass the returned
+delta_token to receive only what changed since, including read-state changes and
+removals. Graph tracks one folder at a time and rejects $search on a delta
+query, so page through the folder you care about.
+
+Args:
+    folder: Mail folder name or ID (default "inbox").
+    delta_link: Opaque delta token from a previous call. Empty starts a new
+        sync of the folder.
+    top: Maximum number of messages per page (default 50).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
 ] as const;
 
@@ -407,7 +562,7 @@ function messageIds(count: number): string[] {
 }
 
 describe("mail tool registration", () => {
-  test("registers exactly the seventeen mail names and complete descriptions", () => {
+  test("registers exactly the twenty-five mail names and complete descriptions", () => {
     const { harness } = registerMailHarness();
 
     expect(
@@ -422,9 +577,15 @@ describe("mail tool registration", () => {
     const { harness } = registerMailHarness();
 
     const listShape = schemaFor(harness, "graph_list_mail");
-    expect(Object.keys(listShape)).toEqual(["folder", "top", "skip", "filter_query"]);
+    expect(Object.keys(listShape)).toEqual(["folder", "top", "skip", "filter_query", "mailbox"]);
     const listSchema = z.object(listShape);
-    expect(listSchema.parse({})).toEqual({ folder: "inbox", top: 25, skip: 0, filter_query: "" });
+    expect(listSchema.parse({})).toEqual({
+      folder: "inbox",
+      top: 25,
+      skip: 0,
+      filter_query: "",
+      mailbox: "",
+    });
     expect(listSchema.safeParse({ top: 1.5 }).success).toBe(false);
     expect(listSchema.safeParse({ top: -1 }).success).toBe(true);
     expect(listSchema.safeParse({ top: 500 }).success).toBe(true);
@@ -434,48 +595,211 @@ describe("mail tool registration", () => {
     expect(listSchema.safeParse({ skip: 2.5 }).success).toBe(false);
 
     const readShape = schemaFor(harness, "graph_read_mail");
-    expect(Object.keys(readShape)).toEqual(["message_id"]);
+    expect(Object.keys(readShape)).toEqual(["message_id", "mailbox"]);
     expect(z.object(readShape).safeParse({}).success).toBe(false);
 
     const searchShape = schemaFor(harness, "graph_search_mail");
-    expect(Object.keys(searchShape)).toEqual(["query", "top"]);
+    expect(Object.keys(searchShape)).toEqual(["query", "top", "mailbox"]);
     const searchSchema = z.object(searchShape);
-    expect(searchSchema.parse({ query: "planning" })).toEqual({ query: "planning", top: 25 });
+    expect(searchSchema.parse({ query: "planning" })).toEqual({
+      query: "planning",
+      top: 25,
+      mailbox: "",
+    });
     expect(searchSchema.safeParse({}).success).toBe(false);
     expect(searchSchema.safeParse({ query: "planning", top: 2.5 }).success).toBe(false);
 
     const sendShape = schemaFor(harness, "graph_send_mail");
-    expect(Object.keys(sendShape)).toEqual(["to", "subject", "body", "cc", "is_html"]);
+    expect(Object.keys(sendShape)).toEqual([
+      "to",
+      "subject",
+      "body",
+      "cc",
+      "bcc",
+      "is_html",
+      "importance",
+      "reply_to",
+      "save_to_sent_items",
+      "mailbox",
+    ]);
     const sendSchema = z.object(sendShape);
     expect(sendSchema.parse({ to: ["ada@example.com"], subject: "Hi", body: "Hello" })).toEqual({
       to: ["ada@example.com"],
       subject: "Hi",
       body: "Hello",
       cc: null,
+      bcc: null,
       is_html: true,
+      importance: "normal",
+      reply_to: null,
+      save_to_sent_items: true,
+      mailbox: "",
     });
+    expect(
+      sendSchema.safeParse({ to: [], subject: "Hi", body: "Hello", importance: "urgent" }).success,
+    ).toBe(false);
+    for (const importance of ["low", "normal", "high"]) {
+      expect(
+        sendSchema.safeParse({ to: [], subject: "Hi", body: "Hello", importance }).success,
+      ).toBe(true);
+    }
     expect(sendSchema.safeParse({ to: [42], subject: "Hi", body: "Hello" }).success).toBe(false);
     expect(sendSchema.safeParse({ subject: "Hi", body: "Hello" }).success).toBe(false);
 
     const replyShape = schemaFor(harness, "graph_reply_mail");
-    expect(Object.keys(replyShape)).toEqual(["message_id", "body", "reply_all", "is_html"]);
+    expect(Object.keys(replyShape)).toEqual([
+      "message_id",
+      "body",
+      "reply_all",
+      "is_html",
+      "as_draft",
+      "mailbox",
+    ]);
     expect(z.object(replyShape).parse({ message_id: "message-1", body: "Thanks" })).toEqual({
       message_id: "message-1",
       body: "Thanks",
       reply_all: false,
       is_html: true,
+      as_draft: false,
+      mailbox: "",
     });
 
+    const forwardShape = schemaFor(harness, "graph_forward_mail");
+    expect(Object.keys(forwardShape)).toEqual([
+      "message_id",
+      "to",
+      "comment",
+      "is_html",
+      "as_draft",
+      "mailbox",
+    ]);
+    expect(z.object(forwardShape).parse({ message_id: "message-1", to: ["lead@bp.com"] })).toEqual({
+      message_id: "message-1",
+      to: ["lead@bp.com"],
+      comment: "",
+      is_html: true,
+      as_draft: false,
+      mailbox: "",
+    });
+
+    const draftShape = schemaFor(harness, "graph_create_mail_draft");
+    expect(Object.keys(draftShape)).toEqual([
+      "to",
+      "subject",
+      "body",
+      "cc",
+      "bcc",
+      "is_html",
+      "importance",
+      "reply_to",
+      "mailbox",
+    ]);
+    expect(
+      z.object(draftShape).parse({ to: ["lead@bp.com"], subject: "Hi", body: "Hello" }),
+    ).toEqual({
+      to: ["lead@bp.com"],
+      subject: "Hi",
+      body: "Hello",
+      cc: null,
+      bcc: null,
+      is_html: true,
+      importance: "normal",
+      reply_to: null,
+      mailbox: "",
+    });
+
+    const rulesShape = schemaFor(harness, "graph_create_message_rule");
+    expect(Object.keys(rulesShape)).toEqual([
+      "display_name",
+      "sequence",
+      "from_addresses",
+      "subject_contains",
+      "body_contains",
+      "move_to_folder",
+      "mark_as_read",
+      "delete_message",
+      "is_enabled",
+      "stop_processing",
+      "mailbox",
+    ]);
+    const rulesSchema = z.object(rulesShape);
+    expect(rulesSchema.parse({ display_name: "Route alerts" })).toEqual({
+      display_name: "Route alerts",
+      sequence: 1,
+      from_addresses: [],
+      subject_contains: [],
+      body_contains: [],
+      move_to_folder: "",
+      mark_as_read: false,
+      delete_message: false,
+      is_enabled: true,
+      stop_processing: false,
+      mailbox: "",
+    });
+    expect(rulesSchema.safeParse({}).success).toBe(false);
+    expect(rulesSchema.safeParse({ display_name: "Route", sequence: 1.5 }).success).toBe(false);
+
+    expect(Object.keys(schemaFor(harness, "graph_list_message_rules"))).toEqual(["mailbox"]);
+    expect(Object.keys(schemaFor(harness, "graph_list_master_categories"))).toEqual(["mailbox"]);
+    expect(Object.keys(schemaFor(harness, "graph_delete_message_rule"))).toEqual([
+      "rule_id",
+      "mailbox",
+    ]);
+
+    const categorizeShape = schemaFor(harness, "graph_categorize_mail");
+    expect(Object.keys(categorizeShape)).toEqual(["message_ids", "categories", "mailbox"]);
+    const categorizeSchema = z.object(categorizeShape);
+    expect(categorizeSchema.parse({ message_ids: ["message-1"], categories: [] })).toEqual({
+      message_ids: ["message-1"],
+      categories: [],
+      mailbox: "",
+    });
+    expect(categorizeSchema.safeParse({ message_ids: ["message-1"] }).success).toBe(false);
+    expect(categorizeSchema.safeParse({ message_ids: [], categories: [] }).success).toBe(false);
+
+    const categoryShape = schemaFor(harness, "graph_create_master_category");
+    expect(Object.keys(categoryShape)).toEqual(["display_name", "color", "mailbox"]);
+    expect(z.object(categoryShape).parse({ display_name: "Renewals" })).toEqual({
+      display_name: "Renewals",
+      color: "preset0",
+      mailbox: "",
+    });
+
+    const tipsShape = schemaFor(harness, "graph_get_mail_tips");
+    expect(Object.keys(tipsShape)).toEqual(["email_addresses", "options", "mailbox"]);
+    const tipsSchema = z.object(tipsShape);
+    expect(tipsSchema.parse({ email_addresses: ["ada@example.com"] })).toEqual({
+      email_addresses: ["ada@example.com"],
+      options: ["automaticReplies", "mailboxFullStatus", "recipientScope"],
+      mailbox: "",
+    });
+    expect(tipsSchema.safeParse({}).success).toBe(false);
+
+    const deltaShape = schemaFor(harness, "graph_get_mail_delta");
+    expect(Object.keys(deltaShape)).toEqual(["folder", "delta_link", "top", "mailbox"]);
+    const deltaSchema = z.object(deltaShape);
+    expect(deltaSchema.parse({})).toEqual({
+      folder: "inbox",
+      delta_link: "",
+      top: 50,
+      mailbox: "",
+    });
+    expect(deltaSchema.safeParse({ top: 2.5 }).success).toBe(false);
+
     const listAttachmentsShape = schemaFor(harness, "graph_list_mail_attachments");
-    expect(Object.keys(listAttachmentsShape)).toEqual(["message_id"]);
+    expect(Object.keys(listAttachmentsShape)).toEqual(["message_id", "mailbox"]);
     expect(z.object(listAttachmentsShape).safeParse({}).success).toBe(false);
 
     const getAttachmentShape = schemaFor(harness, "graph_get_mail_attachment");
-    expect(Object.keys(getAttachmentShape)).toEqual(["message_id", "attachment_id"]);
+    expect(Object.keys(getAttachmentShape)).toEqual(["message_id", "attachment_id", "mailbox"]);
     expect(z.object(getAttachmentShape).safeParse({ message_id: "message-1" }).success).toBe(false);
+
+    for (const { name } of EXPECTED_MAIL_TOOLS) {
+      expect(Object.keys(schemaFor(harness, name)).at(-1)).toBe("mailbox");
+    }
   });
 
-  test("rejects empty and dot-segment folders, message IDs, and attachment IDs", () => {
+  test("rejects empty and dot-segment folders, message IDs, attachment IDs, and mailboxes", () => {
     const { harness } = registerMailHarness();
     const cases = [
       { name: "graph_list_mail", key: "folder", base: {} },
@@ -492,6 +816,10 @@ describe("mail tool registration", () => {
         key: "attachment_id",
         base: { message_id: "message-1" },
       },
+      { name: "graph_delete_message_rule", key: "rule_id", base: {} },
+      { name: "graph_create_message_rule", key: "display_name", base: {} },
+      { name: "graph_create_master_category", key: "display_name", base: {} },
+      { name: "graph_get_mail_delta", key: "folder", base: {} },
     ];
 
     for (const row of cases) {
@@ -499,6 +827,18 @@ describe("mail tool registration", () => {
       for (const value of ["", ".", ".."]) {
         expect(schema.safeParse({ ...row.base, [row.key]: value }).success).toBe(false);
       }
+    }
+
+    for (const { name } of EXPECTED_MAIL_TOOLS) {
+      const mailboxField = schemaFor(harness, name).mailbox;
+      if (mailboxField === undefined) {
+        throw new Error(`Tool ${name} did not expose a mailbox argument.`);
+      }
+      const mailboxSchema = z.object({ mailbox: mailboxField });
+      expect(mailboxSchema.safeParse({ mailbox: "" }).success).toBe(true);
+      expect(mailboxSchema.safeParse({ mailbox: "shared box@bp.com" }).success).toBe(true);
+      expect(mailboxSchema.safeParse({ mailbox: "." }).success).toBe(false);
+      expect(mailboxSchema.safeParse({ mailbox: ".." }).success).toBe(false);
     }
   });
 });
@@ -681,7 +1021,11 @@ describe("mail send and reply operations", () => {
       subject: "Planning",
       body: "Hello",
       cc,
+      bcc: null,
       is_html: false,
+      importance: "normal",
+      reply_to: null,
+      save_to_sent_items: true,
     });
 
     expect(to).toEqual(toBefore);
@@ -1376,5 +1720,830 @@ describe("mail lifecycle authenticated wrapper errors", () => {
     const { harness } = registerMailHarness([new AuthenticationError("Not authenticated.")]);
 
     await expect(harness.invoke(name, args)).resolves.toEqual(AUTHENTICATION_ERROR_RESULT);
+  });
+});
+
+const SHARED_MAILBOX = "shared box@bp.com";
+const SHARED_ROOT = `/users/${encodeURIComponent(SHARED_MAILBOX)}`;
+
+interface MailboxRoutingCase {
+  readonly name: string;
+  readonly args: Record<string, unknown>;
+  readonly responses: readonly unknown[];
+  readonly ownPaths: readonly string[];
+  readonly sharedPaths: readonly string[];
+}
+
+const MAILBOX_ROUTING_CASES: readonly MailboxRoutingCase[] = [
+  {
+    name: "graph_list_mail",
+    args: {},
+    responses: [{ value: [] }],
+    ownPaths: ["/me/mailFolders/inbox/messages"],
+    sharedPaths: [`${SHARED_ROOT}/mailFolders/inbox/messages`],
+  },
+  {
+    name: "graph_read_mail",
+    args: { message_id: "message-1" },
+    responses: [{ id: "message-1" }],
+    ownPaths: ["/me/messages/message-1"],
+    sharedPaths: [`${SHARED_ROOT}/messages/message-1`],
+  },
+  {
+    name: "graph_search_mail",
+    args: { query: "planning" },
+    responses: [{ value: [] }],
+    ownPaths: ["/me/messages"],
+    sharedPaths: [`${SHARED_ROOT}/messages`],
+  },
+  {
+    name: "graph_send_mail",
+    args: { to: ["ada@example.com"], subject: "Hi", body: "Hello" },
+    responses: [undefined],
+    ownPaths: ["/me/sendMail"],
+    sharedPaths: [`${SHARED_ROOT}/sendMail`],
+  },
+  {
+    name: "graph_reply_mail",
+    args: { message_id: "message-1", body: "Thanks" },
+    responses: [{ id: "draft-1" }, undefined, undefined],
+    ownPaths: [
+      "/me/messages/message-1/createReply",
+      "/me/messages/draft-1",
+      "/me/messages/draft-1/send",
+    ],
+    sharedPaths: [
+      `${SHARED_ROOT}/messages/message-1/createReply`,
+      `${SHARED_ROOT}/messages/draft-1`,
+      `${SHARED_ROOT}/messages/draft-1/send`,
+    ],
+  },
+  {
+    name: "graph_list_mail_attachments",
+    args: { message_id: "message-1" },
+    responses: [{ value: [] }],
+    ownPaths: ["/me/messages/message-1/attachments"],
+    sharedPaths: [`${SHARED_ROOT}/messages/message-1/attachments`],
+  },
+  {
+    name: "graph_get_mail_attachment",
+    args: { message_id: "message-1", attachment_id: "attachment-1" },
+    responses: [{ id: "attachment-1" }],
+    ownPaths: ["/me/messages/message-1/attachments/attachment-1"],
+    sharedPaths: [`${SHARED_ROOT}/messages/message-1/attachments/attachment-1`],
+  },
+  {
+    name: "graph_move_mail",
+    args: { message_ids: ["message-1"] },
+    responses: [{}],
+    ownPaths: ["/me/messages/message-1/move"],
+    sharedPaths: [`${SHARED_ROOT}/messages/message-1/move`],
+  },
+  {
+    name: "graph_delete_mail",
+    args: { message_ids: ["message-1"] },
+    responses: [null],
+    ownPaths: ["/me/messages/message-1"],
+    sharedPaths: [`${SHARED_ROOT}/messages/message-1`],
+  },
+  {
+    name: "graph_mark_mail_read",
+    args: { message_ids: ["message-1"] },
+    responses: [{}],
+    ownPaths: ["/me/messages/message-1"],
+    sharedPaths: [`${SHARED_ROOT}/messages/message-1`],
+  },
+  {
+    name: "graph_flag_mail",
+    args: { message_ids: ["message-1"] },
+    responses: [{}],
+    ownPaths: ["/me/messages/message-1"],
+    sharedPaths: [`${SHARED_ROOT}/messages/message-1`],
+  },
+  {
+    name: "graph_list_mail_folders",
+    args: {},
+    responses: [{ value: [] }],
+    ownPaths: ["/me/mailFolders"],
+    sharedPaths: [`${SHARED_ROOT}/mailFolders`],
+  },
+  {
+    name: "graph_create_mail_folder",
+    args: { display_name: "Robots" },
+    responses: [{ id: "folder-1" }],
+    ownPaths: ["/me/mailFolders"],
+    sharedPaths: [`${SHARED_ROOT}/mailFolders`],
+  },
+  {
+    name: "graph_forward_mail",
+    args: { message_id: "message-1", to: ["lead@bp.com"] },
+    responses: [{ id: "draft-1" }, {}, {}],
+    ownPaths: [
+      "/me/messages/message-1/createForward",
+      "/me/messages/draft-1",
+      "/me/messages/draft-1/send",
+    ],
+    sharedPaths: [
+      `${SHARED_ROOT}/messages/message-1/createForward`,
+      `${SHARED_ROOT}/messages/draft-1`,
+      `${SHARED_ROOT}/messages/draft-1/send`,
+    ],
+  },
+  {
+    name: "graph_create_mail_draft",
+    args: { to: ["lead@bp.com"], subject: "Hi", body: "Hello" },
+    responses: [{ id: "draft-1" }],
+    ownPaths: ["/me/messages"],
+    sharedPaths: [`${SHARED_ROOT}/messages`],
+  },
+  {
+    name: "graph_add_mail_attachment",
+    args: { message_id: "draft-1", file_name: "report.csv", content_base64: "aGk=" },
+    responses: [{ id: "attachment-1" }],
+    ownPaths: ["/me/messages/draft-1/attachments"],
+    sharedPaths: [`${SHARED_ROOT}/messages/draft-1/attachments`],
+  },
+  {
+    name: "graph_send_mail_draft",
+    args: { message_id: "draft-1" },
+    responses: [{}],
+    ownPaths: ["/me/messages/draft-1/send"],
+    sharedPaths: [`${SHARED_ROOT}/messages/draft-1/send`],
+  },
+  {
+    name: "graph_list_message_rules",
+    args: {},
+    responses: [{ value: [] }],
+    ownPaths: ["/me/mailFolders/inbox/messageRules"],
+    sharedPaths: [`${SHARED_ROOT}/mailFolders/inbox/messageRules`],
+  },
+  {
+    name: "graph_create_message_rule",
+    args: { display_name: "Route alerts", from_addresses: ["alerts@bp.com"], mark_as_read: true },
+    responses: [{ id: "rule-1" }],
+    ownPaths: ["/me/mailFolders/inbox/messageRules"],
+    sharedPaths: [`${SHARED_ROOT}/mailFolders/inbox/messageRules`],
+  },
+  {
+    name: "graph_delete_message_rule",
+    args: { rule_id: "rule-1" },
+    responses: [null],
+    ownPaths: ["/me/mailFolders/inbox/messageRules/rule-1"],
+    sharedPaths: [`${SHARED_ROOT}/mailFolders/inbox/messageRules/rule-1`],
+  },
+  {
+    name: "graph_categorize_mail",
+    args: { message_ids: ["message-1"], categories: ["Renewals"] },
+    responses: [{}],
+    ownPaths: ["/me/messages/message-1"],
+    sharedPaths: [`${SHARED_ROOT}/messages/message-1`],
+  },
+  {
+    name: "graph_list_master_categories",
+    args: {},
+    responses: [{ value: [] }],
+    ownPaths: ["/me/outlook/masterCategories"],
+    sharedPaths: [`${SHARED_ROOT}/outlook/masterCategories`],
+  },
+  {
+    name: "graph_create_master_category",
+    args: { display_name: "Renewals" },
+    responses: [{ id: "category-1" }],
+    ownPaths: ["/me/outlook/masterCategories"],
+    sharedPaths: [`${SHARED_ROOT}/outlook/masterCategories`],
+  },
+  {
+    name: "graph_get_mail_tips",
+    args: { email_addresses: ["ada@example.com"] },
+    responses: [{ value: [] }],
+    ownPaths: ["/me/getMailTips"],
+    sharedPaths: [`${SHARED_ROOT}/getMailTips`],
+  },
+  {
+    name: "graph_get_mail_delta",
+    args: {},
+    responses: [{ value: [] }],
+    ownPaths: ["/me/mailFolders/inbox/messages/delta"],
+    sharedPaths: [`${SHARED_ROOT}/mailFolders/inbox/messages/delta`],
+  },
+];
+
+describe("shared and delegated mailbox routing", () => {
+  test("covers every registered mail tool", () => {
+    expect(MAILBOX_ROUTING_CASES.map(({ name }) => name)).toEqual(
+      EXPECTED_MAIL_TOOLS.map(({ name }) => name),
+    );
+  });
+
+  test.each(MAILBOX_ROUTING_CASES)(
+    "$name targets the encoded shared mailbox root and never /me",
+    async ({ name, args, responses, sharedPaths }) => {
+      const { harness, graph } = registerMailHarness(responses);
+
+      await harness.invoke(name, { ...args, mailbox: SHARED_MAILBOX });
+
+      const paths = graph.calls.map(({ path }) => path);
+      expect(paths).toEqual(sharedPaths);
+      for (const path of paths) {
+        expect(path.startsWith(`${SHARED_ROOT}/`)).toBe(true);
+        expect(path).not.toContain("/me/");
+      }
+    },
+  );
+
+  test.each(MAILBOX_ROUTING_CASES)(
+    "$name still targets /me when mailbox is omitted",
+    async ({ name, args, responses, ownPaths }) => {
+      const { harness, graph } = registerMailHarness(responses);
+
+      await harness.invoke(name, args);
+
+      const paths = graph.calls.map(({ path }) => path);
+      expect(paths).toEqual(ownPaths);
+      for (const path of paths) {
+        expect(path.startsWith("/me/")).toBe(true);
+        expect(path).not.toContain("/users/");
+      }
+    },
+  );
+
+  test("rejects dot-segment mailboxes before any Graph call", () => {
+    const { harness, graph } = registerMailHarness([{ value: [] }]);
+
+    for (const mailbox of [".", ".."]) {
+      expect(z.object(schemaFor(harness, "graph_list_mail")).safeParse({ mailbox }).success).toBe(
+        false,
+      );
+    }
+    expect(graph.calls).toEqual([]);
+  });
+});
+
+describe("mail composition options", () => {
+  test("sends bcc, replyTo, and high importance in one exact payload", async () => {
+    const { harness, graph } = registerMailHarness([undefined]);
+
+    await harness.invoke("graph_send_mail", {
+      to: ["ada@example.com"],
+      subject: "Planning",
+      body: "<p>Hello</p>",
+      cc: ["grace@example.com"],
+      bcc: ["audit@bp.com", "archive@bp.com"],
+      importance: "high",
+      reply_to: ["inbox@bp.com"],
+      save_to_sent_items: false,
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/sendMail",
+        body: {
+          message: {
+            subject: "Planning",
+            body: { contentType: "HTML", content: "<p>Hello</p>" },
+            toRecipients: [{ emailAddress: { address: "ada@example.com" } }],
+            ccRecipients: [{ emailAddress: { address: "grace@example.com" } }],
+            bccRecipients: [
+              { emailAddress: { address: "audit@bp.com" } },
+              { emailAddress: { address: "archive@bp.com" } },
+            ],
+            replyTo: [{ emailAddress: { address: "inbox@bp.com" } }],
+            importance: "high",
+          },
+          saveToSentItems: false,
+        },
+      },
+    ]);
+  });
+
+  test.each(["graph_send_mail", "graph_create_mail_draft"])(
+    "%s omits importance when it is normal and omits empty bcc and reply_to",
+    async (name) => {
+      const { harness, graph } = registerMailHarness([{ id: "draft-1" }]);
+
+      await harness.invoke(name, {
+        to: ["ada@example.com"],
+        subject: "Planning",
+        body: "Hello",
+        bcc: [],
+        reply_to: [],
+        importance: "normal",
+        is_html: false,
+      });
+
+      const body = graph.calls[0]?.body as { message?: Record<string, unknown> } | undefined;
+      const message = name === "graph_send_mail" ? body?.message : body;
+      expect(message).toEqual({
+        subject: "Planning",
+        body: { contentType: "Text", content: "Hello" },
+        toRecipients: [{ emailAddress: { address: "ada@example.com" } }],
+      });
+    },
+  );
+
+  test.each(["low", "high"])("keeps importance %s on a draft", async (importance) => {
+    const { harness, graph } = registerMailHarness([{ id: "draft-1" }]);
+
+    await harness.invoke("graph_create_mail_draft", {
+      to: ["ada@example.com"],
+      subject: "Planning",
+      body: "<p>Hello</p>",
+      bcc: ["audit@bp.com"],
+      reply_to: ["inbox@bp.com"],
+      importance,
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/messages",
+        body: {
+          subject: "Planning",
+          body: { contentType: "HTML", content: "<p>Hello</p>" },
+          toRecipients: [{ emailAddress: { address: "ada@example.com" } }],
+          bccRecipients: [{ emailAddress: { address: "audit@bp.com" } }],
+          replyTo: [{ emailAddress: { address: "inbox@bp.com" } }],
+          importance,
+        },
+      },
+    ]);
+  });
+
+  test("keeps a reply as a draft and returns the draft instead of sending", async () => {
+    const draft = { id: "draft-1", subject: "RE: Planning" };
+    const { harness, graph } = registerMailHarness([draft, {}]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_reply_mail", {
+          message_id: "message-1",
+          body: "Thanks",
+          as_draft: true,
+        }),
+      ),
+    ).toEqual(draft);
+    expect(graph.calls).toEqual([
+      { method: "POST", path: "/me/messages/message-1/createReply" },
+      {
+        method: "PATCH",
+        path: "/me/messages/draft-1",
+        body: { body: { contentType: "HTML", content: "Thanks" } },
+      },
+    ]);
+  });
+
+  test("keeps a reply all as a draft", async () => {
+    const { harness, graph } = registerMailHarness([{ id: "draft-1" }, {}]);
+
+    await harness.invoke("graph_reply_mail", {
+      message_id: "message-1",
+      body: "Thanks",
+      reply_all: true,
+      as_draft: true,
+    });
+
+    expect(graph.calls.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      "POST /me/messages/message-1/createReplyAll",
+      "PATCH /me/messages/draft-1",
+    ]);
+  });
+
+  test("keeps a forward as a draft and returns the draft instead of sending", async () => {
+    const draft = { id: "draft-9", subject: "FW: Planning" };
+    const { harness, graph } = registerMailHarness([draft, {}]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_forward_mail", {
+          message_id: "message-1",
+          to: ["lead@bp.com"],
+          comment: "<p>See below</p>",
+          as_draft: true,
+        }),
+      ),
+    ).toEqual(draft);
+    expect(graph.calls).toEqual([
+      { method: "POST", path: "/me/messages/message-1/createForward" },
+      {
+        method: "PATCH",
+        path: "/me/messages/draft-9",
+        body: {
+          toRecipients: [{ emailAddress: { address: "lead@bp.com" } }],
+          body: { contentType: "HTML", content: "<p>See below</p>" },
+        },
+      },
+    ]);
+  });
+
+  test.each([
+    { name: "graph_reply_mail", args: { message_id: "message-1", body: "Thanks" } },
+    { name: "graph_forward_mail", args: { message_id: "message-1", to: ["lead@bp.com"] } },
+  ])("$name still sends when as_draft is omitted", async ({ name, args }) => {
+    const { harness, graph } = registerMailHarness([{ id: "draft-1" }, {}, {}]);
+
+    await harness.invoke(name, args);
+
+    expect(graph.calls.at(-1)).toEqual({ method: "POST", path: "/me/messages/draft-1/send" });
+  });
+});
+
+describe("inbox message rules", () => {
+  test("lists rules from the inbox rules collection", async () => {
+    const { harness, graph } = registerMailHarness([{ value: [{ id: "rule-1" }] }]);
+
+    expect(dataFrom(await harness.invoke("graph_list_message_rules"))).toEqual([{ id: "rule-1" }]);
+    expect(graph.calls).toEqual([{ method: "GET", path: "/me/mailFolders/inbox/messageRules" }]);
+  });
+
+  test("treats a missing value property as an empty rule list", async () => {
+    const { harness } = registerMailHarness([{}]);
+
+    expect(dataFrom(await harness.invoke("graph_list_message_rules"))).toEqual([]);
+  });
+
+  test("creates a rule with every condition and action in the exact Graph shape", async () => {
+    const { harness, graph } = registerMailHarness([{ id: "rule-1" }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_create_message_rule", {
+          display_name: "Route alerts",
+          sequence: 3,
+          from_addresses: ["alerts@bp.com", "ops@bp.com"],
+          subject_contains: ["ALERT"],
+          body_contains: ["severity"],
+          move_to_folder: "AAMkAD folder/id",
+          mark_as_read: true,
+          delete_message: true,
+          is_enabled: false,
+          stop_processing: true,
+        }),
+      ),
+    ).toEqual({ id: "rule-1" });
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/mailFolders/inbox/messageRules",
+        body: {
+          displayName: "Route alerts",
+          sequence: 3,
+          isEnabled: false,
+          conditions: {
+            fromAddresses: [
+              { emailAddress: { address: "alerts@bp.com" } },
+              { emailAddress: { address: "ops@bp.com" } },
+            ],
+            subjectContains: ["ALERT"],
+            bodyContains: ["severity"],
+          },
+          actions: {
+            moveToFolder: "AAMkAD folder/id",
+            markAsRead: true,
+            delete: true,
+            stopProcessingRules: true,
+          },
+        },
+      },
+    ]);
+  });
+
+  test("sends only the supplied condition and action with the default sequence", async () => {
+    const { harness, graph } = registerMailHarness([{ id: "rule-1" }]);
+
+    await harness.invoke("graph_create_message_rule", {
+      display_name: "Archive newsletters",
+      subject_contains: ["Newsletter"],
+      move_to_folder: "archive",
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/mailFolders/inbox/messageRules",
+        body: {
+          displayName: "Archive newsletters",
+          sequence: 1,
+          isEnabled: true,
+          conditions: { subjectContains: ["Newsletter"] },
+          actions: { moveToFolder: "archive" },
+        },
+      },
+    ]);
+  });
+
+  test.each([
+    { label: "no condition and no action", args: {} },
+    { label: "a condition but no action", args: { subject_contains: ["ALERT"] } },
+    { label: "an action but no condition", args: { mark_as_read: true } },
+    {
+      label: "only disabled boolean actions",
+      args: { body_contains: ["x"], delete_message: false },
+    },
+  ])("rejects a rule with $label without calling Graph", async ({ args }) => {
+    const { harness, graph } = registerMailHarness();
+
+    const envelopeText = (
+      await harness.invoke("graph_create_message_rule", { display_name: "Rule", ...args })
+    ).content[0];
+    if (envelopeText?.type !== "text") {
+      throw new Error("Expected a text tool result.");
+    }
+
+    expect(JSON.parse(envelopeText.text)).toEqual({
+      data: { error: "A message rule needs at least one condition and at least one action." },
+      message: "error",
+    });
+    expect(graph.calls).toEqual([]);
+  });
+
+  test("rejects a created rule response without an id", async () => {
+    const { harness } = registerMailHarness([{ displayName: "Route alerts" }]);
+
+    await expect(
+      harness.invoke("graph_create_message_rule", {
+        display_name: "Route alerts",
+        subject_contains: ["ALERT"],
+        mark_as_read: true,
+      }),
+    ).resolves.toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+  });
+
+  test("deletes a rule through the encoded rule route", async () => {
+    const ruleId = "../rule/path\\name#fragment?query=:value%";
+    const { harness, graph } = registerMailHarness([null]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_delete_message_rule", { rule_id: ruleId })),
+    ).toEqual({ status: "Message rule deleted" });
+    expect(graph.calls).toEqual([
+      {
+        method: "DELETE",
+        path: `/me/mailFolders/inbox/messageRules/${encodeURIComponent(ruleId)}`,
+      },
+    ]);
+  });
+});
+
+describe("mail categories", () => {
+  test("categorizes messages in order and reports per-message outcomes", async () => {
+    const { harness, graph } = registerMailHarness([{}, new GraphApiError("Patch failed.")]);
+
+    const result = await harness.invoke("graph_categorize_mail", {
+      message_ids: ["message-1", "message 2"],
+      categories: ["Renewals", "Blue category"],
+    });
+    const content = result.content[0];
+    if (content?.type !== "text") {
+      throw new Error("Expected a text tool result.");
+    }
+
+    expect(JSON.parse(content.text)).toEqual({
+      data: {
+        action: "categorized",
+        categories: ["Renewals", "Blue category"],
+        succeeded_count: 1,
+        failed_count: 1,
+        succeeded: ["message-1"],
+        failed: [{ message_id: "message 2", error: "Patch failed." }],
+      },
+      message: "success",
+    });
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: "/me/messages/message-1",
+        body: { categories: ["Renewals", "Blue category"] },
+      },
+      {
+        method: "PATCH",
+        path: `/me/messages/${encodeURIComponent("message 2")}`,
+        body: { categories: ["Renewals", "Blue category"] },
+      },
+    ]);
+  });
+
+  test("clears categories with an empty list", async () => {
+    const { harness, graph } = registerMailHarness([{}]);
+
+    await harness.invoke("graph_categorize_mail", {
+      message_ids: ["message-1"],
+      categories: [],
+    });
+
+    expect(graph.calls).toEqual([
+      { method: "PATCH", path: "/me/messages/message-1", body: { categories: [] } },
+    ]);
+  });
+
+  test("lists master categories from the outlook collection", async () => {
+    const { harness, graph } = registerMailHarness([
+      { value: [{ id: "category-1", displayName: "Renewals", color: "preset3" }] },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_list_master_categories"))).toEqual([
+      { id: "category-1", displayName: "Renewals", color: "preset3" },
+    ]);
+    expect(graph.calls).toEqual([{ method: "GET", path: "/me/outlook/masterCategories" }]);
+  });
+
+  test("creates a master category with the default and an explicit color", async () => {
+    const { harness, graph } = registerMailHarness([{ id: "category-1" }, { id: "category-2" }]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_create_master_category", { display_name: "Renewals" })),
+    ).toEqual({ id: "category-1" });
+    await harness.invoke("graph_create_master_category", {
+      display_name: "Audits",
+      color: "preset24",
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/outlook/masterCategories",
+        body: { displayName: "Renewals", color: "preset0" },
+      },
+      {
+        method: "POST",
+        path: "/me/outlook/masterCategories",
+        body: { displayName: "Audits", color: "preset24" },
+      },
+    ]);
+  });
+
+  test("rejects a created master category response without an id", async () => {
+    const { harness } = registerMailHarness([{ displayName: "Renewals" }]);
+
+    await expect(
+      harness.invoke("graph_create_master_category", { display_name: "Renewals" }),
+    ).resolves.toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+  });
+});
+
+describe("mail tips", () => {
+  test("posts the default mail tips options joined by commas", async () => {
+    const tips = [{ emailAddress: { address: "ada@example.com" }, automaticReplies: {} }];
+    const { harness, graph } = registerMailHarness([{ value: tips }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_mail_tips", {
+          email_addresses: ["ada@example.com", "grace@example.com"],
+        }),
+      ),
+    ).toEqual(tips);
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/getMailTips",
+        body: {
+          emailAddresses: ["ada@example.com", "grace@example.com"],
+          mailTipsOptions: "automaticReplies,mailboxFullStatus,recipientScope",
+        },
+      },
+    ]);
+  });
+
+  test("posts explicit options and treats a missing value property as empty", async () => {
+    const { harness, graph } = registerMailHarness([{}]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_mail_tips", {
+          email_addresses: ["ada@example.com"],
+          options: ["automaticReplies"],
+        }),
+      ),
+    ).toEqual([]);
+    expect(graph.calls[0]?.body).toEqual({
+      emailAddresses: ["ada@example.com"],
+      mailTipsOptions: "automaticReplies",
+    });
+  });
+});
+
+describe("mail delta", () => {
+  test("seeds a sync with the select and top parameters and parses the delta token", async () => {
+    const { harness, graph } = registerMailHarness([
+      {
+        value: [{ id: "message-1" }],
+        "@odata.deltaLink":
+          "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=abc%2F123",
+      },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_get_mail_delta"))).toEqual({
+      value: [{ id: "message-1" }],
+      delta_token: "abc/123",
+    });
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/mailFolders/inbox/messages/delta",
+        params: { $select: MAIL_LIST_FIELDS, $top: "50" },
+      },
+    ]);
+  });
+
+  test("resumes from a token without sending select and encodes the folder", async () => {
+    const folder = "archive/2026#priority";
+    const { harness, graph } = registerMailHarness([{ value: [] }]);
+
+    await harness.invoke("graph_get_mail_delta", {
+      folder,
+      delta_link: "token-1",
+      top: 10,
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/me/mailFolders/${encodeURIComponent(folder)}/messages/delta`,
+        params: { $deltatoken: "token-1", $top: "10" },
+      },
+    ]);
+  });
+
+  test.each([
+    { label: "no deltaLink", response: { value: [] } },
+    {
+      label: "a deltaLink without a query",
+      response: {
+        value: [],
+        "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/messages/delta",
+      },
+    },
+    {
+      label: "a deltaLink without a delta token",
+      response: {
+        value: [],
+        "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/messages/delta?$skiptoken=abc",
+      },
+    },
+    { label: "a non-string deltaLink", response: { value: [], "@odata.deltaLink": 42 } },
+  ])("returns an empty delta token for $label", async ({ response }) => {
+    const { harness } = registerMailHarness([response]);
+
+    expect(dataFrom(await harness.invoke("graph_get_mail_delta"))).toEqual({
+      value: [],
+      delta_token: "",
+    });
+  });
+
+  test.each([null, [], "payload-secret", { value: null }])(
+    "rejects a malformed delta response %# without leakage",
+    async (response) => {
+      const { harness } = registerMailHarness([response]);
+      const result = await harness.invoke("graph_get_mail_delta");
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
+describe("mail rules, categories, tips, and delta wrapper errors", () => {
+  test.each([
+    { name: "graph_list_message_rules", args: {} },
+    {
+      name: "graph_create_message_rule",
+      args: { display_name: "Rule", subject_contains: ["ALERT"], mark_as_read: true },
+    },
+    { name: "graph_delete_message_rule", args: { rule_id: "rule-1" } },
+    { name: "graph_list_master_categories", args: {} },
+    { name: "graph_create_master_category", args: { display_name: "Renewals" } },
+    { name: "graph_get_mail_tips", args: { email_addresses: ["ada@example.com"] } },
+    { name: "graph_get_mail_delta", args: {} },
+  ])("$name returns the stable authentication error envelope", async ({ name, args }) => {
+    const { harness } = registerMailHarness([new AuthenticationError("Not authenticated.")]);
+
+    await expect(harness.invoke(name, args)).resolves.toEqual(AUTHENTICATION_ERROR_RESULT);
+  });
+
+  test("graph_categorize_mail reports the authentication failure per message", async () => {
+    const { harness } = registerMailHarness([new AuthenticationError("Not authenticated.")]);
+
+    const result = await harness.invoke("graph_categorize_mail", {
+      message_ids: ["message-1"],
+      categories: ["Renewals"],
+    });
+    const content = result.content[0];
+    if (content?.type !== "text") {
+      throw new Error("Expected a text tool result.");
+    }
+
+    expect(JSON.parse(content.text)).toEqual({
+      data: {
+        action: "categorized",
+        categories: ["Renewals"],
+        succeeded_count: 0,
+        failed_count: 1,
+        succeeded: [],
+        failed: [{ message_id: "message-1", error: "Not authenticated." }],
+      },
+      message: "error",
+    });
   });
 });

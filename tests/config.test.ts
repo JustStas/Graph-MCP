@@ -12,26 +12,42 @@ const expectedScopes = [
   "profile",
   "User.Read",
   "User.ReadBasic.All",
+  "User.Read.All",
   "Chat.Read",
   "Chat.ReadWrite",
+  "ChatMember.ReadWrite",
   "ChatMessage.Send",
   "ChannelMessage.Read.All",
   "ChannelMessage.Send",
+  "ChannelMessage.ReadWrite",
+  "Channel.Create",
+  "TeamMember.Read.All",
   "Team.ReadBasic.All",
   "Channel.ReadBasic.All",
   "ChannelMember.Read.All",
   "Calendars.ReadWrite",
+  "Calendars.Read.Shared",
+  "Calendars.ReadWrite.Shared",
+  "Place.Read.All",
   "Mail.Read",
   "Mail.ReadWrite",
   "Mail.Send",
   "MailboxSettings.ReadWrite",
+  "Mail.ReadWrite.Shared",
+  "Mail.Send.Shared",
   "Presence.Read",
   "Presence.Read.All",
   "Presence.ReadWrite",
   "OnlineMeetings.Read",
+  "OnlineMeetings.ReadWrite",
+  "OnlineMeetingArtifact.Read.All",
   "OnlineMeetingTranscript.Read.All",
   "OnlineMeetingRecording.Read.All",
   "Files.ReadWrite.All",
+  "Sites.Read.All",
+  "People.Read",
+  "Contacts.ReadWrite",
+  "Tasks.ReadWrite",
 ] as const;
 
 describe("loadSettings", () => {
@@ -67,7 +83,7 @@ describe("loadSettings", () => {
       tokenEndpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
       scopes: expectedScopes,
     });
-    expect(settings.scopes).toHaveLength(25);
+    expect(settings.scopes).toHaveLength(41);
   });
 
   test("freezes returned settings and scopes at runtime", async () => {
@@ -104,7 +120,7 @@ describe("loadSettings", () => {
     expect(first).not.toBe(second);
     expect(second.scopes).toEqual(expectedScopes);
     expect(subsequent.scopes).toEqual(expectedScopes);
-    expect(subsequent.scopes).toHaveLength(25);
+    expect(subsequent.scopes).toHaveLength(41);
     expect(subsequent.scopes).not.toContain("Directory.ReadWrite.All");
     expect(mutationError).toBeInstanceOf(TypeError);
   });

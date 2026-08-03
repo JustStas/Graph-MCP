@@ -6,20 +6,23 @@ Microsoft Graph. It runs locally over stdio and requires Node.js 22 or newer.
 
 ## What it does
 
-Graph MCP exposes exactly 62 tools:
+Graph MCP exposes exactly 125 tools:
 
 | Category | Tools |
 | --- | --- |
 | **Authentication** | Check status, log in with browser or device code, log out |
-| **Users and presence** | Read your profile, search users, read presence, set your presence |
-| **Search** | Search messages across chats and channels |
-| **Chats** | List chats, read or send messages, create chats, list members |
-| **Teams and channels** | List teams and channels, read or send messages and replies, list members |
-| **Calendar** | List calendars and events, get, create, update, or delete events, RSVP to invites, read free/busy schedules |
-| **Mail** | List, read, or search mail, send, reply, or forward, move and archive, delete, mark read or unread, flag, list or create folders, build drafts with attachments, list or download attachments |
-| **Mailbox settings** | Read mailbox settings, set or clear automatic replies |
-| **Meetings** | List online meetings, transcripts, and recordings; read transcript content or recording URLs |
-| **Files** | Browse or search OneDrive, list files shared with you, download or upload content, create folders, move, rename, or delete items, create sharing links |
+| **Users and org** | Read your profile, search users, look up a manager or direct reports |
+| **People and contacts** | Relevance-ranked people search, list, create, update, or delete Outlook contacts, list contact folders |
+| **Search** | Search Teams messages, or search mail, calendar, files, and Teams together in one ranked query |
+| **Chats** | List, get, or create chats, read, send, edit, or delete messages, react to messages, rename chats, manage members, mark read |
+| **Teams and channels** | List teams, channels, and members, get a team or its primary channel, create channels, read, send, reply, edit, or delete channel messages, reach a channel's SharePoint folder |
+| **Calendar** | List calendars and events, get, create, update, cancel, or delete events, recurrence, RSVP, free/busy, suggested meeting times, series occurrences, bookable rooms, shared calendars |
+| **Mail** | List, read, search, or delta-sync mail, send, reply, or forward with drafts, bcc, importance, and attachments, move and archive, delete, mark read, flag, categorize, manage folders and inbox rules, mail tips, shared mailboxes |
+| **Mailbox settings** | Read mailbox settings, set automatic replies, set time zone and working hours |
+| **Meetings** | List, create, or get online meetings with join links, attendance reports, transcripts and recordings |
+| **Presence** | Read your own, another user's, or a whole team's presence, set availability or a status message, clear presence |
+| **Tasks** | List To Do lists and tasks, create, update, complete, or delete tasks, list assigned Planner tasks |
+| **Files** | Browse, search, or resolve links to OneDrive and SharePoint content, upload, download, copy, move, delete, version, and share files, manage permissions, read recent and shared items, read and write Excel ranges |
 
 ## Prerequisites
 
@@ -36,26 +39,42 @@ Add these exact delegated permissions to the app registration:
 - `profile`
 - `User.Read`
 - `User.ReadBasic.All`
+- `User.Read.All`
 - `Chat.Read`
 - `Chat.ReadWrite`
+- `ChatMember.ReadWrite`
 - `ChatMessage.Send`
 - `ChannelMessage.Read.All`
 - `ChannelMessage.Send`
+- `ChannelMessage.ReadWrite`
+- `Channel.Create`
+- `TeamMember.Read.All`
 - `Team.ReadBasic.All`
 - `Channel.ReadBasic.All`
 - `ChannelMember.Read.All`
 - `Calendars.ReadWrite`
+- `Calendars.Read.Shared`
+- `Calendars.ReadWrite.Shared`
+- `Place.Read.All`
 - `Mail.Read`
 - `Mail.ReadWrite`
 - `Mail.Send`
 - `MailboxSettings.ReadWrite`
+- `Mail.ReadWrite.Shared`
+- `Mail.Send.Shared`
 - `Presence.Read`
 - `Presence.Read.All`
 - `Presence.ReadWrite`
 - `OnlineMeetings.Read`
+- `OnlineMeetings.ReadWrite`
+- `OnlineMeetingArtifact.Read.All`
 - `OnlineMeetingTranscript.Read.All`
 - `OnlineMeetingRecording.Read.All`
 - `Files.ReadWrite.All`
+- `Sites.Read.All`
+- `People.Read`
+- `Contacts.ReadWrite`
+- `Tasks.ReadWrite`
 
 Some organizations require administrator consent for one or more permissions. Use the
 least privilege your deployment needs and follow your organization's approval process.
@@ -231,7 +250,7 @@ npm pack --json --dry-run
 The Codex validator is release tooling supplied by Codex's `plugin-creator` skill; Python is
 not required to build, test, or run Graph MCP itself. Before publishing, verify that package,
 Claude manifest, and Codex manifest versions match the target release, the committed plugin
-bundle is current, both installed plugins expose exactly 62 tools, and the working tree is clean.
+bundle is current, both installed plugins expose exactly 125 tools, and the working tree is clean.
 
 ### Release procedure
 
@@ -257,7 +276,7 @@ package. Version 0.6.1 is the first scoped npm release.
    out its trusted helper at `github.workflow_sha`, binds the expected tag directly to the
    release event, validates npm's JSON dry-run manifest for the exact private snapshot, and
    uses npm Trusted Publishing. It has no `NODE_AUTH_TOKEN` or npm secret.
-7. Verify the workflow, npm version, `dist.integrity`, installed CLI version, and 62-tool MCP
+7. Verify the workflow, npm version, `dist.integrity`, installed CLI version, and 125-tool MCP
    inventory.
 
 Workflow reruns are idempotent. If the version already exists, the workflow succeeds only

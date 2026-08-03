@@ -85,6 +85,25 @@ const EXPECTED_TOOLS = [
     description: "Search for users in the organization directory by name or email.",
   },
   {
+    name: "graph_get_manager",
+    description: `Get a user's manager from the organization directory.
+
+Reading someone else's manager requires the User.Read.All permission.
+
+Args:
+    user_id: User ID or email address. Empty targets the signed-in user.`,
+  },
+  {
+    name: "graph_list_direct_reports",
+    description: `List the people who report directly to a user.
+
+Reading someone else's direct reports requires the User.Read.All permission.
+
+Args:
+    user_id: User ID or email address. Empty targets the signed-in user.
+    top: Maximum number of reports to return (default 50, maximum 50).`,
+  },
+  {
     name: "graph_get_my_presence",
     description: "Get the authenticated user's current presence status.",
   },
@@ -97,8 +116,58 @@ const EXPECTED_TOOLS = [
     description: "Set the authenticated user's presence status.",
   },
   {
+    name: "graph_get_presences_by_user_ids",
+    description: `Get presence for up to 650 users in one round trip.
+
+Use this instead of calling graph_get_user_presence once per person. Needs
+the Presence.Read.All permission.
+
+Args:
+    user_ids: User IDs to look up (1-650 per call).`,
+  },
+  {
+    name: "graph_set_status_message",
+    description: `Set your Teams status message, the note shown under your name.
+
+This is separate from availability, which graph_set_my_presence controls.
+
+Args:
+    message: The status message text.
+    expiry_datetime: Optional expiry in ISO 8601
+        (e.g. "2026-03-01T17:00:00"). Empty means the message does not expire.
+    timezone: Timezone for expiry_datetime (default "UTC").`,
+  },
+  {
+    name: "graph_clear_my_presence",
+    description: `Clear your presence. This is how you undo graph_set_my_presence.
+
+graph_set_my_presence sets a preferred presence, so pass preferred=true to
+undo it and let Teams calculate your availability again.
+
+Args:
+    preferred: Whether to clear the preferred presence set by
+        graph_set_my_presence (default false clears only this app's session
+        presence).`,
+  },
+  {
     name: "graph_search_messages",
     description: "Search messages across Teams chats and channels.",
+  },
+  {
+    name: "graph_search_all",
+    description: `Search mail, calendar, files, and Teams in one relevance-ranked query.
+
+Use this when you do not know where something lives. chatMessage cannot be
+combined with SharePoint entity types like site, list, listItem, drive, or
+driveItem, so search Teams messages separately.
+
+Args:
+    query: Search query string (KQL is supported).
+    entity_types: Resource types to search (default ["message", "event", "driveItem"]).
+        One or more of: message, event, driveItem, drive, site, list, listItem,
+        chatMessage, person.
+    size: Maximum number of hits to return (default 25, maximum 50).
+    from: Number of hits to skip for paging (default 0).`,
   },
 ] as const;
 
@@ -311,7 +380,7 @@ function schemaFor(harness: ToolHarness, name: string): ZodRawShape {
 }
 
 describe("core tool registration", () => {
-  test("registers exactly the nine legacy names and descriptions", () => {
+  test("registers exactly the twelve core names and descriptions", () => {
     const harness = createToolHarness();
     const { dependencies } = createDependencies();
 
@@ -1211,6 +1280,351 @@ describe("Graph-backed core tools", () => {
     registerProfileTools(harness.server, dependencies);
 
     await expect(harness.invoke("graph_get_profile")).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: '{"error":"Not authenticated.","action_required":"Please call the graph_auth_login tool first."}',
+        },
+      ],
+    });
+  });
+});
+
+describe("organization hierarchy tools", () => {
+  test("exposes exact snake_case schemas and defaults", () => {
+    const harness = createToolHarness();
+    const { dependencies } = createDependencies();
+    registerUserTools(harness.server, dependencies);
+
+    const managerSchema = z.object(schemaFor(harness, "graph_get_manager"));
+    expect(managerSchema.parse({})).toEqual({ user_id: "" });
+    for (const userId of [".", ".."]) {
+      expect(managerSchema.safeParse({ user_id: userId }).success).toBe(false);
+    }
+
+    expect(Object.keys(schemaFor(harness, "graph_list_direct_reports"))).toEqual([
+      "user_id",
+      "top",
+    ]);
+    const reportsSchema = z.object(schemaFor(harness, "graph_list_direct_reports"));
+    expect(reportsSchema.parse({})).toEqual({ user_id: "", top: 50 });
+    expect(reportsSchema.safeParse({ top: 1.5 }).success).toBe(false);
+    for (const userId of [".", ".."]) {
+      expect(reportsSchema.safeParse({ user_id: userId }).success).toBe(false);
+    }
+  });
+
+  test("gets my manager and another user's manager with the centralized select fields", async () => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies({}, [
+      { id: "manager-1" },
+      { id: "manager-2" },
+    ]);
+    registerUserTools(harness.server, dependencies);
+
+    await expect(harness.invoke("graph_get_manager")).resolves.toEqual({
+      content: [{ type: "text", text: '{"data":{"id":"manager-1"},"message":"success"}' }],
+    });
+    await expect(
+      harness.invoke("graph_get_manager", { user_id: "ada lovelace@example.com" }),
+    ).resolves.toEqual({
+      content: [{ type: "text", text: '{"data":{"id":"manager-2"},"message":"success"}' }],
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/manager",
+        params: { $select: USER_PROFILE_FIELDS },
+      },
+      {
+        method: "GET",
+        path: "/users/ada%20lovelace%40example.com/manager",
+        params: { $select: USER_PROFILE_FIELDS },
+      },
+    ]);
+  });
+
+  test("lists direct reports for me and another user, capping top at fifty", async () => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies({}, [
+      { value: [{ id: "report-1" }] },
+      { value: [{ id: "report-2" }] },
+      {},
+    ]);
+    registerUserTools(harness.server, dependencies);
+
+    await expect(harness.invoke("graph_list_direct_reports")).resolves.toEqual({
+      content: [{ type: "text", text: '{"data":[{"id":"report-1"}],"message":"success"}' }],
+    });
+    await expect(
+      harness.invoke("graph_list_direct_reports", { user_id: "ada/1", top: 900 }),
+    ).resolves.toEqual({
+      content: [{ type: "text", text: '{"data":[{"id":"report-2"}],"message":"success"}' }],
+    });
+    await expect(harness.invoke("graph_list_direct_reports", { top: 10 })).resolves.toEqual({
+      content: [{ type: "text", text: '{"data":[],"message":"success"}' }],
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/directReports",
+        params: { $select: USER_PROFILE_FIELDS, $top: "50" },
+      },
+      {
+        method: "GET",
+        path: "/users/ada%2F1/directReports",
+        params: { $select: USER_PROFILE_FIELDS, $top: "50" },
+      },
+      {
+        method: "GET",
+        path: "/me/directReports",
+        params: { $select: USER_PROFILE_FIELDS, $top: "10" },
+      },
+    ]);
+  });
+
+  test.each([
+    { name: "graph_get_manager", response: null },
+    { name: "graph_get_manager", response: [{ secret: "payload-secret" }] },
+    { name: "graph_list_direct_reports", response: { value: "payload-secret" } },
+    { name: "graph_list_direct_reports", response: "payload-secret" },
+  ])("rejects a malformed $name response", async ({ name, response }) => {
+    const harness = createToolHarness();
+    const { dependencies } = createDependencies({}, [response]);
+    registerUserTools(harness.server, dependencies);
+
+    const result = await harness.invoke(name);
+
+    expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+    expect(JSON.stringify(result)).not.toContain("payload-secret");
+  });
+
+  test.each(["graph_get_manager", "graph_list_direct_reports"])(
+    "converts an AuthenticationError from %s",
+    async (name) => {
+      const harness = createToolHarness();
+      const { dependencies } = createDependencies({}, [
+        new AuthenticationError("Not authenticated."),
+      ]);
+      registerUserTools(harness.server, dependencies);
+
+      await expect(harness.invoke(name)).resolves.toEqual({
+        content: [
+          {
+            type: "text",
+            text: '{"error":"Not authenticated.","action_required":"Please call the graph_auth_login tool first."}',
+          },
+        ],
+      });
+    },
+  );
+});
+
+describe("unified search tool", () => {
+  test("exposes exact snake_case schema, defaults, and the entity type enum", () => {
+    const harness = createToolHarness();
+    const { dependencies } = createDependencies();
+    registerSearchTools(harness.server, dependencies);
+
+    expect(Object.keys(schemaFor(harness, "graph_search_all"))).toEqual([
+      "query",
+      "entity_types",
+      "size",
+      "from",
+    ]);
+    const schema = z.object(schemaFor(harness, "graph_search_all"));
+    expect(schema.parse({ query: "budget" })).toEqual({
+      query: "budget",
+      entity_types: ["message", "event", "driveItem"],
+      size: 25,
+      from: 0,
+    });
+    expect(schema.safeParse({}).success).toBe(false);
+    expect(schema.safeParse({ query: "budget", size: 1.5 }).success).toBe(false);
+    expect(schema.safeParse({ query: "budget", from: 2.5 }).success).toBe(false);
+    for (const entityType of [
+      "message",
+      "event",
+      "driveItem",
+      "drive",
+      "site",
+      "list",
+      "listItem",
+      "chatMessage",
+      "person",
+    ]) {
+      expect(schema.safeParse({ query: "budget", entity_types: [entityType] }).success).toBe(true);
+    }
+    expect(schema.safeParse({ query: "budget", entity_types: ["mailbox"] }).success).toBe(false);
+  });
+
+  test("posts the default request and returns the parsed response", async () => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies({}, [{ value: [{ hitsContainers: [] }] }]);
+    registerSearchTools(harness.server, dependencies);
+
+    await expect(harness.invoke("graph_search_all", { query: "budget" })).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: '{"data":{"value":[{"hitsContainers":[]}]},"message":"success"}',
+        },
+      ],
+    });
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/search/query",
+        body: {
+          requests: [
+            {
+              entityTypes: ["message", "event", "driveItem"],
+              query: { queryString: "budget" },
+              from: 0,
+              size: 25,
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  test("caps size at fifty and passes from through for paging", async () => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies({}, [{}]);
+    registerSearchTools(harness.server, dependencies);
+
+    await harness.invoke("graph_search_all", {
+      query: "budget",
+      entity_types: ["driveItem"],
+      size: 500,
+      from: 75,
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/search/query",
+        body: {
+          requests: [
+            {
+              entityTypes: ["driveItem"],
+              query: { queryString: "budget" },
+              from: 75,
+              size: 50,
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  test.each([
+    { label: "chatMessage", entityTypes: ["chatMessage"] },
+    { label: "person", entityTypes: ["person"] },
+    { label: "person with mail", entityTypes: ["message", "person"] },
+  ])("sends the Prefer header for $label", async ({ entityTypes }) => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies({}, [{}]);
+    registerSearchTools(harness.server, dependencies);
+
+    await harness.invoke("graph_search_all", { query: "budget", entity_types: entityTypes });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/search/query",
+        body: {
+          requests: [
+            {
+              entityTypes,
+              query: { queryString: "budget" },
+              from: 0,
+              size: 25,
+            },
+          ],
+        },
+        headers: { Prefer: "include-unknown-enum-members" },
+      },
+    ]);
+  });
+
+  test("omits the Prefer header when no unknown enum entity type is requested", async () => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies({}, [{}]);
+    registerSearchTools(harness.server, dependencies);
+
+    await harness.invoke("graph_search_all", {
+      query: "budget",
+      entity_types: ["message", "site"],
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/search/query",
+        body: {
+          requests: [
+            {
+              entityTypes: ["message", "site"],
+              query: { queryString: "budget" },
+              from: 0,
+              size: 25,
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  test.each([
+    { label: "site", entityTypes: ["chatMessage", "site"] },
+    { label: "listItem", entityTypes: ["chatMessage", "listItem"] },
+    { label: "driveItem", entityTypes: ["chatMessage", "driveItem"] },
+    { label: "drive", entityTypes: ["drive", "chatMessage"] },
+    { label: "list", entityTypes: ["list", "chatMessage"] },
+  ])("rejects chatMessage combined with $label without calling Graph", async ({ entityTypes }) => {
+    const harness = createToolHarness();
+    const { dependencies, graph } = createDependencies();
+    registerSearchTools(harness.server, dependencies);
+
+    await expect(
+      harness.invoke("graph_search_all", { query: "budget", entity_types: entityTypes }),
+    ).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: '{"data":{"error":"chatMessage cannot be combined with SharePoint entity types."},"message":"error"}',
+        },
+      ],
+    });
+    expect(graph.calls).toEqual([]);
+  });
+
+  test.each([null, "payload-secret", 42, [{ secret: "payload-secret" }]])(
+    "rejects a malformed unified search response",
+    async (response) => {
+      const harness = createToolHarness();
+      const { dependencies } = createDependencies({}, [response]);
+      registerSearchTools(harness.server, dependencies);
+
+      const result = await harness.invoke("graph_search_all", { query: "budget" });
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+    },
+  );
+
+  test("converts an AuthenticationError from the unified search tool", async () => {
+    const harness = createToolHarness();
+    const { dependencies } = createDependencies({}, [
+      new AuthenticationError("Not authenticated."),
+    ]);
+    registerSearchTools(harness.server, dependencies);
+
+    await expect(harness.invoke("graph_search_all", { query: "budget" })).resolves.toEqual({
       content: [
         {
           type: "text",

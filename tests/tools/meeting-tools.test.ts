@@ -3,7 +3,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z, type ZodRawShape } from "zod";
 import { describe, expect, test } from "vitest";
 
-import { AuthenticationError } from "../../src/errors.js";
+import { AuthenticationError, GraphApiError } from "../../src/errors.js";
 import { registerMeetingTools } from "../../src/tools/meeting-tools.js";
 import type { ToolDependencies } from "../../src/tools/tool-types.js";
 
@@ -86,6 +86,44 @@ The recording content itself is binary video and is not returned inline.
 Args:
     meeting_id: The online meeting ID.
     recording_id: The recording ID (from graph_list_meeting_recordings).`,
+  },
+  {
+    name: "graph_create_online_meeting",
+    description: `Create a Teams online meeting and get its join link.
+
+The \`joinWebUrl\` field in the response is the link to share. This creates a
+meeting without a calendar event; use graph_create_event with
+is_online_meeting for a meeting that also appears on calendars. Needs the
+OnlineMeetings.ReadWrite permission.
+
+Args:
+    subject: Meeting subject.
+    start_datetime: Start time in ISO 8601 with an offset or Z
+        (e.g. "2026-03-01T10:00:00Z").
+    end_datetime: End time in ISO 8601 with an offset or Z.
+    attendees: Optional list of attendee email addresses or user IDs.
+    allowed_presenters: Who can present: "everyone", "organization",
+        "roleIsPresenter", or "organizer" (default "everyone").`,
+  },
+  {
+    name: "graph_get_online_meeting",
+    description: `Get a single online meeting, including its join link and settings.
+
+Args:
+    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+  },
+  {
+    name: "graph_get_meeting_attendance",
+    description: `Get meeting attendance: who actually joined and for how long.
+
+Without report_id this lists the available attendance reports. With
+report_id it returns that report expanded with per-attendee join and leave
+times. Needs the OnlineMeetingArtifact.Read.All permission, which requires
+admin consent.
+
+Args:
+    meeting_id: The online meeting ID (from graph_list_online_meetings).
+    report_id: Attendance report ID. Empty lists the available reports.`,
   },
 ] as const;
 
@@ -270,7 +308,7 @@ function registerMeetingHarness(graphResponses: readonly unknown[] = []): {
 }
 
 describe("meeting tool registration", () => {
-  test("registers exactly the five legacy meeting names and complete descriptions", () => {
+  test("registers exactly the eight meeting names and complete descriptions", () => {
     const { harness } = registerMeetingHarness();
 
     expect(
@@ -555,5 +593,262 @@ describe("meeting authenticated wrapper errors", () => {
     const { harness } = registerMeetingHarness([new AuthenticationError("Not authenticated.")]);
 
     await expect(harness.invoke(name, args)).resolves.toEqual(AUTHENTICATION_ERROR_RESULT);
+  });
+});
+
+describe("online meeting creation and lookup", () => {
+  test("exposes exact schemas, defaults, and required fields for the new meeting tools", () => {
+    const { harness } = registerMeetingHarness();
+
+    const createShape = schemaFor(harness, "graph_create_online_meeting");
+    expect(Object.keys(createShape)).toEqual([
+      "subject",
+      "start_datetime",
+      "end_datetime",
+      "attendees",
+      "allowed_presenters",
+    ]);
+    const createSchema = z.object(createShape);
+    expect(
+      createSchema.parse({
+        subject: "Sync",
+        start_datetime: "2026-03-01T10:00:00Z",
+        end_datetime: "2026-03-01T11:00:00Z",
+      }),
+    ).toEqual({
+      subject: "Sync",
+      start_datetime: "2026-03-01T10:00:00Z",
+      end_datetime: "2026-03-01T11:00:00Z",
+      attendees: null,
+      allowed_presenters: "everyone",
+    });
+    expect(
+      createSchema.safeParse({
+        subject: "Sync",
+        start_datetime: "2026-03-01T10:00:00Z",
+        end_datetime: "2026-03-01T11:00:00Z",
+        allowed_presenters: "nobody",
+      }).success,
+    ).toBe(false);
+    for (const presenters of ["everyone", "organization", "roleIsPresenter", "organizer"]) {
+      expect(
+        createSchema.safeParse({
+          subject: "Sync",
+          start_datetime: "2026-03-01T10:00:00Z",
+          end_datetime: "2026-03-01T11:00:00Z",
+          allowed_presenters: presenters,
+        }).success,
+      ).toBe(true);
+    }
+    expect(createSchema.safeParse({ subject: "Sync" }).success).toBe(false);
+
+    const getShape = schemaFor(harness, "graph_get_online_meeting");
+    expect(Object.keys(getShape)).toEqual(["meeting_id"]);
+    expect(z.object(getShape).safeParse({}).success).toBe(false);
+    for (const value of ["", ".", ".."]) {
+      expect(z.object(getShape).safeParse({ meeting_id: value }).success).toBe(false);
+    }
+
+    const attendanceShape = schemaFor(harness, "graph_get_meeting_attendance");
+    expect(Object.keys(attendanceShape)).toEqual(["meeting_id", "report_id"]);
+    const attendanceSchema = z.object(attendanceShape);
+    expect(attendanceSchema.parse({ meeting_id: "meeting-1" })).toEqual({
+      meeting_id: "meeting-1",
+      report_id: "",
+    });
+    for (const value of [".", ".."]) {
+      expect(
+        attendanceSchema.safeParse({ meeting_id: "meeting-1", report_id: value }).success,
+      ).toBe(false);
+    }
+    for (const value of ["", ".", ".."]) {
+      expect(attendanceSchema.safeParse({ meeting_id: value }).success).toBe(false);
+    }
+  });
+
+  test("creates a meeting with only the required body fields at defaults", async () => {
+    const created = { id: "meeting-1", joinWebUrl: "https://teams.example/join/abc" };
+    const { harness, graph } = registerMeetingHarness([created]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_create_online_meeting", {
+          subject: "Sync",
+          start_datetime: "2026-03-01T10:00:00Z",
+          end_datetime: "2026-03-01T11:00:00+01:00",
+        }),
+      ),
+    ).toEqual(created);
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/onlineMeetings",
+        body: {
+          subject: "Sync",
+          startDateTime: "2026-03-01T10:00:00Z",
+          endDateTime: "2026-03-01T11:00:00+01:00",
+        },
+      },
+    ]);
+  });
+
+  test("adds attendees as upn participants and a non-default allowedPresenters", async () => {
+    const { harness, graph } = registerMeetingHarness([{ id: "meeting-1" }, { id: "meeting-2" }]);
+
+    await harness.invoke("graph_create_online_meeting", {
+      subject: "Sync",
+      start_datetime: "2026-03-01T10:00:00Z",
+      end_datetime: "2026-03-01T11:00:00Z",
+      attendees: ["ada@example.com", "grace@example.com"],
+      allowed_presenters: "organizer",
+    });
+    await harness.invoke("graph_create_online_meeting", {
+      subject: "Sync",
+      start_datetime: "2026-03-01T10:00:00Z",
+      end_datetime: "2026-03-01T11:00:00Z",
+      attendees: [],
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/onlineMeetings",
+        body: {
+          subject: "Sync",
+          startDateTime: "2026-03-01T10:00:00Z",
+          endDateTime: "2026-03-01T11:00:00Z",
+          participants: {
+            attendees: [{ upn: "ada@example.com" }, { upn: "grace@example.com" }],
+          },
+          allowedPresenters: "organizer",
+        },
+      },
+      {
+        method: "POST",
+        path: "/me/onlineMeetings",
+        body: {
+          subject: "Sync",
+          startDateTime: "2026-03-01T10:00:00Z",
+          endDateTime: "2026-03-01T11:00:00Z",
+        },
+      },
+    ]);
+  });
+
+  test("gets a single meeting from the exact encoded path", async () => {
+    const meetingId = "meeting/../id#fragment?query=value";
+    const meeting = { id: "meeting-1", joinWebUrl: "https://teams.example/join/abc" };
+    const { harness, graph } = registerMeetingHarness([meeting]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_get_online_meeting", { meeting_id: meetingId })),
+    ).toEqual(meeting);
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/me/onlineMeetings/${encodeURIComponent(meetingId)}`,
+      },
+    ]);
+  });
+
+  test("lists attendance reports without report_id and expands one report with it", async () => {
+    const meetingId = "meeting/../id";
+    const reportId = "report/../id#fragment";
+    const report = {
+      id: "report-1",
+      attendanceRecords: [{ emailAddress: "ada@example.com", totalAttendanceInSeconds: 1800 }],
+    };
+    const { harness, graph } = registerMeetingHarness([{ value: [{ id: "report-1" }] }, report]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_get_meeting_attendance", { meeting_id: meetingId })),
+    ).toEqual([{ id: "report-1" }]);
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_meeting_attendance", {
+          meeting_id: meetingId,
+          report_id: reportId,
+        }),
+      ),
+    ).toEqual(report);
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/me/onlineMeetings/${encodeURIComponent(meetingId)}/attendanceReports`,
+      },
+      {
+        method: "GET",
+        path: `/me/onlineMeetings/${encodeURIComponent(meetingId)}/attendanceReports/${encodeURIComponent(reportId)}`,
+        params: { $expand: "attendanceRecords" },
+      },
+    ]);
+  });
+
+  test("treats a missing attendance value property as an empty list", async () => {
+    const { harness } = registerMeetingHarness([{}]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_get_meeting_attendance", { meeting_id: "meeting-1" })),
+    ).toEqual([]);
+  });
+
+  test.each([null, [], "payload-secret", 42])(
+    "rejects malformed created meeting, meeting, and report objects %# without leakage",
+    async (response) => {
+      const invocations = [
+        {
+          name: "graph_create_online_meeting",
+          args: {
+            subject: "Sync",
+            start_datetime: "2026-03-01T10:00:00Z",
+            end_datetime: "2026-03-01T11:00:00Z",
+          },
+        },
+        { name: "graph_get_online_meeting", args: { meeting_id: "meeting-1" } },
+        {
+          name: "graph_get_meeting_attendance",
+          args: { meeting_id: "meeting-1", report_id: "report-1" },
+        },
+      ] as const;
+
+      for (const { name, args } of invocations) {
+        const { harness } = registerMeetingHarness([response]);
+        const result = await harness.invoke(name, args);
+
+        expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+        expect(JSON.stringify(result)).not.toContain("payload-secret");
+        expect(JSON.stringify(result)).not.toContain("TypeError");
+      }
+    },
+  );
+
+  test.each([
+    {
+      name: "graph_create_online_meeting",
+      args: {
+        subject: "Sync",
+        start_datetime: "2026-03-01T10:00:00Z",
+        end_datetime: "2026-03-01T11:00:00Z",
+      },
+    },
+    { name: "graph_get_online_meeting", args: { meeting_id: "meeting-1" } },
+    { name: "graph_get_meeting_attendance", args: { meeting_id: "meeting-1" } },
+    {
+      name: "graph_get_meeting_attendance",
+      args: { meeting_id: "meeting-1", report_id: "report-1" },
+    },
+  ])("$name returns the stable error envelopes", async ({ name, args }) => {
+    const auth = registerMeetingHarness([new AuthenticationError("Not authenticated.")]);
+    await expect(auth.harness.invoke(name, args)).resolves.toEqual(AUTHENTICATION_ERROR_RESULT);
+
+    const graphError = registerMeetingHarness([new GraphApiError("403: Access denied", 403)]);
+    await expect(graphError.harness.invoke(name, args)).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: '{"error":"Graph API error: 403: Access denied"}',
+        },
+      ],
+    });
   });
 });

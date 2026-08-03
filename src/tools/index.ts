@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAuthTools } from "./auth-tools.js";
 import { registerCalendarTools } from "./calendar-tools.js";
 import { registerChatTools } from "./chat-tools.js";
+import { registerContactsTools } from "./contacts-tools.js";
 import { registerFilesTools } from "./files-tools.js";
 import { registerMailTools } from "./mail-tools.js";
 import { registerMailboxTools } from "./mailbox-tools.js";
@@ -10,6 +11,7 @@ import { registerMeetingTools } from "./meeting-tools.js";
 import { registerPresenceTools } from "./presence-tools.js";
 import { registerProfileTools } from "./profile-tools.js";
 import { registerSearchTools } from "./search-tools.js";
+import { registerTasksTools } from "./tasks-tools.js";
 import { registerTeamsTools } from "./teams-tools.js";
 import type { ToolDependencies } from "./tool-types.js";
 import { registerUserTools } from "./user-tools.js";
@@ -30,4 +32,6 @@ export function registerAllTools(
   registerSearchTools(server, dependencies);
   registerMeetingTools(server, dependencies);
   registerFilesTools(server, dependencies);
+  registerContactsTools(server, dependencies);
+  registerTasksTools(server, dependencies);
 }
