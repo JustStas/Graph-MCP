@@ -762,6 +762,41 @@ describe("release publication", () => {
     expect(dryRunCalls).toBe(0);
   });
 
+  test("rejects an initial registry integrity mismatch before publication", async () => {
+    const artifact = await createReleaseArtifact();
+    const otherIntegrity =
+      "sha512-" + createHash("sha512").update("different bytes").digest("base64");
+    let dryRunCalls = 0;
+    let viewCalls = 0;
+    let publishCalls = 0;
+    const execFile: ExecFileFunction = (file, args) => {
+      if (isDryRunPublish(args)) {
+        dryRunCalls += 1;
+      }
+      if (args[0] === "view") {
+        viewCalls += 1;
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            version: artifact.metadata.version,
+            "dist.integrity": otherIntegrity,
+          }),
+          stderr: "",
+        });
+      }
+      if (isActualPublish(args)) {
+        publishCalls += 1;
+      }
+      return Promise.reject(new Error("publication must not execute"));
+    };
+
+    await expect(
+      publishRelease(artifact.metadataPath, artifact.metadata.tag, { execFile }),
+    ).rejects.toThrow("different integrity");
+    expect(viewCalls).toBe(1);
+    expect(dryRunCalls).toBe(0);
+    expect(publishCalls).toBe(0);
+  });
+
   test("accepts a matching readback after an ambiguous publish failure", async () => {
     const artifact = await createReleaseArtifact();
     const publishFailure = new Error("connection reset after upload");
