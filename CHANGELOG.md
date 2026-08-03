@@ -6,6 +6,11 @@ All notable changes to Graph MCP are documented in this file.
 
 ### Changed
 
+- Removed `docs/superpowers/` from version control and ignored it. Those six plan and design
+  documents were point-in-time internal notes totalling 240KB, referenced by nothing in the
+  build, tests, or runtime, and already contradicted by later releases. They remain in git
+  history.
+
 - Install documentation now uses the GitHub marketplace for Codex as well as Claude Code.
   `codex plugin marketplace add` accepts `owner/repo[@ref]` and Git URLs, so requiring a local
   clone was never necessary; both host sections keep the local path as the plugin-development
