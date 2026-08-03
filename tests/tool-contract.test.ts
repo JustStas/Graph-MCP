@@ -7,22 +7,32 @@ import { createServer } from "../src/server.js";
 import type { ToolDependencies } from "../src/tools/tool-types.js";
 
 export const EXPECTED_TOOL_NAMES = [
+  "graph_add_mail_attachment",
   "graph_auth_login",
   "graph_auth_logout",
   "graph_auth_status",
   "graph_create_chat",
   "graph_create_event",
+  "graph_create_folder",
+  "graph_create_mail_draft",
+  "graph_create_mail_folder",
   "graph_delete_event",
+  "graph_delete_file",
+  "graph_delete_mail",
+  "graph_flag_mail",
+  "graph_forward_mail",
   "graph_get_channel_message_replies",
   "graph_get_channel_messages",
   "graph_get_chat_messages",
   "graph_get_event",
   "graph_get_file_content",
   "graph_get_mail_attachment",
+  "graph_get_mailbox_settings",
   "graph_get_meeting_recording_url",
   "graph_get_meeting_transcript_content",
   "graph_get_my_presence",
   "graph_get_profile",
+  "graph_get_schedule",
   "graph_get_user_presence",
   "graph_list_calendars",
   "graph_list_channel_members",
@@ -33,13 +43,19 @@ export const EXPECTED_TOOL_NAMES = [
   "graph_list_files",
   "graph_list_mail",
   "graph_list_mail_attachments",
+  "graph_list_mail_folders",
   "graph_list_meeting_recordings",
   "graph_list_meeting_transcripts",
   "graph_list_online_meetings",
+  "graph_list_shared_files",
   "graph_list_teams",
+  "graph_mark_mail_read",
+  "graph_move_file",
+  "graph_move_mail",
   "graph_read_mail",
   "graph_reply_mail",
   "graph_reply_to_channel_message",
+  "graph_respond_to_event",
   "graph_search_files",
   "graph_search_mail",
   "graph_search_messages",
@@ -47,6 +63,8 @@ export const EXPECTED_TOOL_NAMES = [
   "graph_send_channel_message",
   "graph_send_chat_message",
   "graph_send_mail",
+  "graph_send_mail_draft",
+  "graph_set_automatic_replies",
   "graph_set_my_presence",
   "graph_share_file",
   "graph_update_event",
@@ -93,7 +111,7 @@ function requireSchemaProperty(tool: Tool, propertyName: string): Record<string,
 }
 
 describe("Graph MCP tool contract", () => {
-  test("exposes the exact 44-tool inventory and representative input schemas", async () => {
+  test("exposes the exact 62-tool inventory and representative input schemas", async () => {
     const server = await createServer(createDependencies());
     const client = new Client({ name: "tool-contract-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -102,14 +120,14 @@ describe("Graph MCP tool contract", () => {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
 
-      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.6.1" });
+      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.7.0" });
       expect(client.getInstructions()).toBe(
         "Microsoft Teams, Outlook Calendar, Mail, meetings, users, presence, and OneDrive integration via Microsoft Graph API",
       );
 
       const result = await client.listTools();
       expect(result.tools.map((tool) => tool.name).sort()).toEqual(EXPECTED_TOOL_NAMES);
-      expect(result.tools).toHaveLength(44);
+      expect(result.tools).toHaveLength(62);
 
       expect(requireTool(result.tools, "graph_get_profile").inputSchema).toMatchObject({
         type: "object",

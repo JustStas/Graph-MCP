@@ -35,6 +35,12 @@ const TOP_SCHEMA = z.number().int().default(25);
 const FILE_PATH_SCHEMA = z.string().refine(isSafeDestinationPath, {
   message: "File path must be relative and contain no empty, '.' or '..' segments.",
 });
+const FOLDER_NAME_SCHEMA = z
+  .string()
+  .refine((value) => value !== "" && value !== "." && value !== "..", {
+    message: "Folder names must not be empty, '.' or '..'.",
+  });
+const MISSING_MOVE_TARGET_MESSAGE = "At least one of new_parent_folder_id or new_name is required.";
 
 type GraphObject = Record<string, unknown>;
 
@@ -299,6 +305,115 @@ Args:
         { type: share_type, scope },
       );
       return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_create_folder",
+    {
+      description: `Create a folder in OneDrive.
+
+Args:
+    folder_name: Name of the new folder.
+    parent_folder_id: Parent folder ID. Empty for the drive root.`,
+      inputSchema: {
+        folder_name: FOLDER_NAME_SCHEMA,
+        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ folder_name, parent_folder_id }) => {
+      const path =
+        parent_folder_id === ""
+          ? "/me/drive/root/children"
+          : `/me/drive/items/${encodeURIComponent(parent_folder_id)}/children`;
+      const result = await dependencies.graphClient.post(path, {
+        name: folder_name,
+        folder: {},
+        "@microsoft.graph.conflictBehavior": "rename",
+      });
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_file",
+    {
+      description: `Delete a file or folder from OneDrive.
+
+The item is moved to the OneDrive recycle bin.
+
+Args:
+    item_id: The file or folder ID to delete.`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ item_id }) => {
+      await dependencies.graphClient.delete(`/me/drive/items/${encodeURIComponent(item_id)}`);
+      return successResponse({ status: "Item deleted" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_move_file",
+    {
+      description: `Move and/or rename a file or folder in OneDrive.
+
+At least one of new_parent_folder_id or new_name must be provided.
+
+Args:
+    item_id: The file or folder ID to move.
+    new_parent_folder_id: Destination folder ID. Empty to keep the current parent.
+    new_name: New name for the item. Empty to keep the current name.`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA,
+        new_parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+        new_name: z.string().default(""),
+      },
+    },
+    async ({ item_id, new_parent_folder_id, new_name }) => {
+      if (new_parent_folder_id === "" && new_name === "") {
+        return successResponse({ error: MISSING_MOVE_TARGET_MESSAGE }, "error");
+      }
+
+      const updates: GraphObject = {};
+      if (new_parent_folder_id !== "") {
+        updates.parentReference = { id: new_parent_folder_id };
+      }
+      if (new_name !== "") {
+        updates.name = new_name;
+      }
+
+      const result = await dependencies.graphClient.patch(
+        `/me/drive/items/${encodeURIComponent(item_id)}`,
+        updates,
+      );
+      return successResponse(requireGraphObject(result));
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_list_shared_files",
+    {
+      description: `List files other people have shared with the user.
+
+Only $top is passed because sharedWithMe does not support $select reliably.
+
+Args:
+    top: Maximum number of items to return (default 25).`,
+      inputSchema: {
+        top: TOP_SCHEMA,
+      },
+    },
+    async ({ top }) => {
+      const result = await dependencies.graphClient.get("/me/drive/sharedWithMe", {
+        $top: String(Math.min(top, 50)),
+      });
+      return successResponse(collectionValue(result));
     },
   );
 }

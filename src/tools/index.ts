@@ -5,6 +5,7 @@ import { registerCalendarTools } from "./calendar-tools.js";
 import { registerChatTools } from "./chat-tools.js";
 import { registerFilesTools } from "./files-tools.js";
 import { registerMailTools } from "./mail-tools.js";
+import { registerMailboxTools } from "./mailbox-tools.js";
 import { registerMeetingTools } from "./meeting-tools.js";
 import { registerPresenceTools } from "./presence-tools.js";
 import { registerProfileTools } from "./profile-tools.js";
@@ -23,6 +24,7 @@ export function registerAllTools(
   registerTeamsTools(server, dependencies);
   registerCalendarTools(server, dependencies);
   registerMailTools(server, dependencies);
+  registerMailboxTools(server, dependencies);
   registerUserTools(server, dependencies);
   registerPresenceTools(server, dependencies);
   registerSearchTools(server, dependencies);

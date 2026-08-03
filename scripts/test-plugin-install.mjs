@@ -83,50 +83,68 @@ const FORBIDDEN_ENV_KEYS = [
 ];
 
 const expectedToolNames = [
-  "graph_auth_status",
+  "graph_add_mail_attachment",
   "graph_auth_login",
   "graph_auth_logout",
-  "graph_get_profile",
-  "graph_search_users",
-  "graph_get_my_presence",
-  "graph_get_user_presence",
-  "graph_set_my_presence",
-  "graph_search_messages",
-  "graph_list_chats",
-  "graph_get_chat_messages",
-  "graph_send_chat_message",
+  "graph_auth_status",
   "graph_create_chat",
-  "graph_list_chat_members",
-  "graph_list_teams",
-  "graph_list_channels",
-  "graph_get_channel_messages",
-  "graph_send_channel_message",
-  "graph_list_channel_members",
-  "graph_get_channel_message_replies",
-  "graph_reply_to_channel_message",
-  "graph_list_calendars",
-  "graph_list_events",
-  "graph_get_event",
   "graph_create_event",
-  "graph_update_event",
+  "graph_create_folder",
+  "graph_create_mail_draft",
+  "graph_create_mail_folder",
   "graph_delete_event",
-  "graph_list_mail",
-  "graph_read_mail",
-  "graph_search_mail",
-  "graph_send_mail",
-  "graph_reply_mail",
-  "graph_list_mail_attachments",
-  "graph_get_mail_attachment",
-  "graph_list_online_meetings",
-  "graph_list_meeting_transcripts",
-  "graph_get_meeting_transcript_content",
-  "graph_list_meeting_recordings",
-  "graph_get_meeting_recording_url",
-  "graph_list_files",
-  "graph_search_files",
+  "graph_delete_file",
+  "graph_delete_mail",
+  "graph_flag_mail",
+  "graph_forward_mail",
+  "graph_get_channel_message_replies",
+  "graph_get_channel_messages",
+  "graph_get_chat_messages",
+  "graph_get_event",
   "graph_get_file_content",
-  "graph_upload_file",
+  "graph_get_mail_attachment",
+  "graph_get_mailbox_settings",
+  "graph_get_meeting_recording_url",
+  "graph_get_meeting_transcript_content",
+  "graph_get_my_presence",
+  "graph_get_profile",
+  "graph_get_schedule",
+  "graph_get_user_presence",
+  "graph_list_calendars",
+  "graph_list_channel_members",
+  "graph_list_channels",
+  "graph_list_chat_members",
+  "graph_list_chats",
+  "graph_list_events",
+  "graph_list_files",
+  "graph_list_mail",
+  "graph_list_mail_attachments",
+  "graph_list_mail_folders",
+  "graph_list_meeting_recordings",
+  "graph_list_meeting_transcripts",
+  "graph_list_online_meetings",
+  "graph_list_shared_files",
+  "graph_list_teams",
+  "graph_mark_mail_read",
+  "graph_move_file",
+  "graph_move_mail",
+  "graph_read_mail",
+  "graph_reply_mail",
+  "graph_reply_to_channel_message",
+  "graph_respond_to_event",
+  "graph_search_files",
+  "graph_search_mail",
+  "graph_search_messages",
+  "graph_search_users",
+  "graph_send_channel_message",
+  "graph_send_chat_message",
+  "graph_send_mail",
+  "graph_send_mail_draft",
+  "graph_set_automatic_replies",
+  "graph_set_my_presence",
   "graph_share_file",
+  "graph_update_event",
+  "graph_upload_file",
 ];
 
 /**
@@ -769,14 +787,14 @@ async function runMcpSmoke({ label, pluginRoot, server, environment }) {
       requireRecord(tool, `${label} MCP tool`),
     );
     const serverVersion = client.getServerVersion();
-    if (serverVersion?.version !== "0.6.1" || serverVersion.name !== "Graph MCP") {
-      throw new Error(`${label} MCP server version was not Graph MCP 0.6.1.`);
+    if (serverVersion?.version !== "0.7.0" || serverVersion.name !== "Graph MCP") {
+      throw new Error(`${label} MCP server version was not Graph MCP 0.7.0.`);
     }
     const actualNames = tools
       .map((tool) => requireString(tool.name, "tool name", `${label} MCP tools/list`))
       .sort();
     const names = [...expectedToolNames].sort();
-    if (actualNames.length !== 44 || actualNames.some((name, index) => name !== names[index])) {
+    if (actualNames.length !== 62 || actualNames.some((name, index) => name !== names[index])) {
       throw new Error(`${label} MCP tools mismatch: got ${actualNames.length} names.`);
     }
     result = {
@@ -1018,7 +1036,7 @@ async function main() {
       process.stdout.write(
         `CLAUDE_PLUGIN_INSTALL_PATH ${await relativeToTempRoot(tempRoot, claudeInstalled.installedPluginRoot)}\n`,
       );
-      process.stdout.write("CLAUDE_PLUGIN_INSTALL_OK 44\n");
+      process.stdout.write("CLAUDE_PLUGIN_INSTALL_OK 62\n");
 
       const codexEnvironment = environmentFor({ home, claudeConfigDir, codexHome, tempRoot });
       const expectedCodexInstall = join(
@@ -1106,7 +1124,7 @@ async function main() {
       process.stdout.write(
         `CODEX_PLUGIN_INSTALL_PATH ${await relativeToTempRoot(tempRoot, codexInstalled.installedPluginRoot)}\n`,
       );
-      process.stdout.write("CODEX_PLUGIN_INSTALL_OK 44\n");
+      process.stdout.write("CODEX_PLUGIN_INSTALL_OK 62\n");
     });
   });
 }

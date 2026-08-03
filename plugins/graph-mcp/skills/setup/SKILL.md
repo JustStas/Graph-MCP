@@ -27,7 +27,9 @@ Add these exact delegated Microsoft Graph permissions:
 - `ChannelMember.Read.All`
 - `Calendars.ReadWrite`
 - `Mail.Read`
+- `Mail.ReadWrite`
 - `Mail.Send`
+- `MailboxSettings.ReadWrite`
 - `Presence.Read`
 - `Presence.Read.All`
 - `Presence.ReadWrite`

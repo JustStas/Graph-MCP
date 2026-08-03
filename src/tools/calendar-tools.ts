@@ -59,6 +59,12 @@ function eventPath(eventId: string): string {
   return `/me/events/${encodeURIComponent(eventId)}`;
 }
 
+const EVENT_RESPONSE_ACTIONS = {
+  accept: { action: "accept", status: "Event accepted" },
+  decline: { action: "decline", status: "Event declined" },
+  tentative: { action: "tentativelyAccept", status: "Event tentatively accepted" },
+} as const;
+
 function calendarCollectionPath(calendarId: string, collection: "calendarView" | "events"): string {
   return calendarId === ""
     ? `/me/${collection}`
@@ -224,6 +230,7 @@ Args:
     timezone: Timezone for start/end times.
     body: New body/description.
     location: New location name.
+    attendees: New list of attendee email addresses.
     is_html: Whether the body is HTML (default: plain text).`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
@@ -233,6 +240,7 @@ Args:
         timezone: z.string().default(""),
         body: z.string().default(""),
         location: z.string().default(""),
+        attendees: ATTENDEES_SCHEMA,
         is_html: z.boolean().default(false),
       },
     },
@@ -244,6 +252,7 @@ Args:
       timezone,
       body,
       location,
+      attendees,
       is_html,
     }) => {
       const updates: GraphObject = {};
@@ -264,6 +273,12 @@ Args:
       }
       if (location !== "") {
         updates.location = { displayName: location };
+      }
+      if (attendees !== null && attendees.length > 0) {
+        updates.attendees = attendees.map((address) => ({
+          emailAddress: { address },
+          type: "required",
+        }));
       }
 
       const result = await dependencies.graphClient.patch(eventPath(event_id), updates);
@@ -286,6 +301,68 @@ Args:
     async ({ event_id }) => {
       await dependencies.graphClient.delete(eventPath(event_id));
       return successResponse({ status: "Event deleted" });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_respond_to_event",
+    {
+      description: `RSVP to a meeting invite.
+
+Args:
+    event_id: The event ID to respond to.
+    response: Response type: "accept", "decline", or "tentative".
+    comment: Optional comment to send with the response.
+    send_response: Whether to send the response to the organizer (default true).`,
+      inputSchema: {
+        event_id: RESOURCE_ID_SCHEMA,
+        response: z.enum(["accept", "decline", "tentative"]),
+        comment: z.string().default(""),
+        send_response: z.boolean().default(true),
+      },
+    },
+    async ({ event_id, response, comment, send_response }) => {
+      const { action, status } = EVENT_RESPONSE_ACTIONS[response];
+      const payload: GraphObject = {};
+      if (comment !== "") {
+        payload.comment = comment;
+      }
+      payload.sendResponse = send_response;
+
+      await dependencies.graphClient.post(`${eventPath(event_id)}/${action}`, payload);
+      return successResponse({ status });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_get_schedule",
+    {
+      description: `Get free/busy availability for people or rooms.
+
+Args:
+    schedules: List of SMTP addresses (users or rooms) to look up.
+    start_datetime: Start of the lookup window (ISO 8601, e.g. "2025-03-01T09:00:00").
+    end_datetime: End of the lookup window (ISO 8601).
+    timezone: Timezone for the window (default "UTC").
+    availability_view_interval: Availability view interval in minutes (default 30).`,
+      inputSchema: {
+        schedules: z.array(z.string()),
+        start_datetime: z.string(),
+        end_datetime: z.string(),
+        timezone: z.string().default("UTC"),
+        availability_view_interval: z.number().int().default(30),
+      },
+    },
+    async ({ schedules, start_datetime, end_datetime, timezone, availability_view_interval }) => {
+      const result = await dependencies.graphClient.post("/me/calendar/getSchedule", {
+        schedules,
+        startTime: { dateTime: start_datetime, timeZone: timezone },
+        endTime: { dateTime: end_datetime, timeZone: timezone },
+        availabilityViewInterval: availability_view_interval,
+      });
+      return successResponse(collectionValue(result));
     },
   );
 }

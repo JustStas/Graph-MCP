@@ -95,6 +95,43 @@ Args:
     share_type: Permission type: "view", "edit", or "embed" (default "view").
     scope: Share scope: "anonymous", "organization", or "users" (default "organization").`,
   },
+  {
+    name: "graph_create_folder",
+    description: `Create a folder in OneDrive.
+
+Args:
+    folder_name: Name of the new folder.
+    parent_folder_id: Parent folder ID. Empty for the drive root.`,
+  },
+  {
+    name: "graph_delete_file",
+    description: `Delete a file or folder from OneDrive.
+
+The item is moved to the OneDrive recycle bin.
+
+Args:
+    item_id: The file or folder ID to delete.`,
+  },
+  {
+    name: "graph_move_file",
+    description: `Move and/or rename a file or folder in OneDrive.
+
+At least one of new_parent_folder_id or new_name must be provided.
+
+Args:
+    item_id: The file or folder ID to move.
+    new_parent_folder_id: Destination folder ID. Empty to keep the current parent.
+    new_name: New name for the item. Empty to keep the current name.`,
+  },
+  {
+    name: "graph_list_shared_files",
+    description: `List files other people have shared with the user.
+
+Only $top is passed because sharedWithMe does not support $select reliably.
+
+Args:
+    top: Maximum number of items to return (default 25).`,
+  },
 ] as const;
 
 const INVALID_GRAPH_RESPONSE_RESULT = {
@@ -301,7 +338,7 @@ function firstRequest(fetch: ReturnType<typeof vi.fn<typeof globalThis.fetch>>):
 }
 
 describe("file tool registration", () => {
-  test("registers exactly the five legacy file names and complete descriptions", () => {
+  test("registers exactly the expected file tool names and complete descriptions", () => {
     const { harness } = registerFilesHarness();
 
     expect(
@@ -786,6 +823,276 @@ describe("OneDrive sharing and path safety", () => {
   );
 });
 
+describe("OneDrive folder creation", () => {
+  test("creates a folder at the drive root with the exact conflict behaviour body", async () => {
+    const created = { id: "folder-1", name: "Reports", folder: { childCount: 0 } };
+    const { harness, graph } = registerFilesHarness([created]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_create_folder", { folder_name: "Reports" })),
+    ).toEqual(created);
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/drive/root/children",
+        body: {
+          name: "Reports",
+          folder: {},
+          "@microsoft.graph.conflictBehavior": "rename",
+        },
+      },
+    ]);
+  });
+
+  test("creates a nested folder under an encoded parent folder ID", async () => {
+    const parentId = "../folder/path\\name#fragment?query=:value%";
+    const { harness, graph } = registerFilesHarness([{ id: "folder-2" }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_create_folder", {
+          folder_name: "Q3 #plans/final",
+          parent_folder_id: parentId,
+        }),
+      ),
+    ).toEqual({ id: "folder-2" });
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: `/me/drive/items/${encodeURIComponent(parentId)}/children`,
+        body: {
+          name: "Q3 #plans/final",
+          folder: {},
+          "@microsoft.graph.conflictBehavior": "rename",
+        },
+      },
+    ]);
+  });
+
+  test("exposes exact create folder schema keys, defaults, and rejected names", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_create_folder");
+    expect(Object.keys(shape)).toEqual(["folder_name", "parent_folder_id"]);
+    const schema = z.object(shape);
+    expect(schema.parse({ folder_name: "Reports" })).toEqual({
+      folder_name: "Reports",
+      parent_folder_id: "",
+    });
+    expect(schema.safeParse({}).success).toBe(false);
+    for (const folderName of ["", ".", ".."]) {
+      expect(schema.safeParse({ folder_name: folderName }).success).toBe(false);
+    }
+    for (const parentFolderId of [".", ".."]) {
+      expect(
+        schema.safeParse({ folder_name: "Reports", parent_folder_id: parentFolderId }).success,
+      ).toBe(false);
+    }
+  });
+
+  test.each([null, [], "payload-secret", 42])(
+    "rejects malformed created folder metadata %# without leakage",
+    async (response) => {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke("graph_create_folder", { folder_name: "Reports" });
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
+describe("OneDrive deletion", () => {
+  test("deletes an item through the exact encoded path with the fixed status payload", async () => {
+    const itemId = "../file/path\\name#fragment?query=:value%";
+    const { harness, graph } = registerFilesHarness([null]);
+
+    expect(dataFrom(await harness.invoke("graph_delete_file", { item_id: itemId }))).toEqual({
+      status: "Item deleted",
+    });
+    expect(graph.calls).toEqual([
+      {
+        method: "DELETE",
+        path: `/me/drive/items/${encodeURIComponent(itemId)}`,
+      },
+    ]);
+  });
+
+  test("exposes exact delete schema keys and rejects sentinel item IDs", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_delete_file");
+    expect(Object.keys(shape)).toEqual(["item_id"]);
+    const schema = z.object(shape);
+    for (const itemId of ["", ".", ".."]) {
+      expect(schema.safeParse({ item_id: itemId }).success).toBe(false);
+    }
+  });
+});
+
+describe("OneDrive moves and renames", () => {
+  test("moves an item with a parent reference only", async () => {
+    const { harness, graph } = registerFilesHarness([{ id: "file-1" }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_move_file", {
+          item_id: "file-1",
+          new_parent_folder_id: "folder-9",
+        }),
+      ),
+    ).toEqual({ id: "file-1" });
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: "/me/drive/items/file-1",
+        body: { parentReference: { id: "folder-9" } },
+      },
+    ]);
+  });
+
+  test("renames an item with a name only through the exact encoded path", async () => {
+    const itemId = "../file/path\\name#fragment?query=:value%";
+    const { harness, graph } = registerFilesHarness([{ id: "file-2" }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_move_file", { item_id: itemId, new_name: "renamed.txt" }),
+      ),
+    ).toEqual({ id: "file-2" });
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: `/me/drive/items/${encodeURIComponent(itemId)}`,
+        body: { name: "renamed.txt" },
+      },
+    ]);
+  });
+
+  test("moves and renames together with parentReference before name", async () => {
+    const { harness, graph } = registerFilesHarness([{ id: "file-3" }]);
+
+    await harness.invoke("graph_move_file", {
+      item_id: "file-3",
+      new_parent_folder_id: "folder-7",
+      new_name: "final.docx",
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: "/me/drive/items/file-3",
+        body: { parentReference: { id: "folder-7" }, name: "final.docx" },
+      },
+    ]);
+    expect(Object.keys(graph.calls[0]?.body as Record<string, unknown>)).toEqual([
+      "parentReference",
+      "name",
+    ]);
+  });
+
+  test("returns the exact error envelope when neither destination nor name is given", async () => {
+    const { harness, graph } = registerFilesHarness();
+
+    const result = await harness.invoke("graph_move_file", { item_id: "file-4" });
+
+    expect(result).toEqual({
+      content: [
+        {
+          type: "text",
+          text: '{"data":{"error":"At least one of new_parent_folder_id or new_name is required."},"message":"error"}',
+        },
+      ],
+    });
+    expect(graph.calls).toEqual([]);
+  });
+
+  test("exposes exact move schema keys, defaults, and rejected identifiers", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_move_file");
+    expect(Object.keys(shape)).toEqual(["item_id", "new_parent_folder_id", "new_name"]);
+    const schema = z.object(shape);
+    expect(schema.parse({ item_id: "file-1" })).toEqual({
+      item_id: "file-1",
+      new_parent_folder_id: "",
+      new_name: "",
+    });
+    expect(schema.safeParse({}).success).toBe(false);
+    for (const itemId of ["", ".", ".."]) {
+      expect(schema.safeParse({ item_id: itemId }).success).toBe(false);
+    }
+    for (const parentId of [".", ".."]) {
+      expect(schema.safeParse({ item_id: "file-1", new_parent_folder_id: parentId }).success).toBe(
+        false,
+      );
+    }
+    expect(schema.safeParse({ item_id: "file-1", new_name: ".." }).success).toBe(true);
+  });
+
+  test.each([null, [], "payload-secret", 42])(
+    "rejects malformed move metadata %# without leakage",
+    async (response) => {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke("graph_move_file", {
+        item_id: "file-1",
+        new_name: "renamed.txt",
+      });
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
+describe("OneDrive shared items", () => {
+  test("lists shared items with only a top parameter and caps it at 50", async () => {
+    const { harness, graph } = registerFilesHarness([
+      { value: [{ id: "shared-1" }] },
+      { value: [] },
+      { value: [] },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_list_shared_files"))).toEqual([{ id: "shared-1" }]);
+    await harness.invoke("graph_list_shared_files", { top: 500 });
+    await harness.invoke("graph_list_shared_files", { top: -2 });
+
+    expect(graph.calls).toEqual([
+      { method: "GET", path: "/me/drive/sharedWithMe", params: { $top: "25" } },
+      { method: "GET", path: "/me/drive/sharedWithMe", params: { $top: "50" } },
+      { method: "GET", path: "/me/drive/sharedWithMe", params: { $top: "-2" } },
+    ]);
+    for (const call of graph.calls) {
+      expect(Object.keys(call.params as Record<string, unknown>)).toEqual(["$top"]);
+    }
+  });
+
+  test("exposes exact shared files schema keys and default top", () => {
+    const { harness } = registerFilesHarness();
+    const shape = schemaFor(harness, "graph_list_shared_files");
+    expect(Object.keys(shape)).toEqual(["top"]);
+    const schema = z.object(shape);
+    expect(schema.parse({})).toEqual({ top: 25 });
+    expect(schema.safeParse({ top: 1.5 }).success).toBe(false);
+  });
+
+  test("treats a missing value property as an empty list", async () => {
+    const { harness } = registerFilesHarness([{}]);
+    expect(dataFrom(await harness.invoke("graph_list_shared_files"))).toEqual([]);
+  });
+
+  test.each([null, [], "payload-secret", { value: null }, { value: {} }])(
+    "rejects malformed shared collection responses %# without leakage",
+    async (response) => {
+      const { harness } = registerFilesHarness([response]);
+      const result = await harness.invoke("graph_list_shared_files");
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
 describe("file authenticated wrapper errors", () => {
   test.each([
     { name: "graph_list_files", args: {} },
@@ -796,6 +1103,10 @@ describe("file authenticated wrapper errors", () => {
       args: { file_path: "report.txt", content_base64: "SGVsbG8=" },
     },
     { name: "graph_share_file", args: { file_id: "file-1" } },
+    { name: "graph_create_folder", args: { folder_name: "Reports" } },
+    { name: "graph_delete_file", args: { item_id: "file-1" } },
+    { name: "graph_move_file", args: { item_id: "file-1", new_name: "renamed.txt" } },
+    { name: "graph_list_shared_files", args: {} },
   ])("$name returns the stable authentication error envelope", async ({ name, args }) => {
     const { harness } = registerFilesHarness([new AuthenticationError("Not authenticated.")]);
 

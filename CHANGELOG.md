@@ -2,6 +2,37 @@
 
 All notable changes to Graph MCP are documented in this file.
 
+## 0.7.0 - 2026-08-03
+
+### Added
+
+- Mail lifecycle tools so mailboxes can be tidied and not only read: `graph_move_mail`
+  (archive or move to any folder), `graph_delete_mail`, `graph_mark_mail_read`,
+  `graph_flag_mail`, `graph_list_mail_folders`, and `graph_create_mail_folder`. The batch
+  tools accept up to 50 message IDs per call and report per-message outcomes, so a partial
+  failure still says what succeeded.
+- Mail composition tools: `graph_forward_mail`, `graph_create_mail_draft`,
+  `graph_add_mail_attachment` (3MB limit), and `graph_send_mail_draft`. Together these give
+  outbound mail with attachments, which previously had no path at all.
+- Mailbox settings tools `graph_get_mailbox_settings` and `graph_set_automatic_replies` for
+  reading time zone and working hours and for setting or clearing out-of-office replies.
+- Calendar tools `graph_respond_to_event` (accept, decline, or tentatively accept an invite,
+  with an optional comment) and `graph_get_schedule` (free/busy for people and rooms).
+  `graph_update_event` now also accepts `attendees`.
+- OneDrive tools `graph_create_folder`, `graph_delete_file`, `graph_move_file` (move and
+  rename), and `graph_list_shared_files`.
+- A `skip` argument on `graph_list_mail`. Graph returns at most 50 messages per call and the
+  server exposed no way to page, so anything past the newest 50 messages in a folder was
+  unreachable.
+- Delegated scopes `Mail.ReadWrite` and `MailboxSettings.ReadWrite`, which the new write and
+  settings tools require.
+
+### Changed
+
+- The tool inventory is now 62 tools, up from 44.
+- `MAIL_LIST_FIELDS` now selects `webLink`, `conversationId`, and `parentFolderId` so listed
+  messages can be linked and grouped into threads without a second request per message.
+
 ## 0.6.1 - 2026-07-17
 
 ### Changed

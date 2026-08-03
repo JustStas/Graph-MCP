@@ -22,7 +22,9 @@ const expectedScopes = [
   "ChannelMember.Read.All",
   "Calendars.ReadWrite",
   "Mail.Read",
+  "Mail.ReadWrite",
   "Mail.Send",
+  "MailboxSettings.ReadWrite",
   "Presence.Read",
   "Presence.Read.All",
   "Presence.ReadWrite",
@@ -65,7 +67,7 @@ describe("loadSettings", () => {
       tokenEndpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
       scopes: expectedScopes,
     });
-    expect(settings.scopes).toHaveLength(23);
+    expect(settings.scopes).toHaveLength(25);
   });
 
   test("freezes returned settings and scopes at runtime", async () => {
@@ -102,7 +104,7 @@ describe("loadSettings", () => {
     expect(first).not.toBe(second);
     expect(second.scopes).toEqual(expectedScopes);
     expect(subsequent.scopes).toEqual(expectedScopes);
-    expect(subsequent.scopes).toHaveLength(23);
+    expect(subsequent.scopes).toHaveLength(25);
     expect(subsequent.scopes).not.toContain("Directory.ReadWrite.All");
     expect(mutationError).toBeInstanceOf(TypeError);
   });

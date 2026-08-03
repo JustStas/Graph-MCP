@@ -6,7 +6,7 @@ Microsoft Graph. It runs locally over stdio and requires Node.js 22 or newer.
 
 ## What it does
 
-Graph MCP exposes exactly 44 tools:
+Graph MCP exposes exactly 62 tools:
 
 | Category | Tools |
 | --- | --- |
@@ -15,10 +15,11 @@ Graph MCP exposes exactly 44 tools:
 | **Search** | Search messages across chats and channels |
 | **Chats** | List chats, read or send messages, create chats, list members |
 | **Teams and channels** | List teams and channels, read or send messages and replies, list members |
-| **Calendar** | List calendars and events, get, create, update, or delete events |
-| **Mail** | List, read, or search mail, send or reply, list or download attachments |
+| **Calendar** | List calendars and events, get, create, update, or delete events, RSVP to invites, read free/busy schedules |
+| **Mail** | List, read, or search mail, send, reply, or forward, move and archive, delete, mark read or unread, flag, list or create folders, build drafts with attachments, list or download attachments |
+| **Mailbox settings** | Read mailbox settings, set or clear automatic replies |
 | **Meetings** | List online meetings, transcripts, and recordings; read transcript content or recording URLs |
-| **Files** | Browse or search OneDrive, download or upload content, create sharing links |
+| **Files** | Browse or search OneDrive, list files shared with you, download or upload content, create folders, move, rename, or delete items, create sharing links |
 
 ## Prerequisites
 
@@ -45,7 +46,9 @@ Add these exact delegated permissions to the app registration:
 - `ChannelMember.Read.All`
 - `Calendars.ReadWrite`
 - `Mail.Read`
+- `Mail.ReadWrite`
 - `Mail.Send`
+- `MailboxSettings.ReadWrite`
 - `Presence.Read`
 - `Presence.Read.All`
 - `Presence.ReadWrite`
@@ -228,7 +231,7 @@ npm pack --json --dry-run
 The Codex validator is release tooling supplied by Codex's `plugin-creator` skill; Python is
 not required to build, test, or run Graph MCP itself. Before publishing, verify that package,
 Claude manifest, and Codex manifest versions match the target release, the committed plugin
-bundle is current, both installed plugins expose exactly 44 tools, and the working tree is clean.
+bundle is current, both installed plugins expose exactly 62 tools, and the working tree is clean.
 
 ### Release procedure
 
@@ -254,7 +257,7 @@ package. Version 0.6.1 is the first scoped npm release.
    out its trusted helper at `github.workflow_sha`, binds the expected tag directly to the
    release event, validates npm's JSON dry-run manifest for the exact private snapshot, and
    uses npm Trusted Publishing. It has no `NODE_AUTH_TOKEN` or npm secret.
-7. Verify the workflow, npm version, `dist.integrity`, installed CLI version, and 44-tool MCP
+7. Verify the workflow, npm version, `dist.integrity`, installed CLI version, and 62-tool MCP
    inventory.
 
 Workflow reruns are idempotent. If the version already exists, the workflow succeeds only

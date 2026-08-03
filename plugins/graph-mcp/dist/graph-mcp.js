@@ -23103,7 +23103,9 @@ var SCOPES = Object.freeze([
   "ChannelMember.Read.All",
   "Calendars.ReadWrite",
   "Mail.Read",
+  "Mail.ReadWrite",
   "Mail.Send",
+  "MailboxSettings.ReadWrite",
   "Presence.Read",
   "Presence.Read.All",
   "Presence.ReadWrite",
@@ -34958,7 +34960,8 @@ var EVENT_LIST_FIELDS = "id,subject,start,end,location,organizer,attendees,isAll
 var CHAT_FIELDS = "id,chatType,topic,createdDateTime,lastUpdatedDateTime";
 var TEAM_FIELDS = "id,displayName,description";
 var CHANNEL_FIELDS = "id,displayName,description,membershipType";
-var MAIL_LIST_FIELDS = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,importance,flag";
+var MAIL_LIST_FIELDS = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,importance,flag,webLink,conversationId,parentFolderId";
+var MAIL_FOLDER_FIELDS = "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
 var USER_PROFILE_FIELDS = "id,displayName,mail,jobTitle,department,officeLocation";
 
 // src/tools/calendar-tools.ts
@@ -35001,6 +35004,11 @@ function requireGraphObjectWithId(response) {
 function eventPath(eventId) {
   return `/me/events/${encodeURIComponent(eventId)}`;
 }
+var EVENT_RESPONSE_ACTIONS = {
+  accept: { action: "accept", status: "Event accepted" },
+  decline: { action: "decline", status: "Event declined" },
+  tentative: { action: "tentativelyAccept", status: "Event tentatively accepted" }
+};
 function calendarCollectionPath(calendarId, collection) {
   return calendarId === "" ? `/me/${collection}` : `/me/calendars/${encodeURIComponent(calendarId)}/${collection}`;
 }
@@ -35153,6 +35161,7 @@ Args:
     timezone: Timezone for start/end times.
     body: New body/description.
     location: New location name.
+    attendees: New list of attendee email addresses.
     is_html: Whether the body is HTML (default: plain text).`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
@@ -35162,6 +35171,7 @@ Args:
         timezone: external_exports.string().default(""),
         body: external_exports.string().default(""),
         location: external_exports.string().default(""),
+        attendees: ATTENDEES_SCHEMA,
         is_html: external_exports.boolean().default(false)
       }
     },
@@ -35173,6 +35183,7 @@ Args:
       timezone,
       body,
       location,
+      attendees,
       is_html
     }) => {
       const updates = {};
@@ -35194,6 +35205,12 @@ Args:
       if (location !== "") {
         updates.location = { displayName: location };
       }
+      if (attendees !== null && attendees.length > 0) {
+        updates.attendees = attendees.map((address) => ({
+          emailAddress: { address },
+          type: "required"
+        }));
+      }
       const result = await dependencies.graphClient.patch(eventPath(event_id), updates);
       return successResponse(requireGraphObject(result));
     }
@@ -35213,6 +35230,65 @@ Args:
     async ({ event_id }) => {
       await dependencies.graphClient.delete(eventPath(event_id));
       return successResponse({ status: "Event deleted" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_respond_to_event",
+    {
+      description: `RSVP to a meeting invite.
+
+Args:
+    event_id: The event ID to respond to.
+    response: Response type: "accept", "decline", or "tentative".
+    comment: Optional comment to send with the response.
+    send_response: Whether to send the response to the organizer (default true).`,
+      inputSchema: {
+        event_id: RESOURCE_ID_SCHEMA,
+        response: external_exports.enum(["accept", "decline", "tentative"]),
+        comment: external_exports.string().default(""),
+        send_response: external_exports.boolean().default(true)
+      }
+    },
+    async ({ event_id, response, comment, send_response }) => {
+      const { action, status } = EVENT_RESPONSE_ACTIONS[response];
+      const payload = {};
+      if (comment !== "") {
+        payload.comment = comment;
+      }
+      payload.sendResponse = send_response;
+      await dependencies.graphClient.post(`${eventPath(event_id)}/${action}`, payload);
+      return successResponse({ status });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_schedule",
+    {
+      description: `Get free/busy availability for people or rooms.
+
+Args:
+    schedules: List of SMTP addresses (users or rooms) to look up.
+    start_datetime: Start of the lookup window (ISO 8601, e.g. "2025-03-01T09:00:00").
+    end_datetime: End of the lookup window (ISO 8601).
+    timezone: Timezone for the window (default "UTC").
+    availability_view_interval: Availability view interval in minutes (default 30).`,
+      inputSchema: {
+        schedules: external_exports.array(external_exports.string()),
+        start_datetime: external_exports.string(),
+        end_datetime: external_exports.string(),
+        timezone: external_exports.string().default("UTC"),
+        availability_view_interval: external_exports.number().int().default(30)
+      }
+    },
+    async ({ schedules, start_datetime, end_datetime, timezone, availability_view_interval }) => {
+      const result = await dependencies.graphClient.post("/me/calendar/getSchedule", {
+        schedules,
+        startTime: { dateTime: start_datetime, timeZone: timezone },
+        endTime: { dateTime: end_datetime, timeZone: timezone },
+        availabilityViewInterval: availability_view_interval
+      });
+      return successResponse(collectionValue(result));
     }
   );
 }
@@ -35437,6 +35513,10 @@ var TOP_SCHEMA3 = external_exports.number().int().default(25);
 var FILE_PATH_SCHEMA = external_exports.string().refine(isSafeDestinationPath, {
   message: "File path must be relative and contain no empty, '.' or '..' segments."
 });
+var FOLDER_NAME_SCHEMA = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
+  message: "Folder names must not be empty, '.' or '..'."
+});
+var MISSING_MOVE_TARGET_MESSAGE = "At least one of new_parent_folder_id or new_name is required.";
 function isNonArrayObject3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -35665,6 +35745,106 @@ Args:
       return successResponse(requireGraphObject2(result));
     }
   );
+  registerAuthenticatedTool(
+    server,
+    "graph_create_folder",
+    {
+      description: `Create a folder in OneDrive.
+
+Args:
+    folder_name: Name of the new folder.
+    parent_folder_id: Parent folder ID. Empty for the drive root.`,
+      inputSchema: {
+        folder_name: FOLDER_NAME_SCHEMA,
+        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA2
+      }
+    },
+    async ({ folder_name, parent_folder_id }) => {
+      const path2 = parent_folder_id === "" ? "/me/drive/root/children" : `/me/drive/items/${encodeURIComponent(parent_folder_id)}/children`;
+      const result = await dependencies.graphClient.post(path2, {
+        name: folder_name,
+        folder: {},
+        "@microsoft.graph.conflictBehavior": "rename"
+      });
+      return successResponse(requireGraphObject2(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_file",
+    {
+      description: `Delete a file or folder from OneDrive.
+
+The item is moved to the OneDrive recycle bin.
+
+Args:
+    item_id: The file or folder ID to delete.`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA3
+      }
+    },
+    async ({ item_id }) => {
+      await dependencies.graphClient.delete(`/me/drive/items/${encodeURIComponent(item_id)}`);
+      return successResponse({ status: "Item deleted" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_move_file",
+    {
+      description: `Move and/or rename a file or folder in OneDrive.
+
+At least one of new_parent_folder_id or new_name must be provided.
+
+Args:
+    item_id: The file or folder ID to move.
+    new_parent_folder_id: Destination folder ID. Empty to keep the current parent.
+    new_name: New name for the item. Empty to keep the current name.`,
+      inputSchema: {
+        item_id: RESOURCE_ID_SCHEMA3,
+        new_parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA2,
+        new_name: external_exports.string().default("")
+      }
+    },
+    async ({ item_id, new_parent_folder_id, new_name }) => {
+      if (new_parent_folder_id === "" && new_name === "") {
+        return successResponse({ error: MISSING_MOVE_TARGET_MESSAGE }, "error");
+      }
+      const updates = {};
+      if (new_parent_folder_id !== "") {
+        updates.parentReference = { id: new_parent_folder_id };
+      }
+      if (new_name !== "") {
+        updates.name = new_name;
+      }
+      const result = await dependencies.graphClient.patch(
+        `/me/drive/items/${encodeURIComponent(item_id)}`,
+        updates
+      );
+      return successResponse(requireGraphObject2(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_shared_files",
+    {
+      description: `List files other people have shared with the user.
+
+Only $top is passed because sharedWithMe does not support $select reliably.
+
+Args:
+    top: Maximum number of items to return (default 25).`,
+      inputSchema: {
+        top: TOP_SCHEMA3
+      }
+    },
+    async ({ top }) => {
+      const result = await dependencies.graphClient.get("/me/drive/sharedWithMe", {
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue3(result));
+    }
+  );
 }
 
 // src/tools/mail-tools.ts
@@ -35675,6 +35855,16 @@ var RESOURCE_ID_SCHEMA4 = external_exports.string().refine((value) => value !== 
 var LIST_TOP_SCHEMA = external_exports.number().int().default(25);
 var RECIPIENTS_SCHEMA = external_exports.array(external_exports.string());
 var CC_SCHEMA = external_exports.array(external_exports.string()).nullable().optional().default(null);
+var OPTIONAL_RESOURCE_ID_SCHEMA3 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
+  message: "Resource IDs must not be '.' or '..'."
+}).default("");
+var SKIP_SCHEMA = external_exports.number().int().min(0).default(0);
+var MESSAGE_IDS_SCHEMA = external_exports.array(RESOURCE_ID_SCHEMA4).min(1).max(50);
+var FLAG_STATUS_SCHEMA = external_exports.enum(["notFlagged", "flagged", "complete"]);
+var MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
+var MAX_ATTACHMENT_BASE64_LENGTH = 4 * Math.ceil(MAX_ATTACHMENT_BYTES / 3);
+var INVALID_ATTACHMENT_BASE64_MESSAGE = "Invalid base64 content.";
+var ATTACHMENT_TOO_LARGE_MESSAGE = "Attachment too large. Maximum size is 3MB.";
 var RICH_TEXT_OPTIONS = {
   htmlContentType: "HTML",
   textContentType: "Text"
@@ -35712,6 +35902,32 @@ function messagePath(messageId) {
 function recipient(address) {
   return { emailAddress: { address } };
 }
+function failureMessage(error51) {
+  return error51 instanceof Error ? error51.message : "Unknown error.";
+}
+async function applyToMessages(messageIds, apply) {
+  const succeeded = [];
+  const failed = [];
+  for (const messageId of messageIds) {
+    try {
+      await apply(messageId);
+      succeeded.push(messageId);
+    } catch (error51) {
+      failed.push({ message_id: messageId, error: failureMessage(error51) });
+    }
+  }
+  return { succeeded, failed };
+}
+function batchResponse(outcome, details) {
+  const data = {
+    ...details,
+    succeeded_count: outcome.succeeded.length,
+    failed_count: outcome.failed.length,
+    succeeded: outcome.succeeded,
+    failed: outcome.failed
+  };
+  return successResponse(data, outcome.succeeded.length === 0 ? "error" : "success");
+}
 function registerMailTools(server, dependencies) {
   registerAuthenticatedTool(
     server,
@@ -35720,21 +35936,29 @@ function registerMailTools(server, dependencies) {
       description: `List emails from a mail folder.
 
 Args:
-    folder: Mail folder name (default "inbox"). Common: inbox, sentitems, drafts, deleteditems.
-    top: Maximum number of emails to return (default 25).
+    folder: Mail folder name or ID (default "inbox"). Common: inbox, sentitems, drafts,
+        deleteditems, archive.
+    top: Maximum number of emails to return per call (default 25, maximum 50).
+    skip: Number of emails to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page through larger folders by raising
+        skip in steps of top.
     filter_query: Optional OData filter (e.g. "isRead eq false").`,
       inputSchema: {
         folder: RESOURCE_ID_SCHEMA4.default("inbox"),
         top: LIST_TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
         filter_query: external_exports.string().default("")
       }
     },
-    async ({ folder, top, filter_query }) => {
+    async ({ folder, top, skip, filter_query }) => {
       const params = {
         $select: MAIL_LIST_FIELDS,
         $top: String(Math.min(top, 50)),
         $orderby: "receivedDateTime desc"
       };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
       if (filter_query !== "") {
         params.$filter = filter_query;
       }
@@ -35901,28 +36125,285 @@ Args:
       return successResponse(requireGraphObject3(result));
     }
   );
+  registerAuthenticatedTool(
+    server,
+    "graph_move_mail",
+    {
+      description: `Move messages to a mail folder. Use this to archive mail.
+
+Processes each message in order and reports per-message outcomes, so a
+partial failure still tells you what moved.
+
+Args:
+    message_ids: Message IDs to move (1-50 per call).
+    destination_folder: Destination folder ID or well-known name
+        (default "archive"). Common: archive, inbox, deleteditems, junkemail.`,
+      inputSchema: {
+        message_ids: MESSAGE_IDS_SCHEMA,
+        destination_folder: RESOURCE_ID_SCHEMA4.default("archive")
+      }
+    },
+    async ({ message_ids, destination_folder }) => {
+      const outcome = await applyToMessages(message_ids, async (messageId) => {
+        await dependencies.graphClient.post(`${messagePath(messageId)}/move`, {
+          destinationId: destination_folder
+        });
+      });
+      return batchResponse(outcome, {
+        action: "moved",
+        destination_folder
+      });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_delete_mail",
+    {
+      description: `Delete messages. They are moved to Deleted Items, not erased.
+
+Processes each message in order and reports per-message outcomes.
+
+Args:
+    message_ids: Message IDs to delete (1-50 per call).`,
+      inputSchema: {
+        message_ids: MESSAGE_IDS_SCHEMA
+      }
+    },
+    async ({ message_ids }) => {
+      const outcome = await applyToMessages(message_ids, async (messageId) => {
+        await dependencies.graphClient.delete(messagePath(messageId));
+      });
+      return batchResponse(outcome, { action: "deleted" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_mark_mail_read",
+    {
+      description: `Mark messages as read or unread.
+
+Processes each message in order and reports per-message outcomes.
+
+Args:
+    message_ids: Message IDs to update (1-50 per call).
+    is_read: Whether the messages are read (default true). Use false to
+        mark them unread.`,
+      inputSchema: {
+        message_ids: MESSAGE_IDS_SCHEMA,
+        is_read: external_exports.boolean().default(true)
+      }
+    },
+    async ({ message_ids, is_read }) => {
+      const outcome = await applyToMessages(message_ids, async (messageId) => {
+        await dependencies.graphClient.patch(messagePath(messageId), { isRead: is_read });
+      });
+      return batchResponse(outcome, { action: is_read ? "marked read" : "marked unread" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_flag_mail",
+    {
+      description: `Set the follow-up flag on messages.
+
+Processes each message in order and reports per-message outcomes.
+
+Args:
+    message_ids: Message IDs to update (1-50 per call).
+    flag_status: Flag state: "notFlagged", "flagged", or "complete"
+        (default "flagged").`,
+      inputSchema: {
+        message_ids: MESSAGE_IDS_SCHEMA,
+        flag_status: FLAG_STATUS_SCHEMA.default("flagged")
+      }
+    },
+    async ({ message_ids, flag_status }) => {
+      const outcome = await applyToMessages(message_ids, async (messageId) => {
+        await dependencies.graphClient.patch(messagePath(messageId), {
+          flag: { flagStatus: flag_status }
+        });
+      });
+      return batchResponse(outcome, { action: "flagged", flag_status });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_list_mail_folders",
+    {
+      description: `List mail folders, including their unread and total counts.
+
+Use the returned folder IDs with graph_list_mail or graph_move_mail.
+
+Args:
+    parent_folder_id: Parent folder ID. Empty lists top-level folders.
+    top: Maximum number of folders to return (default 25).`,
+      inputSchema: {
+        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA3,
+        top: LIST_TOP_SCHEMA
+      }
+    },
+    async ({ parent_folder_id, top }) => {
+      const path2 = parent_folder_id === "" ? "/me/mailFolders" : `/me/mailFolders/${encodeURIComponent(parent_folder_id)}/childFolders`;
+      const result = await dependencies.graphClient.get(path2, {
+        $select: MAIL_FOLDER_FIELDS,
+        $top: String(Math.min(top, 50))
+      });
+      return successResponse(collectionValue4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_create_mail_folder",
+    {
+      description: `Create a mail folder.
+
+Args:
+    display_name: Name of the new folder.
+    parent_folder_id: Parent folder ID. Empty creates a top-level folder.`,
+      inputSchema: {
+        display_name: RESOURCE_ID_SCHEMA4,
+        parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA3
+      }
+    },
+    async ({ display_name, parent_folder_id }) => {
+      const path2 = parent_folder_id === "" ? "/me/mailFolders" : `/me/mailFolders/${encodeURIComponent(parent_folder_id)}/childFolders`;
+      const result = await dependencies.graphClient.post(path2, { displayName: display_name });
+      return successResponse(requireGraphObjectWithId3(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_forward_mail",
+    {
+      description: `Forward an email to other recipients.
+
+Args:
+    message_id: The email message ID to forward.
+    to: List of recipient email addresses.
+    comment: Optional note to add above the forwarded message. When
+        \`is_html\` is true, send explicit HTML; markdown is not converted.
+    is_html: Whether the comment is HTML content (default: True). Use
+        false for plain text.`,
+      inputSchema: {
+        message_id: RESOURCE_ID_SCHEMA4,
+        to: RECIPIENTS_SCHEMA,
+        comment: external_exports.string().default(""),
+        is_html: external_exports.boolean().default(true)
+      }
+    },
+    async ({ message_id, to, comment, is_html }) => {
+      const draftResult = await dependencies.graphClient.post(
+        `${messagePath(message_id)}/createForward`
+      );
+      const draft = requireGraphObjectWithId3(draftResult);
+      const draftPath = messagePath(draft.id);
+      const updates = { toRecipients: to.map(recipient) };
+      if (comment !== "") {
+        updates.body = buildRichTextBody(comment, is_html, RICH_TEXT_OPTIONS);
+      }
+      await dependencies.graphClient.patch(draftPath, updates);
+      await dependencies.graphClient.post(`${draftPath}/send`);
+      return successResponse({ status: "Message forwarded" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_create_mail_draft",
+    {
+      description: `Create a draft email without sending it.
+
+Use graph_add_mail_attachment to attach files to the draft and
+graph_send_mail_draft to send it.
+
+Args:
+    to: List of recipient email addresses.
+    subject: Email subject.
+    body: Email body content. When \`is_html\` is true, send explicit
+        HTML; markdown is not converted.
+    cc: Optional list of CC email addresses.
+    is_html: Whether the body is HTML content (default: True). Use false
+        for plain text.`,
+      inputSchema: {
+        to: RECIPIENTS_SCHEMA,
+        subject: external_exports.string(),
+        body: external_exports.string(),
+        cc: CC_SCHEMA,
+        is_html: external_exports.boolean().default(true)
+      }
+    },
+    async ({ to, subject, body, cc, is_html }) => {
+      const message = {
+        subject,
+        body: buildRichTextBody(body, is_html, RICH_TEXT_OPTIONS),
+        toRecipients: to.map(recipient)
+      };
+      if (cc !== null && cc.length > 0) {
+        message.ccRecipients = cc.map(recipient);
+      }
+      const result = await dependencies.graphClient.post("/me/messages", message);
+      return successResponse(requireGraphObjectWithId3(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_add_mail_attachment",
+    {
+      description: `Attach a file to an existing draft message (max 3MB).
+
+Args:
+    message_id: The draft message ID (from graph_create_mail_draft).
+    file_name: File name to show on the attachment.
+    content_base64: File content encoded as base64.
+    content_type: MIME type (default "application/octet-stream").`,
+      inputSchema: {
+        message_id: RESOURCE_ID_SCHEMA4,
+        file_name: RESOURCE_ID_SCHEMA4,
+        content_base64: external_exports.string(),
+        content_type: external_exports.string().default("application/octet-stream")
+      }
+    },
+    async ({ message_id, file_name, content_base64, content_type }) => {
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(content_base64) || content_base64.length % 4 !== 0) {
+        return successResponse({ error: INVALID_ATTACHMENT_BASE64_MESSAGE }, "error");
+      }
+      if (content_base64.length > MAX_ATTACHMENT_BASE64_LENGTH) {
+        return successResponse({ error: ATTACHMENT_TOO_LARGE_MESSAGE }, "error");
+      }
+      const result = await dependencies.graphClient.post(`${messagePath(message_id)}/attachments`, {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        name: file_name,
+        contentType: content_type,
+        contentBytes: content_base64
+      });
+      return successResponse(requireGraphObjectWithId3(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_send_mail_draft",
+    {
+      description: `Send an existing draft message.
+
+Args:
+    message_id: The draft message ID (from graph_create_mail_draft).`,
+      inputSchema: {
+        message_id: RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ message_id }) => {
+      await dependencies.graphClient.post(`${messagePath(message_id)}/send`);
+      return successResponse({ status: "Draft sent" });
+    }
+  );
 }
 
-// src/tools/meeting-tools.ts
+// src/tools/mailbox-tools.ts
 var INVALID_GRAPH_RESPONSE_MESSAGE5 = "Invalid Microsoft Graph response.";
-var MEETING_METADATA_FIELDS = "id,meetingId,createdDateTime,meetingOrganizer";
-var RESOURCE_ID_SCHEMA5 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
-  message: "Resource IDs must not be empty, '.' or '..'."
-});
+var MISSING_SCHEDULE_MESSAGE = 'start_datetime and end_datetime are required when status is "scheduled".';
+var AUTOMATIC_REPLIES_STATUS_SCHEMA = external_exports.enum(["disabled", "alwaysEnabled", "scheduled"]);
+var EXTERNAL_AUDIENCE_SCHEMA = external_exports.enum(["none", "contactsOnly", "all"]);
 function isNonArrayObject5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function collectionValue5(response) {
-  if (!isNonArrayObject5(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
-  }
-  if (!Object.hasOwn(response, "value")) {
-    return [];
-  }
-  if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
-  }
-  return response.value;
 }
 function requireGraphObject4(response) {
   if (!isNonArrayObject5(response)) {
@@ -35930,9 +36411,118 @@ function requireGraphObject4(response) {
   }
   return response;
 }
+function registerMailboxTools(server, dependencies) {
+  registerAuthenticatedTool(
+    server,
+    "graph_get_mailbox_settings",
+    {
+      description: `Get mailbox settings, including automatic replies, time zone, and working hours.`,
+      inputSchema: {}
+    },
+    async () => {
+      const result = await dependencies.graphClient.get("/me/mailboxSettings");
+      return successResponse(requireGraphObject4(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_set_automatic_replies",
+    {
+      description: `Set or clear the automatic reply (out of office) message.
+
+Args:
+    status: "disabled", "alwaysEnabled", or "scheduled". Scheduled requires
+        start_datetime and end_datetime.
+    internal_message: Reply sent to people inside the organization. When
+        \`is_html\` is true, send explicit HTML; markdown is not converted.
+    external_message: Reply sent to people outside the organization. Empty
+        reuses internal_message.
+    external_audience: Who outside the organization receives a reply: "none",
+        "contactsOnly", or "all" (default "none").
+    start_datetime: Scheduled window start (ISO 8601, e.g. "2025-03-01T09:00:00").
+    end_datetime: Scheduled window end (ISO 8601).
+    timezone: Timezone for the scheduled window (default "UTC").
+    is_html: Whether the messages are HTML content (default: True). Use false
+        for plain text.`,
+      inputSchema: {
+        status: AUTOMATIC_REPLIES_STATUS_SCHEMA,
+        internal_message: external_exports.string().default(""),
+        external_message: external_exports.string().default(""),
+        external_audience: EXTERNAL_AUDIENCE_SCHEMA.default("none"),
+        start_datetime: external_exports.string().default(""),
+        end_datetime: external_exports.string().default(""),
+        timezone: external_exports.string().default("UTC"),
+        is_html: external_exports.boolean().default(true)
+      }
+    },
+    async ({
+      status,
+      internal_message,
+      external_message,
+      external_audience,
+      start_datetime,
+      end_datetime,
+      timezone,
+      is_html
+    }) => {
+      if (status === "scheduled" && (start_datetime === "" || end_datetime === "")) {
+        return successResponse({ error: MISSING_SCHEDULE_MESSAGE }, "error");
+      }
+      const setting = {
+        status,
+        externalAudience: external_audience
+      };
+      if (status !== "disabled") {
+        const internal = is_html ? internal_message : escapeAsPlainText(internal_message);
+        const external = external_message === "" ? internal_message : external_message;
+        setting.internalReplyMessage = internal;
+        setting.externalReplyMessage = is_html ? external : escapeAsPlainText(external);
+      }
+      if (status === "scheduled") {
+        setting.scheduledStartDateTime = { dateTime: start_datetime, timeZone: timezone };
+        setting.scheduledEndDateTime = { dateTime: end_datetime, timeZone: timezone };
+      }
+      const result = await dependencies.graphClient.patch("/me/mailboxSettings", {
+        automaticRepliesSetting: setting
+      });
+      return successResponse(requireGraphObject4(result));
+    }
+  );
+}
+function escapeAsPlainText(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "<br>");
+}
+
+// src/tools/meeting-tools.ts
+var INVALID_GRAPH_RESPONSE_MESSAGE6 = "Invalid Microsoft Graph response.";
+var MEETING_METADATA_FIELDS = "id,meetingId,createdDateTime,meetingOrganizer";
+var RESOURCE_ID_SCHEMA5 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
+  message: "Resource IDs must not be empty, '.' or '..'."
+});
+function isNonArrayObject6(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function collectionValue5(response) {
+  if (!isNonArrayObject6(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+  }
+  if (!Object.hasOwn(response, "value")) {
+    return [];
+  }
+  if (!Array.isArray(response.value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+  }
+  return response.value;
+}
+function requireGraphObject5(response) {
+  if (!isNonArrayObject6(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+  }
+  return response;
+}
 function requireGraphString2(response) {
   if (typeof response !== "string") {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
   }
   return response;
 }
@@ -36047,7 +36637,7 @@ Args:
       const result = await dependencies.graphClient.get(
         `${meetingPath(meeting_id)}/recordings/${encodeURIComponent(recording_id)}`
       );
-      return successResponse(requireGraphObject4(result));
+      return successResponse(requireGraphObject5(result));
     }
   );
 }
@@ -36130,13 +36720,13 @@ function registerProfileTools(server, dependencies) {
 }
 
 // src/tools/search-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE6 = "Invalid Microsoft Graph response.";
-function isNonArrayObject6(value) {
+var INVALID_GRAPH_RESPONSE_MESSAGE7 = "Invalid Microsoft Graph response.";
+function isNonArrayObject7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function requireGraphObject5(value) {
-  if (!isNonArrayObject6(value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+function requireGraphObject6(value) {
+  if (!isNonArrayObject7(value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
   }
   return value;
 }
@@ -36146,7 +36736,7 @@ function optionalGraphArray(response, property) {
   }
   const value = response[property];
   if (!Array.isArray(value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
   }
   return value;
 }
@@ -36173,12 +36763,12 @@ function registerSearchTools(server, dependencies) {
         ]
       });
       const hits = [];
-      for (const responseValue of optionalGraphArray(requireGraphObject5(result), "value")) {
-        const response = requireGraphObject5(responseValue);
+      for (const responseValue of optionalGraphArray(requireGraphObject6(result), "value")) {
+        const response = requireGraphObject6(responseValue);
         for (const containerValue of optionalGraphArray(response, "hitsContainers")) {
-          const container = requireGraphObject5(containerValue);
+          const container = requireGraphObject6(containerValue);
           for (const hitValue of optionalGraphArray(container, "hits")) {
-            const hit = requireGraphObject5(hitValue);
+            const hit = requireGraphObject6(hitValue);
             hits.push(Object.hasOwn(hit, "resource") ? hit.resource : hit);
           }
         }
@@ -36189,24 +36779,24 @@ function registerSearchTools(server, dependencies) {
 }
 
 // src/tools/teams-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE7 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE8 = "Invalid Microsoft Graph response.";
 var RESOURCE_ID_SCHEMA6 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
 var TOP_SCHEMA4 = external_exports.number().int().default(50);
 var MENTIONS_SCHEMA2 = external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())).nullable().optional().default(null);
-function isNonArrayObject7(value) {
+function isNonArrayObject8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue6(response) {
-  if (!isNonArrayObject7(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
+  if (!isNonArrayObject8(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
   }
   return response.value;
 }
@@ -36352,22 +36942,22 @@ function registerTeamsTools(server, dependencies) {
 }
 
 // src/tools/user-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE8 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE9 = "Invalid Microsoft Graph response.";
 function escapeKqlStringToken(value) {
   return value.replaceAll('"', '""');
 }
-function isNonArrayObject8(value) {
+function isNonArrayObject9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function userSearchValues(response) {
-  if (!isNonArrayObject8(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
+  if (!isNonArrayObject9(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
   }
   return response.value;
 }
@@ -36406,6 +36996,7 @@ function registerAllTools(server, dependencies) {
   registerTeamsTools(server, dependencies);
   registerCalendarTools(server, dependencies);
   registerMailTools(server, dependencies);
+  registerMailboxTools(server, dependencies);
   registerUserTools(server, dependencies);
   registerPresenceTools(server, dependencies);
   registerSearchTools(server, dependencies);
@@ -36466,7 +37057,7 @@ async function createServer2(dependencies) {
     ownedAuthManager = defaults.authManager;
   }
   const server = new McpServer(
-    { name: "Graph MCP", version: "0.6.1" },
+    { name: "Graph MCP", version: "0.7.0" },
     { instructions: SERVER_INSTRUCTIONS }
   );
   registerAllTools(server, resolvedDependencies);
@@ -36503,7 +37094,7 @@ async function createServer2(dependencies) {
 }
 
 // src/cli.ts
-var VERSION = "0.6.1";
+var VERSION = "0.7.0";
 var PROTOCOL_ERROR_MESSAGE = "Graph MCP protocol error.";
 var HELP = `Graph MCP ${VERSION}
 

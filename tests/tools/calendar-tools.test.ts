@@ -91,6 +91,7 @@ Args:
     timezone: Timezone for start/end times.
     body: New body/description.
     location: New location name.
+    attendees: New list of attendee email addresses.
     is_html: Whether the body is HTML (default: plain text).`,
   },
   {
@@ -99,6 +100,27 @@ Args:
 
 Args:
     event_id: The event ID to delete.`,
+  },
+  {
+    name: "graph_respond_to_event",
+    description: `RSVP to a meeting invite.
+
+Args:
+    event_id: The event ID to respond to.
+    response: Response type: "accept", "decline", or "tentative".
+    comment: Optional comment to send with the response.
+    send_response: Whether to send the response to the organizer (default true).`,
+  },
+  {
+    name: "graph_get_schedule",
+    description: `Get free/busy availability for people or rooms.
+
+Args:
+    schedules: List of SMTP addresses (users or rooms) to look up.
+    start_datetime: Start of the lookup window (ISO 8601, e.g. "2025-03-01T09:00:00").
+    end_datetime: End of the lookup window (ISO 8601).
+    timezone: Timezone for the window (default "UTC").
+    availability_view_interval: Availability view interval in minutes (default 30).`,
   },
 ] as const;
 
@@ -262,7 +284,7 @@ function registerCalendarHarness(graphResponses: readonly unknown[] = []): {
 }
 
 describe("calendar tool registration", () => {
-  test("registers exactly the six legacy calendar names and complete descriptions", () => {
+  test("registers exactly the eight calendar names and complete descriptions", () => {
     const { harness } = registerCalendarHarness();
 
     expect(
@@ -354,6 +376,7 @@ describe("calendar tool registration", () => {
       "timezone",
       "body",
       "location",
+      "attendees",
       "is_html",
     ]);
     expect(z.object(updateShape).parse({ event_id: "event-1" })).toEqual({
@@ -364,8 +387,58 @@ describe("calendar tool registration", () => {
       timezone: "",
       body: "",
       location: "",
+      attendees: null,
       is_html: false,
     });
+    expect(z.object(updateShape).safeParse({ event_id: "event-1", attendees: [42] }).success).toBe(
+      false,
+    );
+
+    const respondShape = schemaFor(harness, "graph_respond_to_event");
+    expect(Object.keys(respondShape)).toEqual(["event_id", "response", "comment", "send_response"]);
+    const respondSchema = z.object(respondShape);
+    expect(respondSchema.parse({ event_id: "event-1", response: "accept" })).toEqual({
+      event_id: "event-1",
+      response: "accept",
+      comment: "",
+      send_response: true,
+    });
+    expect(respondSchema.safeParse({ event_id: "event-1" }).success).toBe(false);
+    expect(respondSchema.safeParse({ event_id: "event-1", response: "maybe" }).success).toBe(false);
+
+    const scheduleShape = schemaFor(harness, "graph_get_schedule");
+    expect(Object.keys(scheduleShape)).toEqual([
+      "schedules",
+      "start_datetime",
+      "end_datetime",
+      "timezone",
+      "availability_view_interval",
+    ]);
+    const scheduleSchema = z.object(scheduleShape);
+    expect(
+      scheduleSchema.parse({
+        schedules: ["ada@example.com"],
+        start_datetime: "2026-07-14T09:00:00",
+        end_datetime: "2026-07-14T17:00:00",
+      }),
+    ).toEqual({
+      schedules: ["ada@example.com"],
+      start_datetime: "2026-07-14T09:00:00",
+      end_datetime: "2026-07-14T17:00:00",
+      timezone: "UTC",
+      availability_view_interval: 30,
+    });
+    expect(scheduleSchema.safeParse({ start_datetime: "start", end_datetime: "end" }).success).toBe(
+      false,
+    );
+    expect(
+      scheduleSchema.safeParse({
+        schedules: ["ada@example.com"],
+        start_datetime: "start",
+        end_datetime: "end",
+        availability_view_interval: 15.5,
+      }).success,
+    ).toBe(false);
 
     const deleteShape = schemaFor(harness, "graph_delete_event");
     expect(Object.keys(deleteShape)).toEqual(["event_id"]);
@@ -384,6 +457,11 @@ describe("calendar tool registration", () => {
       for (const event_id of ["", ".", ".."]) {
         expect(schema.safeParse({ event_id }).success).toBe(false);
       }
+    }
+
+    const respondSchema = z.object(schemaFor(harness, "graph_respond_to_event"));
+    for (const event_id of ["", ".", ".."]) {
+      expect(respondSchema.safeParse({ event_id, response: "accept" }).success).toBe(false);
     }
 
     const listSchema = z.object(schemaFor(harness, "graph_list_events"));
@@ -676,6 +754,44 @@ describe("calendar event operations", () => {
     expect(graph.calls).toEqual([{ method: "DELETE", path: "/me/events/event-1" }]);
   });
 
+  test("maps attendees onto the update patch and omits an empty list", async () => {
+    const attendees = Object.freeze(["ada@example.com", "grace@example.com"]);
+    const before = [...attendees];
+    const { harness, graph } = registerCalendarHarness([{ id: "event-1" }, { id: "event-2" }]);
+
+    await harness.invokeRaw("graph_update_event", {
+      event_id: "event-1",
+      subject: "",
+      start_datetime: "",
+      end_datetime: "",
+      timezone: "",
+      body: "",
+      location: "",
+      attendees,
+      is_html: false,
+    });
+    await harness.invoke("graph_update_event", { event_id: "event-2", attendees: [] });
+
+    expect(attendees).toEqual(before);
+    expect(graph.calls).toEqual([
+      {
+        method: "PATCH",
+        path: "/me/events/event-1",
+        body: {
+          attendees: [
+            { emailAddress: { address: "ada@example.com" }, type: "required" },
+            { emailAddress: { address: "grace@example.com" }, type: "required" },
+          ],
+        },
+      },
+      {
+        method: "PATCH",
+        path: "/me/events/event-2",
+        body: {},
+      },
+    ]);
+  });
+
   test.each([
     { name: "graph_get_event", args: { event_id: "event-1" } },
     { name: "graph_update_event", args: { event_id: "event-1" } },
@@ -694,6 +810,141 @@ describe("calendar event operations", () => {
       const { harness } = registerCalendarHarness([response]);
       const result = await harness.invoke("graph_create_event", {
         subject: "Planning",
+        start_datetime: "start",
+        end_datetime: "end",
+      });
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
+describe("calendar event responses", () => {
+  test.each([
+    { response: "accept", action: "accept", status: "Event accepted" },
+    { response: "decline", action: "decline", status: "Event declined" },
+    {
+      response: "tentative",
+      action: "tentativelyAccept",
+      status: "Event tentatively accepted",
+    },
+  ])("routes the $response response to /$action", async ({ response, action, status }) => {
+    const { harness, graph } = registerCalendarHarness(["ignored-response"]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_respond_to_event", {
+          event_id: "event-1",
+          response,
+          comment: "See you there",
+        }),
+      ),
+    ).toEqual({ status });
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: `/me/events/event-1/${action}`,
+        body: { comment: "See you there", sendResponse: true },
+      },
+    ]);
+  });
+
+  test("omits an empty comment and passes sendResponse through", async () => {
+    const { harness, graph } = registerCalendarHarness([null, null]);
+
+    await harness.invoke("graph_respond_to_event", { event_id: "event-1", response: "decline" });
+    await harness.invoke("graph_respond_to_event", {
+      event_id: "event-2",
+      response: "accept",
+      send_response: false,
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/events/event-1/decline",
+        body: { sendResponse: true },
+      },
+      {
+        method: "POST",
+        path: "/me/events/event-2/accept",
+        body: { sendResponse: false },
+      },
+    ]);
+  });
+
+  test("encodes event IDs in the response route", async () => {
+    const hostileId = "../event/path\\name#fragment?query=:value%";
+    const { harness, graph } = registerCalendarHarness([null]);
+
+    await harness.invoke("graph_respond_to_event", { event_id: hostileId, response: "accept" });
+
+    expect(graph.calls[0]?.path).toBe(`/me/events/${encodeURIComponent(hostileId)}/accept`);
+  });
+});
+
+describe("calendar schedule lookups", () => {
+  test("posts the exact getSchedule body and returns collection values", async () => {
+    const schedules = Object.freeze(["ada@example.com", "room-101@example.com"]);
+    const before = [...schedules];
+    const { harness, graph } = registerCalendarHarness([
+      { value: [{ scheduleId: "ada@example.com" }] },
+    ]);
+
+    expect(
+      dataFrom(
+        await harness.invokeRaw("graph_get_schedule", {
+          schedules,
+          start_datetime: "2026-07-14T09:00:00",
+          end_datetime: "2026-07-14T17:00:00",
+          timezone: "Europe/London",
+          availability_view_interval: 15,
+        }),
+      ),
+    ).toEqual([{ scheduleId: "ada@example.com" }]);
+    expect(schedules).toEqual(before);
+    expect(graph.calls).toEqual([
+      {
+        method: "POST",
+        path: "/me/calendar/getSchedule",
+        body: {
+          schedules: ["ada@example.com", "room-101@example.com"],
+          startTime: { dateTime: "2026-07-14T09:00:00", timeZone: "Europe/London" },
+          endTime: { dateTime: "2026-07-14T17:00:00", timeZone: "Europe/London" },
+          availabilityViewInterval: 15,
+        },
+      },
+    ]);
+  });
+
+  test("applies UTC and the default interval, and treats a missing value as empty", async () => {
+    const { harness, graph } = registerCalendarHarness([{}]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_schedule", {
+          schedules: ["ada@example.com"],
+          start_datetime: "2026-07-14T09:00:00",
+          end_datetime: "2026-07-14T17:00:00",
+        }),
+      ),
+    ).toEqual([]);
+    expect(graph.calls[0]?.body).toEqual({
+      schedules: ["ada@example.com"],
+      startTime: { dateTime: "2026-07-14T09:00:00", timeZone: "UTC" },
+      endTime: { dateTime: "2026-07-14T17:00:00", timeZone: "UTC" },
+      availabilityViewInterval: 30,
+    });
+  });
+
+  test.each([null, [], "payload-secret", { value: null }])(
+    "rejects malformed getSchedule response %# without leakage",
+    async (response) => {
+      const { harness } = registerCalendarHarness([response]);
+      const result = await harness.invoke("graph_get_schedule", {
+        schedules: ["ada@example.com"],
         start_datetime: "start",
         end_datetime: "end",
       });
@@ -749,6 +1000,11 @@ describe("calendar authenticated wrapper errors", () => {
     },
     { name: "graph_update_event", args: { event_id: "event-1" } },
     { name: "graph_delete_event", args: { event_id: "event-1" } },
+    { name: "graph_respond_to_event", args: { event_id: "event-1", response: "accept" } },
+    {
+      name: "graph_get_schedule",
+      args: { schedules: ["ada@example.com"], start_datetime: "start", end_datetime: "end" },
+    },
   ])("$name returns the stable authentication error envelope", async ({ name, args }) => {
     const { harness } = registerCalendarHarness([new AuthenticationError("Not authenticated.")]);
 

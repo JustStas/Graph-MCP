@@ -34,7 +34,7 @@ async function expectFile(path: string): Promise<void> {
 function expectManifestMetadata(manifest: Record<string, unknown>): void {
   expect(manifest).toMatchObject({
     name: "graph-mcp",
-    version: "0.6.1",
+    version: "0.7.0",
     repository: repositoryUrl,
     license: "MIT",
     skills: "./skills/",
@@ -151,7 +151,7 @@ describe("Graph MCP plugin packaging", () => {
       { cwd: pluginRoot },
     );
 
-    expect(stdout).toBe("0.6.1\n");
+    expect(stdout).toBe("0.7.0\n");
     expect(stderr).toBe("");
   });
 
@@ -174,9 +174,9 @@ describe("Graph MCP plugin packaging", () => {
 
     try {
       await client.connect(transport);
-      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.6.1" });
+      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.7.0" });
       const listed = await client.listTools();
-      expect(listed.tools).toHaveLength(44);
+      expect(listed.tools).toHaveLength(62);
     } finally {
       await client.close();
       await rm(home, { recursive: true, force: true });
@@ -328,7 +328,7 @@ describe("Graph MCP plugin packaging", () => {
     const claudeManifest = await readJson("plugins/graph-mcp/.claude-plugin/plugin.json");
     const codexManifest = await readJson("plugins/graph-mcp/.codex-plugin/plugin.json");
 
-    expect(packageJson.version).toBe("0.6.1");
+    expect(packageJson.version).toBe("0.7.0");
     expect(claudeManifest.version).toBe(packageJson.version);
     expect(codexManifest.version).toBe(packageJson.version);
 
@@ -339,6 +339,6 @@ describe("Graph MCP plugin packaging", () => {
     expect(verifier).toContain("src/cli.ts");
     expect(verifier).toContain("src/server.ts");
     const { verifyPluginVersions } = await import("../scripts/verify-plugin-versions.mjs");
-    await expect(verifyPluginVersions()).resolves.toBe("0.6.1");
+    await expect(verifyPluginVersions()).resolves.toBe("0.7.0");
   });
 });

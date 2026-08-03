@@ -4,6 +4,7 @@ import {
   CHANNEL_FIELDS,
   CHAT_FIELDS,
   EVENT_LIST_FIELDS,
+  MAIL_FOLDER_FIELDS,
   MAIL_LIST_FIELDS,
   TEAM_FIELDS,
   USER_PROFILE_FIELDS,
@@ -26,7 +27,10 @@ describe("select field constants", () => {
     expect(TEAM_FIELDS).toBe("id,displayName,description");
     expect(CHANNEL_FIELDS).toBe("id,displayName,description,membershipType");
     expect(MAIL_LIST_FIELDS).toBe(
-      "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,importance,flag",
+      "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,importance,flag,webLink,conversationId,parentFolderId",
+    );
+    expect(MAIL_FOLDER_FIELDS).toBe(
+      "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount",
     );
     expect(USER_PROFILE_FIELDS).toBe("id,displayName,mail,jobTitle,department,officeLocation");
   });
