@@ -38,6 +38,8 @@ const TAG_PATTERN = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 /** @typedef {{ execFile?: ExecFileFunction, delay?: DelayFunction }} PublishOptions */
 /** @typedef {{ state: "publish" | "already-published", version: string, integrity: string }} PublishResult */
 
+const PUBLISH_REPORT_LIMIT = 600;
+
 class RegistryReadbackExhaustedError extends Error {}
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
@@ -306,6 +308,26 @@ function verifyTarballDigests(metadata, bytes) {
   }
 }
 
+/**
+ * npm can exit zero without the version reaching the registry, and its own explanation is
+ * only on stdout or stderr. Keep a bounded copy so a readback failure can report it instead
+ * of leaving the operator with no reason at all.
+ *
+ * @param {{ stdout?: unknown, stderr?: unknown }} result @returns {string}
+ */
+function publishReport(result) {
+  const parts = [result.stdout, result.stderr]
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+  const combined = parts.join(" | ").replaceAll(/\s+/gu, " ");
+  if (combined.length === 0) {
+    return "no output.";
+  }
+  return combined.length > PUBLISH_REPORT_LIMIT
+    ? combined.slice(0, PUBLISH_REPORT_LIMIT) + "..."
+    : combined;
+}
+
 /** @param {string} snapshotPath @param {boolean} dryRun */
 function publishArguments(snapshotPath, dryRun) {
   return [
@@ -453,11 +475,14 @@ export async function publishRelease(metadataPath, expectedTag, options = {}) {
     validateDryRunManifest(dryRunStdout, metadata);
     /** @type {Error | undefined} */
     let publishError;
+    /** @type {string} */
+    let publishOutput = "";
     try {
-      await runFile("npm", publishArguments(snapshot.path, false), {
+      const published = await runFile("npm", publishArguments(snapshot.path, false), {
         encoding: "utf8",
         maxBuffer: 2_000_000,
       });
+      publishOutput = publishReport(published);
     } catch (error) {
       publishError = error instanceof Error ? error : new Error(String(error));
     }
@@ -467,6 +492,9 @@ export async function publishRelease(metadataPath, expectedTag, options = {}) {
     } catch (error) {
       if (publishError !== undefined && error instanceof RegistryReadbackExhaustedError) {
         throw publishError;
+      }
+      if (error instanceof RegistryReadbackExhaustedError) {
+        throw new Error(error.message + " npm publish reported: " + publishOutput);
       }
       throw error;
     }
