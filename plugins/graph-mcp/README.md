@@ -2,22 +2,25 @@
 
 Graph MCP connects Claude and Codex to Microsoft Graph through a local Node MCP server.
 It provides approved access to Microsoft Teams, Outlook mail and calendar, meetings,
-files, users, and presence through exactly 44 tools. Node.js 22 or newer is required.
+files, users, contacts, tasks, and presence through exactly 125 tools. Node.js 22 or newer is required.
 
 ## Install
 
-From a checkout containing the Graph MCP marketplace metadata, install with the command for
-your host:
+The repository is a plugin marketplace for both hosts, so install straight from GitHub with
+the command for yours:
 
 ```bash
-claude plugin marketplace add /absolute/path/to/Graph-MCP --scope user
+claude plugin marketplace add JustStas/Graph-MCP --scope user
 claude plugin install graph-mcp@graph-mcp --scope user
 ```
 
 ```bash
-codex plugin marketplace add /absolute/path/to/Graph-MCP --json
+codex plugin marketplace add JustStas/Graph-MCP --json
 codex plugin add graph-mcp@personal --json
 ```
+
+Both hosts also accept a local path in place of `JustStas/Graph-MCP`, which is the route for
+plugin development. Re-run the two commands to pick up a new release.
 
 ## Setup
 

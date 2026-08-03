@@ -14,7 +14,7 @@
   "interface": {
     "displayName": "Graph MCP",
     "shortDescription": "Connect Codex to Microsoft Graph.",
-    "longDescription": "Read and act on approved Microsoft Graph data through a local MCP server.",
+    "longDescription": "Read and act on approved Microsoft Graph data through a local MCP server. As well as reading, it can send, reply to, and forward mail, move, archive, and delete messages, create and cancel calendar events, post, edit, and delete Teams messages, change your presence and automatic replies, and create, move, and delete OneDrive files.",
     "developerName": "JustStas",
     "category": "Productivity",
     "capabilities": ["Read", "Write", "Interactive"],

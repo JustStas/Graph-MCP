@@ -4,6 +4,18 @@ All notable changes to Graph MCP are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Install documentation now uses the GitHub marketplace for Codex as well as Claude Code.
+  `codex plugin marketplace add` accepts `owner/repo[@ref]` and Git URLs, so requiring a local
+  clone was never necessary; both host sections keep the local path as the plugin-development
+  route. Verified by installing 0.8.1 into a clean CODEX_HOME from `JustStas/Graph-MCP`.
+- The Codex plugin manifest now states what the plugin can do beyond reading — send and delete
+  mail, cancel meetings, edit and delete Teams messages, change presence and automatic replies,
+  and create, move, and delete files — so the consent prompt is not misleading. The previous
+  wording dated from the 44-tool release.
+- The bundled plugin README said "exactly 44 tools" and now says 125.
+
 ### Fixed
 
 - The release helper now retries the post-publish registry readback six times with exponential
