@@ -84,6 +84,12 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Install pinned plugin test CLIs
+        run: |
+          npm install --global --no-audit --no-fund @anthropic-ai/claude-code@2.1.201 @openai/codex@0.144.4
+          test "$(claude --version)" = "2.1.201 (Claude Code)"
+          test "$(codex --version)" = "codex-cli 0.144.4"
+
       - name: Verify source and package
         run: npm run verify
 

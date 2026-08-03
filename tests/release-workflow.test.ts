@@ -334,6 +334,7 @@ describe("npm publish workflow", () => {
       "Set up Node.js",
       "Require OIDC-capable npm",
       "Install locked dependencies",
+      "Install pinned plugin test CLIs",
       "Verify source and package",
       "Prepare release tarball",
       "Validate release metadata",
@@ -344,6 +345,18 @@ describe("npm publish workflow", () => {
     expect(preflight).toContain("git rev-parse --verify HEAD");
     expect(preflight).toContain('[[ "$tag_commit" != "$head_commit" ]]');
     expect(preflight).toContain('git merge-base --is-ancestor "$tag_commit" origin/main');
+  });
+
+  test("installs and verifies exact host CLIs before the real plugin smoke test", () => {
+    const steps = getSteps(packageJob);
+    const names = steps.map((step) => step.name);
+    const installIndex = names.indexOf("Install pinned plugin test CLIs");
+    const verifyIndex = names.indexOf("Verify source and package");
+    expect(installIndex).toBeGreaterThan(names.indexOf("Install locked dependencies"));
+    expect(verifyIndex).toBeGreaterThan(installIndex);
+    expect(getRun(getStep(packageJob, "Install pinned plugin test CLIs"))).toBe(
+      'npm install --global --no-audit --no-fund @anthropic-ai/claude-code@2.1.201 @openai/codex@0.144.4\ntest "$(claude --version)" = "2.1.201 (Claude Code)"\ntest "$(codex --version)" = "codex-cli 0.144.4"\n',
+    );
   });
 
   test("validates strict package metadata and exposes only strict outputs", () => {
