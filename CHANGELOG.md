@@ -10,6 +10,8 @@ All notable changes to Graph MCP are documented in this file.
   executable and Claude/Codex plugin names. npm rejected the unscoped graph-mcp@0.6.0 name as
   too similar to the existing graphmcp package, so 0.6.1 is the first scoped npm release.
 - Normalized npm bin and repository metadata and synchronized all runtime and plugin versions.
+- Updated the MCP SDK to 1.30.0 and refreshed vulnerable transitive dependencies discovered
+  during release verification.
 - Updated installation and release documentation for the scoped package.
 
 ### Added

@@ -35,6 +35,7 @@ describe("package metadata", () => {
       },
       publishConfig: { access: "public" },
       engines: { node: ">=22" },
+      dependencies: { "@modelcontextprotocol/sdk": "1.30.0" },
     });
   });
 
