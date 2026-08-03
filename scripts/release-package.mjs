@@ -423,6 +423,11 @@ export async function publishRelease(metadataPath, expectedTag, options = {}) {
   }
   const tarballBytes = await readFile(realTarball);
   verifyTarballDigests(metadata, tarballBytes);
+  const remote = await readRegistryMetadata(metadata.name, metadata.version, runFile);
+  const state = classifyRegistryState(remote, metadata);
+  if (state === "already-published") {
+    return publishedResult(metadata, state);
+  }
   const snapshot = await createPrivateSnapshot(tarballBytes);
   try {
     const { stdout: dryRunStdout } = await runFile("npm", publishArguments(snapshot.path, true), {
@@ -430,19 +435,15 @@ export async function publishRelease(metadataPath, expectedTag, options = {}) {
       maxBuffer: 2_000_000,
     });
     validateDryRunManifest(dryRunStdout, metadata);
-    const remote = await readRegistryMetadata(metadata.name, metadata.version, runFile);
-    const state = classifyRegistryState(remote, metadata);
     /** @type {Error | undefined} */
     let publishError;
-    if (state === "publish") {
-      try {
-        await runFile("npm", publishArguments(snapshot.path, false), {
-          encoding: "utf8",
-          maxBuffer: 2_000_000,
-        });
-      } catch (error) {
-        publishError = error instanceof Error ? error : new Error(String(error));
-      }
+    try {
+      await runFile("npm", publishArguments(snapshot.path, false), {
+        encoding: "utf8",
+        maxBuffer: 2_000_000,
+      });
+    } catch (error) {
+      publishError = error instanceof Error ? error : new Error(String(error));
     }
 
     try {
