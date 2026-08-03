@@ -55,6 +55,13 @@ Microsoft Graph v1.0 with delegated permissions.
   TeamMember.Read.All, OnlineMeetingArtifact.Read.All, User.Read.All, Sites.Read.All, and
   Place.Read.All.
 
+### Fixed
+
+- The release helper now accepts npm 11's `npm publish --dry-run --json` output, which nests the
+  manifest under the package name instead of printing it flat like npm 10. The publish job
+  requires an OIDC-capable npm, so every release attempt failed manifest validation with
+  "npm publish dry-run name must be a non-empty string" before reaching the registry.
+
 ### Changed
 
 - `MAIL_LIST_FIELDS` now selects `webLink`, `conversationId`, and `parentFolderId` so listed

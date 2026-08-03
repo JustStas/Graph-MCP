@@ -322,6 +322,21 @@ function publishArguments(snapshotPath, dryRun) {
   ];
 }
 
+/**
+ * npm 10 prints the dry-run manifest as a flat object, while npm 11 nests it under the
+ * package name. Accept either shape so the publish job keeps validating the same fields
+ * whichever OIDC-capable npm the runner provides.
+ *
+ * @param {Record<string, unknown>} result @param {string} name
+ * @returns {Record<string, unknown>}
+ */
+function unwrapDryRunManifest(result, name) {
+  if (!Object.hasOwn(result, name)) {
+    return result;
+  }
+  return requireRecord(result[name], "npm publish dry-run " + name + " manifest");
+}
+
 /** @param {string} stdout @param {PackageMetadata} metadata */
 function validateDryRunManifest(stdout, metadata) {
   /** @type {unknown} */
@@ -331,7 +346,8 @@ function validateDryRunManifest(stdout, metadata) {
   } catch {
     throw new Error("npm publish dry-run returned malformed JSON.");
   }
-  const manifest = requireRecord(parsed, "npm publish dry-run result");
+  const result = requireRecord(parsed, "npm publish dry-run result");
+  const manifest = unwrapDryRunManifest(result, metadata.name);
   /** @type {readonly (readonly [string, string])[]} */
   const fields = [
     ["name", metadata.name],
