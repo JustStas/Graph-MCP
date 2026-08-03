@@ -273,8 +273,10 @@ scoped release in this order:
 3. Activate the separate no-bypass immutability ruleset.
 4. Create the annotated `v0.6.1` tag only after those gates pass.
 5. Run `publish.yml` from `main` with `prepare_only` enabled and inspect its prepared artifact.
-6. Publish that artifact once with the maintainer's interactive 2FA, then verify its registry
-   version and integrity.
+6. Validate the exact filename, regular-file status, SHA-512 and SHA-1 digests, and npm's JSON
+   dry-run manifest. Publish that same private snapshot once with the maintainer's interactive
+   2FA, explicit npmjs registry, `latest` tag, disabled lifecycle scripts, and public access;
+   then verify its registry version and integrity.
 7. Reverify both release-tag rulesets.
 8. Create the `npm` GitHub environment.
 9. Add separate typed environment policies for branch `main` and tag `v*`.

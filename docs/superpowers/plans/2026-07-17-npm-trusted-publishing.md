@@ -2500,6 +2500,8 @@ test("documents the scoped package while preserving the graph-mcp command", asyn
     "Activate the separate no-bypass immutability ruleset",
     "Create the annotated `v0.6.1` tag",
     "with `prepare_only` enabled",
+    "Validate the exact filename",
+    "Publish that same private snapshot",
     "interactive 2FA",
     "Reverify both release-tag rulesets",
     "Create the `npm` GitHub environment",
@@ -2595,8 +2597,10 @@ scoped release in this order:
 3. Activate the separate no-bypass immutability ruleset.
 4. Create the annotated `v0.6.1` tag only after those gates pass.
 5. Run `publish.yml` from `main` with `prepare_only` enabled and inspect its prepared artifact.
-6. Publish that artifact once with the maintainer's interactive 2FA, then verify its registry
-   version and integrity.
+6. Validate the exact filename, regular-file status, SHA-512 and SHA-1 digests, and npm's JSON
+   dry-run manifest. Publish that same private snapshot once with the maintainer's interactive
+   2FA, explicit npmjs registry, `latest` tag, disabled lifecycle scripts, and public access;
+   then verify its registry version and integrity.
 7. Reverify both release-tag rulesets.
 8. Create the `npm` GitHub environment.
 9. Add separate typed environment policies for branch `main` and tag `v*`.
@@ -3172,11 +3176,19 @@ run_id="$(gh run list --repo JustStas/Graph-MCP --workflow publish.yml --event w
   --limit 1 --json databaseId,conclusion \
   --jq 'if length == 1 and .[0].conclusion == "success" then .[0].databaseId else error("latest prepare-only run did not succeed") end')"
 release_dir="$(mktemp -d)"
+chmod 700 "$release_dir"
 gh run download --repo JustStas/Graph-MCP "$run_id" --name npm-package-0.6.1 --dir "$release_dir"
-node -e 'const fs=require("fs"); const path=require("path"); const m=JSON.parse(fs.readFileSync(path.join(process.argv[1],"package-metadata.json"),"utf8")); if(m.name!=="@juststas/graph-mcp"||m.version!=="0.6.1"||m.tag!=="v0.6.1"||!m.integrity.startsWith("sha512-")) process.exit(1); console.log(JSON.stringify(m,null,2))' "$release_dir"
+test "$(find "$release_dir" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" = 2
+test -f "$release_dir/package-metadata.json"
+test -f "$release_dir/juststas-graph-mcp-0.6.1.tgz"
+test ! -L "$release_dir/package-metadata.json"
+test ! -L "$release_dir/juststas-graph-mcp-0.6.1.tgz"
+chmod 600 "$release_dir/package-metadata.json" "$release_dir/juststas-graph-mcp-0.6.1.tgz"
+node -e 'const fs=require("fs"); const path=require("path"); const m=JSON.parse(fs.readFileSync(path.join(process.argv[1],"package-metadata.json"),"utf8")); if(m.name!=="@juststas/graph-mcp"||m.version!=="0.6.1"||m.tag!=="v0.6.1"||m.filename!=="juststas-graph-mcp-0.6.1.tgz"||!/^sha512-[A-Za-z0-9+/]+={2}$/.test(m.integrity)||!/^[a-f0-9]{40}$/.test(m.shasum)) process.exit(1); console.log(JSON.stringify(m,null,2))' "$release_dir"
 ```
 
-Expected: valid scoped metadata and one tarball whose filename equals the metadata filename.
+Expected: a private directory containing only exact scoped metadata and its exact regular-file
+tarball. Task 8 independently validates the bytes and npm dry-run manifest before publication.
 
 ## Task 8: Bootstrap npm trust, publish the GitHub Release, and verify deployment
 
@@ -3188,7 +3200,7 @@ Expected: valid scoped metadata and one tarball whose filename equals the metada
 - [ ] **Step 1: Confirm the package version is absent**
 
 ```bash
-npm view @juststas/graph-mcp@0.6.1 version --json
+npm view @juststas/graph-mcp@0.6.1 version --json --registry https://registry.npmjs.org/
 ```
 
 Expected: npm E404. If the version exists, stop and compare its dist.integrity with package-metadata.json before any other action.
@@ -3196,17 +3208,91 @@ Expected: npm E404. If the version exists, stop and compare its dist.integrity w
 - [ ] **Step 2: Publish the exact prepared tarball with 2FA**
 
 ```bash
-tarball="$(node -e 'const fs=require("fs"); const path=require("path"); const m=JSON.parse(fs.readFileSync(path.join(process.argv[1],"package-metadata.json"),"utf8")); process.stdout.write(path.join(process.argv[1],m.filename))' "$release_dir")"
-npm publish "$tarball" --access public
+set -euo pipefail
+
+validate_snapshot() {
+  node --input-type=module - "$release_dir" <<'NODE'
+import { createHash } from "node:crypto";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
+const expected = {
+  name: "@juststas/graph-mcp",
+  version: "0.6.1",
+  tag: "v0.6.1",
+  filename: "juststas-graph-mcp-0.6.1.tgz",
+};
+const releaseDirectory = await realpath(process.argv[2]);
+const metadataPath = join(releaseDirectory, "package-metadata.json");
+const metadataStat = await lstat(metadataPath);
+if (metadataStat.isSymbolicLink() || !metadataStat.isFile()) {
+  throw new Error("metadata must be a regular non-symlink file");
+}
+const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+for (const [key, value] of Object.entries(expected)) {
+  if (metadata[key] !== value) throw new Error(`unexpected metadata ${key}`);
+}
+if (!/^[a-f0-9]{40}$/.test(metadata.shasum)) throw new Error("invalid metadata shasum");
+const tarballPath = join(releaseDirectory, expected.filename);
+const tarballStat = await lstat(tarballPath);
+if (tarballStat.isSymbolicLink() || !tarballStat.isFile()) {
+  throw new Error("tarball must be a regular non-symlink file");
+}
+const realTarball = await realpath(tarballPath);
+if (dirname(realTarball) !== releaseDirectory) throw new Error("tarball escaped release directory");
+const bytes = await readFile(realTarball);
+const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+const shasum = createHash("sha1").update(bytes).digest("hex");
+if (integrity !== metadata.integrity || shasum !== metadata.shasum) {
+  throw new Error("tarball digests do not match metadata");
+}
+process.stdout.write(realTarball);
+NODE
+}
+
+chmod 700 "$release_dir"
+tarball="$(validate_snapshot)"
+test "$tarball" = "$(cd "$release_dir" && pwd -P)/juststas-graph-mcp-0.6.1.tgz"
+dry_run_file="$release_dir/npm-publish-dry-run.json"
+trap 'rm -f "$dry_run_file"' EXIT
+npm publish "$tarball" --dry-run --json --access public --tag latest --ignore-scripts \
+  --registry https://registry.npmjs.org/ > "$dry_run_file"
+chmod 600 "$dry_run_file"
+node --input-type=module - "$release_dir/package-metadata.json" "$dry_run_file" <<'NODE'
+import { readFile } from "node:fs/promises";
+
+const metadata = JSON.parse(await readFile(process.argv[2], "utf8"));
+const dryRun = JSON.parse(await readFile(process.argv[3], "utf8"));
+const expected = {
+  id: `${metadata.name}@${metadata.version}`,
+  name: metadata.name,
+  version: metadata.version,
+  filename: metadata.filename,
+  shasum: metadata.shasum,
+  integrity: metadata.integrity,
+};
+for (const [key, value] of Object.entries(expected)) {
+  if (dryRun[key] !== value) throw new Error(`npm dry-run ${key} mismatch`);
+}
+NODE
+test "$(validate_snapshot)" = "$tarball"
+npm publish "$tarball" --access public --tag latest --ignore-scripts \
+  --registry https://registry.npmjs.org/
+rm -f "$dry_run_file"
+trap - EXIT
 ```
 
-Expected: the user completes npm's passkey/2FA prompt and npm reports + @juststas/graph-mcp@0.6.1.
+Expected: validation proves the private snapshot matches both recorded digests and npm's exact
+JSON dry-run identity before any registry write. The user then completes npm's passkey/2FA
+prompt, and npm reports `+ @juststas/graph-mcp@0.6.1` from that same snapshot. Stop without
+publishing if any validation fails.
 
 - [ ] **Step 3: Verify bootstrap bytes**
 
 ```bash
-npm view @juststas/graph-mcp@0.6.1 version dist.integrity repository --json
-node -e 'const fs=require("fs"); const path=require("path"); const cp=require("child_process"); const local=JSON.parse(fs.readFileSync(path.join(process.argv[1],"package-metadata.json"),"utf8")); const remote=JSON.parse(cp.execFileSync("npm",["view","@juststas/graph-mcp@0.6.1","version","dist.integrity","--json"],{encoding:"utf8"})); if(remote.version!==local.version||remote["dist.integrity"]!==local.integrity) process.exit(1)' "$release_dir"
+npm view @juststas/graph-mcp@0.6.1 version dist.integrity repository --json \
+  --registry https://registry.npmjs.org/
+node -e 'const fs=require("fs"); const path=require("path"); const cp=require("child_process"); const local=JSON.parse(fs.readFileSync(path.join(process.argv[1],"package-metadata.json"),"utf8")); const remote=JSON.parse(cp.execFileSync("npm",["view","@juststas/graph-mcp@0.6.1","version","dist.integrity","--json","--registry","https://registry.npmjs.org/"],{encoding:"utf8"})); if(remote.version!==local.version||remote["dist.integrity"]!==local.integrity) process.exit(1)' "$release_dir"
 ```
 
 Expected: registry version and integrity match the GitHub-prepared artifact exactly.

@@ -97,6 +97,8 @@ describe("package metadata", () => {
       "Activate the separate no-bypass immutability ruleset",
       "Create the annotated `v0.6.1` tag",
       "with `prepare_only` enabled",
+      "Validate the exact filename",
+      "Publish that same private snapshot",
       "interactive 2FA",
       "Reverify both release-tag rulesets",
       "Create the `npm` GitHub environment",
