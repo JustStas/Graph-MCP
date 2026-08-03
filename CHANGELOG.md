@@ -2,6 +2,20 @@
 
 All notable changes to Graph MCP are documented in this file.
 
+## 0.8.1 - 2026-08-03
+
+### Fixed
+
+- Restored a transitive dependency range in `package-lock.json`. The 0.8.0 version bump was
+  applied with a blanket string replacement, which also rewrote `iconv-lite` from `~0.7.0` to
+  `~0.8.0` — a version that does not exist — so `npm ci` failed with ETARGET and 0.8.0 never
+  built or published. Version bumps now go through targeted JSON edits, and `npm run verify`
+  reinstalls from the lockfile so a corrupted lockfile fails locally instead of in the release
+  workflow.
+
+Version 0.8.0 was tagged but never published to npm. Use 0.8.1, which contains the identical
+feature set.
+
 ## 0.8.0 - 2026-08-03
 
 ### Fixed

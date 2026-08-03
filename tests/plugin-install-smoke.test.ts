@@ -363,8 +363,8 @@ test("installed authenticity rejects wrong cache paths and the staged plugin", a
   await withWrapperWorkspace(async (root) => {
     const sourceRoot = join(root, "source");
     const stagedPluginRoot = join(root, "staged-repository", "plugins", "graph-mcp");
-    const expectedInstallRoot = join(root, "host-cache", "graph-mcp", "0.8.0");
-    const wrongInstallRoot = join(root, "other-cache", "graph-mcp", "0.8.0");
+    const expectedInstallRoot = join(root, "host-cache", "graph-mcp", "0.8.1");
+    const wrongInstallRoot = join(root, "other-cache", "graph-mcp", "0.8.1");
     for (const pluginRoot of [stagedPluginRoot, expectedInstallRoot, wrongInstallRoot]) {
       await mkdir(join(pluginRoot, "dist"), { recursive: true });
       await writeFile(join(pluginRoot, "dist", "graph-mcp.js"), "same bundle");
@@ -407,7 +407,7 @@ test("artifact hashes and full MCP metadata detect hostile changes", async () =>
   });
 
   const baseline = {
-    serverVersion: { name: "Graph MCP", version: "0.8.0" },
+    serverVersion: { name: "Graph MCP", version: "0.8.1" },
     instructions: "baseline instructions",
     tools: { tools: [{ name: "graph_auth_status", description: "baseline" }] },
   };
