@@ -28,17 +28,19 @@ interface NpmPackFile {
 }
 
 interface NpmPackResult {
+  readonly name: string;
+  readonly version: string;
   readonly files: readonly NpmPackFile[];
 }
 
-async function npmPackDryRun(): Promise<readonly NpmPackFile[]> {
+async function npmPackDryRun(): Promise<NpmPackResult> {
   const { stdout } = await execFileAsync("npm", ["pack", "--json", "--dry-run"], {
     cwd: repositoryRoot,
     maxBuffer: 2_000_000,
   });
   const result = JSON.parse(stdout) as readonly NpmPackResult[];
   expect(result).toHaveLength(1);
-  return result[0]?.files ?? [];
+  return result[0]!;
 }
 
 async function validatePackageResult(input: unknown): Promise<PackageValidationResult> {
@@ -59,9 +61,12 @@ describe("npm package contents", () => {
   }, 30_000);
 
   test("contains the executable package files and excludes source/runtime artifacts", async () => {
-    const files = await npmPackDryRun();
+    const packResult = await npmPackDryRun();
+    const files = packResult.files;
     const paths = files.map((file) => file.path.replaceAll("\\", "/")).sort();
 
+    expect(packResult.name).toBe("@juststas/graph-mcp");
+    expect(packResult.version).toBe("0.6.1");
     expect(paths).toEqual([...allowedPackagePaths].sort());
     expect(files.find((file) => file.path === "dist/cli.js")?.mode).toBe(0o755);
   }, 30_000);
@@ -87,7 +92,7 @@ describe("npm package contents", () => {
         cwd: repositoryRoot,
       });
 
-      expect(stdout).toBe("0.6.0\n");
+      expect(stdout).toBe("0.6.1\n");
       expect(stderr).toBe("");
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
@@ -99,7 +104,7 @@ describe("npm package contents", () => {
       cwd: repositoryRoot,
     });
 
-    expect(stdout).toBe("0.6.0\n");
+    expect(stdout).toBe("0.6.1\n");
     expect(stderr).toBe("");
   });
 
@@ -118,7 +123,7 @@ describe("npm package contents", () => {
         },
       );
 
-      expect(stdout).toBe("0.6.0\n");
+      expect(stdout).toBe("0.6.1\n");
       expect(stderr).toBe("");
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
@@ -130,7 +135,7 @@ describe("npm package contents", () => {
     const args = process.platform === "win32" ? [bundlePath, "--version"] : ["--version"];
     const { stdout, stderr } = await execFileAsync(command, args, { cwd: repositoryRoot });
 
-    expect(stdout).toBe("0.6.0\n");
+    expect(stdout).toBe("0.6.1\n");
     expect(stderr).toBe("");
   });
 

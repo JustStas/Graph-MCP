@@ -1,0 +1,188 @@
+name: Publish npm package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to package
+        required: true
+        type: string
+      prepare_only:
+        description: Build and upload the tarball without publishing
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must match vMAJOR.MINOR.PATCH without leading zeros." >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check out release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch main ancestry
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
+
+      - name: Verify trusted release commit
+        shell: bash
+        run: |
+          tag_commit="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+          head_commit="$(git rev-parse --verify HEAD)"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "Release tag commit must match HEAD." >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$tag_commit" origin/main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Require OIDC-capable npm
+        shell: bash
+        run: |
+          npm_version="$(npm --version)"
+          node -e '
+          const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(process.argv[1]);
+          if (!match) process.exit(1);
+          const [major, minor, patch] = match.slice(1).map(Number);
+          if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) process.exit(1);
+          ' "$npm_version"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify source and package
+        run: npm run verify
+
+      - name: Prepare release tarball
+        run: node scripts/release-package.mjs prepare "$RELEASE_TAG" release
+
+      - name: Validate release metadata
+        id: metadata
+        shell: bash
+        run: |
+          version="$(node --input-type=module <<'NODE'
+          import { access, readFile } from "node:fs/promises";
+          import { join } from "node:path";
+          const expectedName = "@juststas/graph-mcp";
+          const versionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+          const metadata = JSON.parse(await readFile("release/package-metadata.json", "utf8"));
+          if (metadata.name !== expectedName) throw new Error("Unexpected package name.");
+          if (!versionPattern.test(metadata.version)) throw new Error("Invalid package version.");
+          if (metadata.tag !== process.env.RELEASE_TAG) throw new Error("Metadata tag does not match release tag.");
+          if (metadata.tag !== "v" + metadata.version) throw new Error("Metadata tag does not match package version.");
+          const expectedFilename = `juststas-graph-mcp-${metadata.version}.tgz`;
+          if (metadata.filename !== expectedFilename) throw new Error("Unexpected tarball filename.");
+          await access(join("release", expectedFilename));
+          process.stdout.write(metadata.version);
+          NODE
+          )"
+          printf 'artifact_name=npm-package-%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release tarball
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: |
+            release/*.tgz
+            release/package-metadata.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.prepare_only != true) }}
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      EXPECTED_RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Check out trusted publish helper
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted-source
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Require OIDC-capable npm
+        shell: bash
+        run: |
+          npm_version="$(npm --version)"
+          node -e '
+          const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(process.argv[1]);
+          if (!match) process.exit(1);
+          const [major, minor, patch] = match.slice(1).map(Number);
+          if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) process.exit(1);
+          ' "$npm_version"
+
+      - name: Download release tarball
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: release
+
+      - name: Validate downloaded release metadata
+        run: |
+          node --input-type=module <<'NODE'
+          import { access, readFile } from "node:fs/promises";
+          import { join } from "node:path";
+          const versionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+          const tagPattern = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+          const metadata = JSON.parse(await readFile("release/package-metadata.json", "utf8"));
+          if (!tagPattern.test(process.env.EXPECTED_RELEASE_TAG ?? "")) throw new Error("Invalid expected release tag.");
+          if (metadata.name !== "@juststas/graph-mcp") throw new Error("Unexpected package name.");
+          if (!versionPattern.test(metadata.version)) throw new Error("Invalid package version.");
+          if (metadata.tag !== process.env.EXPECTED_RELEASE_TAG) throw new Error("Metadata tag does not match expected release tag.");
+          if (metadata.tag !== "v" + metadata.version) throw new Error("Metadata tag does not match package version.");
+          const expectedFilename = `juststas-graph-mcp-${metadata.version}.tgz`;
+          if (metadata.filename !== expectedFilename) throw new Error("Unexpected tarball filename.");
+          await access(join("release", expectedFilename));
+          NODE
+
+      - name: Publish or verify immutable version
+        run: node trusted-source/scripts/release-package.mjs publish release/package-metadata.json "$EXPECTED_RELEASE_TAG"
