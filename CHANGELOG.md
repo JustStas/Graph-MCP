@@ -2,6 +2,16 @@
 
 All notable changes to Graph MCP are documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- The release helper now retries the post-publish registry readback six times with exponential
+  backoff, capped at 30 seconds, instead of three times one second apart. npm's registry is
+  eventually consistent, so a successful publish routinely became visible after the old
+  three-second budget expired — the 0.8.1 release reported failure even though the package had
+  published correctly, and 0.7.0 needed three attempts for the same reason.
+
 ## 0.8.1 - 2026-08-03
 
 ### Fixed

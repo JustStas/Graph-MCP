@@ -23,8 +23,9 @@ const execFileAsync = promisify(execFile);
 const EXPECTED_NAME = "@juststas/graph-mcp";
 const EXPECTED_REPOSITORY = "git+https://github.com/JustStas/Graph-MCP.git";
 const EXPECTED_REGISTRY = "https://registry.npmjs.org/";
-const READBACK_ATTEMPTS = 3;
-const READBACK_DELAY_MS = 1_000;
+const READBACK_ATTEMPTS = 6;
+const READBACK_DELAY_MS = 2_000;
+const READBACK_DELAY_CAP_MS = 30_000;
 const VERSION_PATTERN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const TAG_PATTERN = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 
@@ -406,6 +407,19 @@ async function createPrivateSnapshot(bytes) {
 }
 
 /**
+ * npm's registry is read-through and eventually consistent, so a freshly published version can
+ * take tens of seconds to become visible. Back off exponentially rather than declaring failure
+ * after a few seconds: a successful publish followed by an impatient readback reports a release
+ * as broken when it actually shipped.
+ *
+ * @param {number} attempt The 1-based attempt that just failed.
+ * @returns {number} Milliseconds to wait before the next attempt.
+ */
+function readbackDelayMs(attempt) {
+  return Math.min(READBACK_DELAY_MS * 2 ** (attempt - 1), READBACK_DELAY_CAP_MS);
+}
+
+/**
  * @param {PackageMetadata} metadata
  * @param {ExecFileFunction} runFile
  * @param {DelayFunction} wait
@@ -418,7 +432,7 @@ async function pollForPublishedMetadata(metadata, runFile, wait) {
       return;
     }
     if (attempt < READBACK_ATTEMPTS) {
-      await wait(READBACK_DELAY_MS);
+      await wait(readbackDelayMs(attempt));
     }
   }
   throw new RegistryReadbackExhaustedError(

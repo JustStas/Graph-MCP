@@ -637,6 +637,71 @@ describe("release publication", () => {
     expect(actualPublishCalls).toBe(1);
   });
 
+  test("retries the readback with exponential backoff before giving up", async () => {
+    const artifact = await createReleaseArtifact();
+    const delays: number[] = [];
+    let viewCalls = 0;
+    const execFile: ExecFileFunction = (file, args) => {
+      if (isDryRunPublish(args)) {
+        return Promise.resolve({ stdout: dryRunManifestJson(artifact.metadata), stderr: "" });
+      }
+      if (args[0] === "view") {
+        viewCalls += 1;
+        return Promise.reject(missingVersionFailure(artifact.metadata.version));
+      }
+      if (isActualPublish(args)) {
+        return Promise.resolve({ stdout: "+ published", stderr: "" });
+      }
+      return Promise.reject(new Error("unexpected subprocess call"));
+    };
+
+    await expect(
+      publishRelease(artifact.metadataPath, artifact.metadata.tag, {
+        execFile,
+        delay: (ms) => {
+          delays.push(ms);
+          return Promise.resolve();
+        },
+      }),
+    ).rejects.toThrow("after 6 attempts");
+
+    // One pre-publish probe plus six readback attempts.
+    expect(viewCalls).toBe(7);
+    expect(delays).toEqual([2_000, 4_000, 8_000, 16_000, 30_000]);
+  });
+
+  test("succeeds when the version appears on a later readback attempt", async () => {
+    const artifact = await createReleaseArtifact();
+    let viewCalls = 0;
+    const execFile: ExecFileFunction = (file, args) => {
+      if (isDryRunPublish(args)) {
+        return Promise.resolve({ stdout: dryRunManifestJson(artifact.metadata), stderr: "" });
+      }
+      if (args[0] === "view") {
+        viewCalls += 1;
+        if (viewCalls < 4) {
+          return Promise.reject(missingVersionFailure(artifact.metadata.version));
+        }
+        return Promise.resolve({ stdout: registryMetadataJson(artifact.metadata), stderr: "" });
+      }
+      if (isActualPublish(args)) {
+        return Promise.resolve({ stdout: "+ published", stderr: "" });
+      }
+      return Promise.reject(new Error("unexpected subprocess call"));
+    };
+
+    await expect(
+      publishRelease(artifact.metadataPath, artifact.metadata.tag, {
+        execFile,
+        delay: () => Promise.resolve(),
+      }),
+    ).resolves.toEqual({
+      state: "publish",
+      version: artifact.metadata.version,
+      integrity: artifact.metadata.integrity,
+    });
+  });
+
   test("reports npm publish output when the version never appears on npm", async () => {
     const artifact = await createReleaseArtifact();
     const execFile: ExecFileFunction = (file, args) => {
@@ -661,7 +726,7 @@ describe("release publication", () => {
         delay: () => Promise.resolve(),
       }),
     ).rejects.toThrow(
-      "could not be read back from npm after 3 attempts. npm publish reported: npm warn publish Skipping registry refused",
+      "could not be read back from npm after 6 attempts. npm publish reported: npm warn publish Skipping registry refused",
     );
   });
 
@@ -1095,10 +1160,10 @@ describe("release publication", () => {
           return Promise.resolve();
         },
       }),
-    ).rejects.toThrow("could not be read back from npm after 3 attempts");
-    expect(viewCalls).toBe(4);
+    ).rejects.toThrow("could not be read back from npm after 6 attempts");
+    expect(viewCalls).toBe(7);
     expect(publishCalls).toBe(1);
-    expect(delayCalls).toBe(2);
+    expect(delayCalls).toBe(5);
   });
 
   test("rethrows the original publish error after exhausted absent readback", async () => {
@@ -1133,9 +1198,9 @@ describe("release publication", () => {
         },
       }),
     ).rejects.toBe(publishFailure);
-    expect(viewCalls).toBe(4);
+    expect(viewCalls).toBe(7);
     expect(publishCalls).toBe(1);
-    expect(delayCalls).toBe(2);
+    expect(delayCalls).toBe(5);
     if (snapshotPath === undefined) {
       throw new Error("publish did not receive a snapshot path");
     }
