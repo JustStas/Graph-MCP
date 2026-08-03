@@ -557,7 +557,7 @@ describe("release publication", () => {
     expect(subprocessCalls).toBe(0);
   });
 
-  test("rejects malformed npm publish dry-run JSON before registry access", async () => {
+  test("rejects malformed npm publish dry-run JSON after registry absence", async () => {
     const artifact = await createReleaseArtifact();
     let registryCalls = 0;
     let actualPublishCalls = 0;
@@ -567,7 +567,7 @@ describe("release publication", () => {
       }
       if (args[0] === "view") {
         registryCalls += 1;
-        return Promise.resolve({ stdout: registryMetadataJson(artifact.metadata), stderr: "" });
+        return Promise.reject(missingVersionFailure(artifact.metadata.version));
       }
       if (isActualPublish(args)) {
         actualPublishCalls += 1;
@@ -579,11 +579,11 @@ describe("release publication", () => {
     await expect(
       publishRelease(artifact.metadataPath, artifact.metadata.tag, { execFile }),
     ).rejects.toThrow("malformed JSON");
-    expect(registryCalls).toBe(0);
+    expect(registryCalls).toBe(1);
     expect(actualPublishCalls).toBe(0);
   });
 
-  test("rejects a non-object npm publish dry-run result before registry access", async () => {
+  test("rejects a non-object npm publish dry-run result after registry absence", async () => {
     const artifact = await createReleaseArtifact();
     let registryCalls = 0;
     let actualPublishCalls = 0;
@@ -593,7 +593,7 @@ describe("release publication", () => {
       }
       if (args[0] === "view") {
         registryCalls += 1;
-        return Promise.resolve({ stdout: registryMetadataJson(artifact.metadata), stderr: "" });
+        return Promise.reject(missingVersionFailure(artifact.metadata.version));
       }
       if (isActualPublish(args)) {
         actualPublishCalls += 1;
@@ -605,7 +605,7 @@ describe("release publication", () => {
     await expect(
       publishRelease(artifact.metadataPath, artifact.metadata.tag, { execFile }),
     ).rejects.toThrow("must be an object");
-    expect(registryCalls).toBe(0);
+    expect(registryCalls).toBe(1);
     expect(actualPublishCalls).toBe(0);
   });
 
@@ -617,7 +617,7 @@ describe("release publication", () => {
     ["integrity", { integrity: "sha512-" + Buffer.alloc(64, 1).toString("base64") }],
     ["id", { id: "@juststas/graph-mcp@0.6.2" }],
   ] as const)(
-    "rejects npm publish dry-run %s mismatch before registry access",
+    "rejects npm publish dry-run %s mismatch after registry absence",
     async (field, overrides) => {
       const artifact = await createReleaseArtifact();
       let registryCalls = 0;
@@ -631,7 +631,7 @@ describe("release publication", () => {
         }
         if (args[0] === "view") {
           registryCalls += 1;
-          return Promise.resolve({ stdout: registryMetadataJson(artifact.metadata), stderr: "" });
+          return Promise.reject(missingVersionFailure(artifact.metadata.version));
         }
         if (isActualPublish(args)) {
           actualPublishCalls += 1;
@@ -643,7 +643,7 @@ describe("release publication", () => {
       await expect(
         publishRelease(artifact.metadataPath, artifact.metadata.tag, { execFile }),
       ).rejects.toThrow(field);
-      expect(registryCalls).toBe(0);
+      expect(registryCalls).toBe(1);
       expect(actualPublishCalls).toBe(0);
     },
   );
@@ -738,7 +738,7 @@ describe("release publication", () => {
     const execFile: ExecFileFunction = (file, args) => {
       if (isDryRunPublish(args)) {
         dryRunCalls += 1;
-        return Promise.resolve({ stdout: dryRunManifestJson(artifact.metadata), stderr: "" });
+        return Promise.reject(new Error("duplicate version dry run must not execute"));
       }
       if (args[0] === "view") {
         viewCalls += 1;
@@ -757,45 +757,9 @@ describe("release publication", () => {
       version: artifact.metadata.version,
       integrity: artifact.metadata.integrity,
     });
-    expect(viewCalls).toBe(2);
+    expect(viewCalls).toBe(1);
     expect(publishCalls).toBe(0);
-    expect(dryRunCalls).toBe(1);
-  });
-
-  test("fails closed when an initially matching version changes before final readback", async () => {
-    const artifact = await createReleaseArtifact();
-    const otherIntegrity =
-      "sha512-" + createHash("sha512").update("different bytes").digest("base64");
-    let viewCalls = 0;
-    let publishCalls = 0;
-    const execFile: ExecFileFunction = (file, args) => {
-      if (isDryRunPublish(args)) {
-        return Promise.resolve({ stdout: dryRunManifestJson(artifact.metadata), stderr: "" });
-      }
-      if (args[0] === "view") {
-        viewCalls += 1;
-        return Promise.resolve({
-          stdout:
-            viewCalls === 1
-              ? registryMetadataJson(artifact.metadata)
-              : JSON.stringify({
-                  version: artifact.metadata.version,
-                  "dist.integrity": otherIntegrity,
-                }),
-          stderr: "",
-        });
-      }
-      if (isActualPublish(args)) {
-        publishCalls += 1;
-      }
-      return Promise.reject(new Error("unexpected subprocess call"));
-    };
-
-    await expect(
-      publishRelease(artifact.metadataPath, artifact.metadata.tag, { execFile }),
-    ).rejects.toThrow("different integrity");
-    expect(viewCalls).toBe(2);
-    expect(publishCalls).toBe(0);
+    expect(dryRunCalls).toBe(0);
   });
 
   test("accepts a matching readback after an ambiguous publish failure", async () => {
