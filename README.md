@@ -109,14 +109,23 @@ claude plugin install graph-mcp@graph-mcp --scope user
 
 ### Codex plugin
 
-From a local checkout of this repository:
+Codex accepts the same GitHub marketplace source:
+
+```bash
+codex plugin marketplace add JustStas/Graph-MCP --json
+codex plugin add graph-mcp@personal --json
+```
+
+`codex plugin marketplace add` takes a local path, `owner/repo[@ref]`, or an HTTPS or SSH Git
+URL, and `--ref` pins a specific tag or branch. The Codex manifest launches
+`./dist/graph-mcp.js` relative to the installed plugin root, so no source checkout is needed.
+
+For plugin development, point it at a local checkout instead:
 
 ```bash
 codex plugin marketplace add /absolute/path/to/Graph-MCP --json
 codex plugin add graph-mcp@personal --json
 ```
-
-The Codex manifest launches `./dist/graph-mcp.js` relative to the installed plugin root.
 
 ### npm
 
