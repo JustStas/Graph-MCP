@@ -34979,9 +34979,73 @@ var CHANNEL_FIELDS = "id,displayName,description,membershipType";
 var MAIL_LIST_FIELDS = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,importance,flag,webLink,conversationId,parentFolderId";
 var MAIL_FOLDER_FIELDS = "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
 var USER_PROFILE_FIELDS = "id,displayName,mail,jobTitle,department,officeLocation";
+var MAIL_COMPACT_FIELDS = "id,subject,from,receivedDateTime,isRead,hasAttachments,webLink";
+var EVENT_COMPACT_FIELDS = "id,subject,start,end,organizer,isCancelled,responseStatus";
+var DRIVE_ITEM_COMPACT_FIELDS = "id,name,size,lastModifiedDateTime,file,folder,webUrl";
+var CONTACT_COMPACT_FIELDS = "id,displayName,emailAddresses";
+var USER_COMPACT_FIELDS = "id,displayName,mail";
+
+// src/tools/list-options.ts
+var GRAPH_COLLECTION_PREFIX = "https://graph.microsoft.com/v1.0/";
+var INVALID_NEXT_LINK_MESSAGE = "next_link must be a Microsoft Graph v1.0 URL returned by a previous call.";
+var INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
+var NEXT_LINK_KEY = "@odata.nextLink";
+var SORT_INCOMPATIBLE_FILTER_TARGETS = ["from/", "sender/", "torecipients/", "ccrecipients/"];
+var SKIP_SCHEMA = external_exports.number().int().min(0).default(0);
+var COMPACT_SCHEMA = external_exports.boolean().default(false);
+var INCLUDE_NEXT_LINK_SCHEMA = external_exports.boolean().default(false);
+var NEXT_LINK_SCHEMA = external_exports.string().refine((value) => value === "" || value.startsWith(GRAPH_COLLECTION_PREFIX), {
+  message: INVALID_NEXT_LINK_MESSAGE
+}).default("");
+var BODY_TYPE_SCHEMA = external_exports.enum(["html", "text"]).default("html");
+var COMPACT_ARGS_DOC = "    compact: Whether to return only the identifying fields instead of the full\n        record (default false). Use it to page through large collections cheaply.";
+var SKIP_ARGS_DOC = "    skip: Number of items to skip before returning results (default 0). Graph\n        returns at most 50 per call, so page by raising skip in steps of top.";
+var PAGING_ARGS_DOC = "    next_link: Opaque nextLink URL from a previous call, used to fetch the next\n        page. Overrides the other paging arguments when supplied.\n    include_next_link: Whether to wrap the result as {items, next_link} so paging\n        can continue (default false, which returns a bare list).";
+var BODY_TYPE_ARGS_DOC = '    body_type: Body format to request: "html" or "text" (default "html").\n        Use "text" to avoid pulling large HTML bodies into context.';
+function filterForbidsSort(filterQuery) {
+  const normalized = filterQuery.toLowerCase();
+  return SORT_INCOMPATIBLE_FILTER_TARGETS.some((target) => normalized.includes(target));
+}
+function immutableIdHeaders(immutableIds) {
+  return immutableIds ? { Prefer: 'IdType="ImmutableId"' } : void 0;
+}
+function bodyTypeHeaders(bodyType) {
+  return bodyType === "text" ? { Prefer: 'outlook.body-content-type="text"' } : void 0;
+}
+function mergeHeaders(...records) {
+  const merged = {};
+  for (const record2 of records) {
+    if (record2 === void 0) {
+      continue;
+    }
+    for (const [key, value] of Object.entries(record2)) {
+      merged[key] = key in merged ? merged[key] + ", " + value : value;
+    }
+  }
+  return Object.keys(merged).length === 0 ? void 0 : merged;
+}
+function selectFields(fullFields, compactFields, compact) {
+  return compact ? compactFields : fullFields;
+}
+function isNonArrayObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function nextLinkFrom(response) {
+  if (!isNonArrayObject(response) || !Object.hasOwn(response, NEXT_LINK_KEY)) {
+    return "";
+  }
+  const link2 = response[NEXT_LINK_KEY];
+  if (typeof link2 !== "string") {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
+  }
+  return link2.startsWith(GRAPH_COLLECTION_PREFIX) ? link2 : "";
+}
+function collectionResult(items, response, includeNextLink) {
+  return includeNextLink ? { items, next_link: nextLinkFrom(response) } : items;
+}
 
 // src/tools/calendar-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE2 = "Invalid Microsoft Graph response.";
 var RESOURCE_ID_SCHEMA = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
@@ -34993,6 +35057,13 @@ var USER_ARGS_DOC = `    user: Shared or delegated calendar owner address or use
         targets your own calendar. Requires the delegated Calendars.Read.Shared or
         Calendars.ReadWrite.Shared permissions.`;
 var TOP_SCHEMA = external_exports.number().int().default(50);
+var CALENDAR_LIST_FIELDS = "id,name,color,isDefaultCalendar";
+var CALENDAR_COMPACT_FIELDS = "id,name,isDefaultCalendar";
+var EVENT_ORDER_BY = "start/dateTime desc";
+var EVENT_FILTER_ARGS_DOC = `    filter_query: Optional OData filter (e.g. "isCancelled eq false"). Only applied
+        on the /events path, because calendarView does not accept arbitrary filters.
+        A filter on a recipient or organizer-style property also drops the sort,
+        which Graph refuses to combine with it.`;
 var ATTENDEES_SCHEMA = external_exports.array(external_exports.string()).nullable().optional().default(null);
 var SHOW_AS_SCHEMA = external_exports.enum(["free", "tentative", "busy", "oof", "workingElsewhere", "unknown"]).default("busy");
 var SENSITIVITY_SCHEMA = external_exports.enum(["normal", "personal", "private", "confidential"]).default("normal");
@@ -35008,30 +35079,30 @@ var RECURRENCE_PATTERN_TYPES = {
   monthly: "absoluteMonthly",
   yearly: "absoluteYearly"
 };
-function isNonArrayObject(value) {
+function isNonArrayObject2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue(response) {
-  if (!isNonArrayObject(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
+  if (!isNonArrayObject2(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
   }
   return response.value;
 }
 function requireGraphObject(response) {
-  if (!isNonArrayObject(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
+  if (!isNonArrayObject2(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
   }
   return response;
 }
 function requireGraphObjectWithId(response) {
-  if (!isNonArrayObject(response) || typeof response.id !== "string" || response.id.length === 0) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE);
+  if (!isNonArrayObject2(response) || typeof response.id !== "string" || response.id.length === 0) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
   }
   return response;
 }
@@ -35130,6 +35201,12 @@ function buildRecurrence(repeat, fields, startDateTime) {
     range: recurrenceRange(fields, startDate)
   };
 }
+async function collectionPage(graphClient, request) {
+  const response = await graphClient.get(request.path, request.params, request.headers);
+  return successResponse(
+    collectionResult(collectionValue(response), response, request.includeNextLink)
+  );
+}
 function registerCalendarTools(server, dependencies) {
   registerAuthenticatedTool(
     server,
@@ -35138,16 +35215,36 @@ function registerCalendarTools(server, dependencies) {
       description: `List the authenticated user's calendars.
 
 Args:
+${SKIP_ARGS_DOC}
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}
 ${USER_ARGS_DOC}`,
       inputSchema: {
+        skip: SKIP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         user: USER_SCHEMA
       }
     },
-    async ({ user }) => {
-      const result = await dependencies.graphClient.get(`${calendarRoot(user)}/calendars`, {
-        $select: "id,name,color,isDefaultCalendar"
+    async ({ skip, compact, next_link, include_next_link, user }) => {
+      if (next_link !== "") {
+        return await collectionPage(dependencies.graphClient, {
+          path: next_link,
+          includeNextLink: include_next_link
+        });
+      }
+      const params = {
+        $select: selectFields(CALENDAR_LIST_FIELDS, CALENDAR_COMPACT_FIELDS, compact)
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await collectionPage(dependencies.graphClient, {
+        path: `${calendarRoot(user)}/calendars`,
+        params,
+        includeNextLink: include_next_link
       });
-      return successResponse(collectionValue(result));
     }
   );
   registerAuthenticatedTool(
@@ -35161,18 +35258,49 @@ Args:
     end_datetime: End of date range (ISO 8601). Required with start_datetime.
     calendar_id: Optional calendar ID. Defaults to primary calendar.
     top: Maximum number of events to return (default 50).
+${SKIP_ARGS_DOC}
+${EVENT_FILTER_ARGS_DOC}
+${COMPACT_ARGS_DOC}
+${BODY_TYPE_ARGS_DOC}
+${PAGING_ARGS_DOC}
 ${USER_ARGS_DOC}`,
       inputSchema: {
         start_datetime: external_exports.string().default(""),
         end_datetime: external_exports.string().default(""),
         calendar_id: OPTIONAL_RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        filter_query: external_exports.string().default(""),
+        compact: COMPACT_SCHEMA,
+        body_type: BODY_TYPE_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         user: USER_SCHEMA
       }
     },
-    async ({ start_datetime, end_datetime, calendar_id, top, user }) => {
+    async ({
+      start_datetime,
+      end_datetime,
+      calendar_id,
+      top,
+      skip,
+      filter_query,
+      compact,
+      body_type,
+      next_link,
+      include_next_link,
+      user
+    }) => {
+      const headers = bodyTypeHeaders(body_type);
+      if (next_link !== "") {
+        return await collectionPage(dependencies.graphClient, {
+          path: next_link,
+          ...headers === void 0 ? {} : { headers },
+          includeNextLink: include_next_link
+        });
+      }
       const params = {
-        $select: EVENT_LIST_FIELDS,
+        $select: selectFields(EVENT_LIST_FIELDS, EVENT_COMPACT_FIELDS, compact),
         $top: String(Math.min(top, 50))
       };
       let path2;
@@ -35181,11 +35309,23 @@ ${USER_ARGS_DOC}`,
         params.endDateTime = end_datetime;
         path2 = calendarCollectionPath(user, calendar_id, "calendarView");
       } else {
-        params.$orderby = "start/dateTime desc";
+        if (filter_query !== "") {
+          params.$filter = filter_query;
+        }
+        if (!filterForbidsSort(filter_query)) {
+          params.$orderby = EVENT_ORDER_BY;
+        }
         path2 = calendarCollectionPath(user, calendar_id, "events");
       }
-      const result = await dependencies.graphClient.get(path2, params);
-      return successResponse(collectionValue(result));
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await collectionPage(dependencies.graphClient, {
+        path: path2,
+        params,
+        ...headers === void 0 ? {} : { headers },
+        includeNextLink: include_next_link
+      });
     }
   );
   registerAuthenticatedTool(
@@ -35196,14 +35336,20 @@ ${USER_ARGS_DOC}`,
 
 Args:
     event_id: The event ID.
+${BODY_TYPE_ARGS_DOC}
 ${USER_ARGS_DOC}`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
+        body_type: BODY_TYPE_SCHEMA,
         user: USER_SCHEMA
       }
     },
-    async ({ event_id, user }) => {
-      const result = await dependencies.graphClient.get(eventPath(user, event_id));
+    async ({ event_id, body_type, user }) => {
+      const result = await dependencies.graphClient.get(
+        eventPath(user, event_id),
+        void 0,
+        bodyTypeHeaders(body_type)
+      );
       return successResponse(requireGraphObject(result));
     }
   );
@@ -35613,26 +35759,56 @@ Args:
     start_datetime: Start of the occurrence window (ISO 8601). Required by Graph.
     end_datetime: End of the occurrence window (ISO 8601). Required by Graph.
     top: Maximum number of occurrences to return (default 50, maximum 50).
+${SKIP_ARGS_DOC}
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}
 ${USER_ARGS_DOC}`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
         start_datetime: external_exports.string(),
         end_datetime: external_exports.string(),
         top: TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         user: USER_SCHEMA
       }
     },
-    async ({ event_id, start_datetime, end_datetime, top, user }) => {
+    async ({
+      event_id,
+      start_datetime,
+      end_datetime,
+      top,
+      skip,
+      compact,
+      next_link,
+      include_next_link,
+      user
+    }) => {
+      if (next_link !== "") {
+        return await collectionPage(dependencies.graphClient, {
+          path: next_link,
+          includeNextLink: include_next_link
+        });
+      }
       if (start_datetime === "" || end_datetime === "") {
         return successResponse({ error: MISSING_INSTANCE_WINDOW_MESSAGE }, "error");
       }
-      const result = await dependencies.graphClient.get(`${eventPath(user, event_id)}/instances`, {
+      const params = {
         startDateTime: start_datetime,
         endDateTime: end_datetime,
-        $select: EVENT_LIST_FIELDS,
+        $select: selectFields(EVENT_LIST_FIELDS, EVENT_COMPACT_FIELDS, compact),
         $top: String(Math.min(top, 50))
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await collectionPage(dependencies.graphClient, {
+        path: `${eventPath(user, event_id)}/instances`,
+        params,
+        includeNextLink: include_next_link
       });
-      return successResponse(collectionValue(result));
     }
   );
   registerAuthenticatedTool(
@@ -35648,18 +35824,36 @@ graph_create_event to book a room.
 Args:
     room_list: Room list email address to list rooms from. Empty lists every
         room in the tenant.
-    top: Maximum number of rooms to return (default 50, maximum 50).`,
+    top: Maximum number of rooms to return (default 50, maximum 50).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         room_list: OPTIONAL_RESOURCE_ID_SCHEMA,
-        top: TOP_SCHEMA
+        top: TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ room_list, top }) => {
+    async ({ room_list, top, skip, next_link, include_next_link }) => {
+      if (next_link !== "") {
+        return await collectionPage(dependencies.graphClient, {
+          path: next_link,
+          includeNextLink: include_next_link
+        });
+      }
       const path2 = room_list === "" ? "/places/microsoft.graph.room" : `/places/${encodeURIComponent(room_list)}/microsoft.graph.roomlist/rooms`;
-      const result = await dependencies.graphClient.get(path2, {
+      const params = {
         $top: String(Math.min(top, 50))
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await collectionPage(dependencies.graphClient, {
+        path: path2,
+        params,
+        includeNextLink: include_next_link
       });
-      return successResponse(collectionValue(result));
     }
   );
 }
@@ -35718,7 +35912,7 @@ function buildChatMessagePayload(message, isHtml = true, mentions = void 0, opti
 }
 
 // src/tools/chat-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE2 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE3 = "Invalid Microsoft Graph response.";
 var RESOURCE_ID_SCHEMA2 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
@@ -35726,37 +35920,45 @@ var OPTIONAL_RESOURCE_ID_SCHEMA2 = external_exports.string().refine((value) => v
   message: "Resource IDs must not be '.' or '..'."
 }).default("");
 var TOP_SCHEMA2 = external_exports.number().int().default(50);
+var CHAT_MESSAGE_COMPACT_FIELDS = "id,createdDateTime,from,subject,importance,webUrl";
 var IMPORTANCE_SCHEMA = external_exports.enum(["normal", "high", "urgent"]).default("normal");
 var SUBJECT_SCHEMA = external_exports.string().default("");
 var REACTION_TARGET_REQUIRED_MESSAGE = "Provide either chat_id or both team_id and channel_id.";
 var REACTION_TARGET_CONFLICT_MESSAGE = "Provide either chat_id or team_id with channel_id, not both.";
 var MENTIONS_SCHEMA = external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())).nullable().optional().default(null);
-function isNonArrayObject2(value) {
+function isNonArrayObject3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue2(response) {
-  if (!isNonArrayObject2(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
+  if (!isNonArrayObject3(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
   }
   return response.value;
 }
 function requireGraphObject2(response) {
-  if (!isNonArrayObject2(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
+  if (!isNonArrayObject3(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
   }
   return response;
 }
 function requireGraphObjectWithId2(response) {
-  if (!isNonArrayObject2(response) || typeof response.id !== "string" || response.id.length === 0) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE2);
+  if (!isNonArrayObject3(response) || typeof response.id !== "string" || response.id.length === 0) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
   }
   return response;
+}
+function messageListParams(top, compact) {
+  const select = selectFields("", CHAT_MESSAGE_COMPACT_FIELDS, compact);
+  return {
+    $top: String(Math.min(top, 50)),
+    ...select === "" ? {} : { $select: select }
+  };
 }
 function chatPath(chatId) {
   return `/chats/${encodeURIComponent(chatId)}`;
@@ -35778,35 +35980,54 @@ function registerChatTools(server, dependencies) {
     server,
     "graph_list_chats",
     {
-      description: "List recent Microsoft Teams chats.",
+      description: `List recent Microsoft Teams chats.
+
+Args:
+    top: Maximum number of chats to return (default 50, maximum 50).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        top: TOP_SCHEMA2
+        top: TOP_SCHEMA2,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/chats", {
+    async ({ top, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get("/me/chats", {
         $select: CHAT_FIELDS,
         $top: String(Math.min(top, 50))
-      });
-      return successResponse(collectionValue2(result));
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue2(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
     server,
     "graph_get_chat_messages",
     {
-      description: "Get messages from a specific chat.",
+      description: `Get messages from a specific chat.
+
+Messages carry full HTML bodies plus their attachments and mentions, so
+\`compact\` narrows them to the identifying fields. Without it no \`$select\` is
+sent and the response is unchanged.
+
+Args:
+    chat_id: The chat ID.
+    top: Maximum number of messages to return (default 50, maximum 50).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         chat_id: RESOURCE_ID_SCHEMA2,
-        top: TOP_SCHEMA2
+        top: TOP_SCHEMA2,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ chat_id, top }) => {
-      const encodedChatId = encodeURIComponent(chat_id);
-      const result = await dependencies.graphClient.get(`/chats/${encodedChatId}/messages`, {
-        $top: String(Math.min(top, 50))
-      });
-      return successResponse(collectionValue2(result));
+    async ({ chat_id, top, compact, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(
+        `/chats/${encodeURIComponent(chat_id)}/messages`,
+        messageListParams(top, compact)
+      ) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue2(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -35882,15 +36103,20 @@ Args:
     server,
     "graph_list_chat_members",
     {
-      description: "List members of a chat.",
+      description: `List members of a chat.
+
+Args:
+    chat_id: The chat ID.
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        chat_id: RESOURCE_ID_SCHEMA2
+        chat_id: RESOURCE_ID_SCHEMA2,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ chat_id }) => {
-      const encodedChatId = encodeURIComponent(chat_id);
-      const result = await dependencies.graphClient.get(`/chats/${encodedChatId}/members`);
-      return successResponse(collectionValue2(result));
+    async ({ chat_id, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(`/chats/${encodeURIComponent(chat_id)}/members`) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue2(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -36125,9 +36351,10 @@ Args:
 }
 
 // src/tools/contacts-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE3 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE4 = "Invalid Microsoft Graph response.";
 var MISSING_CONTACT_UPDATE_MESSAGE = "At least one contact field is required.";
 var PERSON_FIELDS = "id,displayName,scoredEmailAddresses,jobTitle,companyName,personType";
+var PERSON_COMPACT_FIELDS = "id,displayName,scoredEmailAddresses";
 var CONTACT_FIELDS = "id,displayName,emailAddresses,mobilePhone,businessPhones,companyName,jobTitle";
 var RESOURCE_ID_SCHEMA3 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
@@ -36136,24 +36363,30 @@ var OPTIONAL_RESOURCE_ID_SCHEMA3 = external_exports.string().refine((value) => v
   message: "Resource IDs must not be '.' or '..'."
 }).default("");
 var TOP_SCHEMA3 = external_exports.number().int().default(25);
-function isNonArrayObject3(value) {
+function isNonArrayObject4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue3(response) {
-  if (!isNonArrayObject3(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
+  if (!isNonArrayObject4(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
   }
   return response.value;
 }
+async function pagedCollection(graphClient, request) {
+  const response = request.nextLink === "" ? await graphClient.get(request.path, request.params) : await graphClient.get(request.nextLink);
+  return successResponse(
+    collectionResult(collectionValue3(response), response, request.includeNextLink)
+  );
+}
 function requireGraphObject3(response) {
-  if (!isNonArrayObject3(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE3);
+  if (!isNonArrayObject4(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
   }
   return response;
 }
@@ -36196,25 +36429,35 @@ function registerContactsTools(server, dependencies) {
 
 Covers colleagues, saved contacts, and external people the user has mailed,
 so prefer this over graph_search_users when looking someone up by name.
-\`$search\` on /me/people only works for the signed-in user. Requires the
-People.Read permission.
+\`$search\` on /me/people only works for the signed-in user, and Graph does not
+support \`$skip\` alongside it, so page with next_link instead of an offset.
+Requires the People.Read permission.
 
 Args:
     query: Name, email address, or partial text to look up.
-    top: Maximum number of people to return (default 10, maximum 50).`,
+    top: Maximum number of people to return (default 10, maximum 50).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         query: external_exports.string(),
-        top: external_exports.number().int().default(10)
+        top: external_exports.number().int().default(10),
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ query, top }) => {
+    async ({ query, top, compact, next_link, include_next_link }) => {
       const escapedQuery = query.replaceAll('"', '""');
-      const result = await dependencies.graphClient.get("/me/people", {
-        $search: `"${escapedQuery}"`,
-        $select: PERSON_FIELDS,
-        $top: String(Math.min(top, 50))
+      return await pagedCollection(dependencies.graphClient, {
+        nextLink: next_link,
+        path: "/me/people",
+        params: {
+          $search: `"${escapedQuery}"`,
+          $select: selectFields(PERSON_FIELDS, PERSON_COMPACT_FIELDS, compact),
+          $top: String(Math.min(top, 50))
+        },
+        includeNextLink: include_next_link
       });
-      return successResponse(collectionValue3(result));
     }
   );
   registerAuthenticatedTool(
@@ -36225,19 +36468,33 @@ Args:
 
 Args:
     top: Maximum number of contacts to return (default 25, maximum 50).
-    folder_id: Contact folder ID. Empty lists the default contacts folder.`,
+    folder_id: Contact folder ID. Empty lists the default contacts folder.
+${SKIP_ARGS_DOC}
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         top: TOP_SCHEMA3,
-        folder_id: OPTIONAL_RESOURCE_ID_SCHEMA3
+        folder_id: OPTIONAL_RESOURCE_ID_SCHEMA3,
+        skip: SKIP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ top, folder_id }) => {
-      const path2 = folder_id === "" ? "/me/contacts" : `/me/contactFolders/${encodeURIComponent(folder_id)}/contacts`;
-      const result = await dependencies.graphClient.get(path2, {
-        $select: CONTACT_FIELDS,
+    async ({ top, folder_id, skip, compact, next_link, include_next_link }) => {
+      const params = {
+        $select: selectFields(CONTACT_FIELDS, CONTACT_COMPACT_FIELDS, compact),
         $top: String(Math.min(top, 50))
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await pagedCollection(dependencies.graphClient, {
+        nextLink: next_link,
+        path: folder_id === "" ? "/me/contacts" : `/me/contactFolders/${encodeURIComponent(folder_id)}/contacts`,
+        params,
+        includeNextLink: include_next_link
       });
-      return successResponse(collectionValue3(result));
     }
   );
   registerAuthenticatedTool(
@@ -36331,23 +36588,36 @@ Args:
 Use the returned folder IDs with graph_list_contacts.
 
 Args:
-    top: Maximum number of folders to return (default 25, maximum 50).`,
+    top: Maximum number of folders to return (default 25, maximum 50).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        top: TOP_SCHEMA3
+        top: TOP_SCHEMA3,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/contactFolders", {
+    async ({ top, skip, next_link, include_next_link }) => {
+      const params = {
         $top: String(Math.min(top, 50))
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await pagedCollection(dependencies.graphClient, {
+        nextLink: next_link,
+        path: "/me/contactFolders",
+        params,
+        includeNextLink: include_next_link
       });
-      return successResponse(collectionValue3(result));
     }
   );
 }
 
 // src/tools/files-tools.ts
 var DRIVE_ITEM_FIELDS = "id,name,size,createdDateTime,lastModifiedDateTime,file,folder,webUrl,parentReference";
-var INVALID_GRAPH_RESPONSE_MESSAGE4 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE5 = "Invalid Microsoft Graph response.";
 var INVALID_BASE64_MESSAGE = "Invalid base64 content.";
 var FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
 var MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
@@ -36375,30 +36645,30 @@ var FOLDER_NAME_SCHEMA = external_exports.string().refine((value) => value !== "
 var MISSING_MOVE_TARGET_MESSAGE = "At least one of new_parent_folder_id or new_name is required.";
 var MISSING_VALUES_MESSAGE = "values must contain at least one row.";
 var DRIVE_ID_ARGS_DOC = `    drive_id: Drive ID to act on. Empty targets your own OneDrive.`;
-function isNonArrayObject4(value) {
+function isNonArrayObject5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue4(response) {
-  if (!isNonArrayObject4(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+  if (!isNonArrayObject5(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   return response.value;
 }
 function requireGraphObject4(response) {
-  if (!isNonArrayObject4(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+  if (!isNonArrayObject5(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   return response;
 }
 function requireGraphString(response) {
   if (typeof response !== "string") {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   return response;
 }
@@ -36406,14 +36676,14 @@ function mimeTypeFrom(metadata) {
   if (!Object.hasOwn(metadata, "file")) {
     return "";
   }
-  if (!isNonArrayObject4(metadata.file)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+  if (!isNonArrayObject5(metadata.file)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   if (!Object.hasOwn(metadata.file, "mimeType")) {
     return "";
   }
   if (typeof metadata.file.mimeType !== "string") {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE4);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
   }
   return metadata.file.mimeType;
 }
@@ -36459,6 +36729,9 @@ function decodeStrictBase64(contentBase64) {
   }
   return new Uint8Array(decoded);
 }
+function skipParameter(skip) {
+  return skip > 0 ? { $skip: String(skip) } : {};
+}
 function driveRoot(driveId) {
   return driveId === "" ? "/me/drive" : `/drives/${encodeURIComponent(driveId)}`;
 }
@@ -36484,19 +36757,27 @@ function registerFilesTools(server, dependencies) {
 
 Args:
     folder_id: Folder ID to list contents of. Empty for root folder.
-    top: Maximum number of items to return (default 25).`,
+    top: Maximum number of items to return (default 25).
+${COMPACT_ARGS_DOC}
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         folder_id: OPTIONAL_RESOURCE_ID_SCHEMA4,
-        top: TOP_SCHEMA4
+        top: TOP_SCHEMA4,
+        compact: COMPACT_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ folder_id, top }) => {
+    async ({ folder_id, top, compact, skip, next_link, include_next_link }) => {
       const path2 = folder_id === "" ? "/me/drive/root/children" : `/me/drive/items/${encodeURIComponent(folder_id)}/children`;
-      const result = await dependencies.graphClient.get(path2, {
-        $select: DRIVE_ITEM_FIELDS,
-        $top: String(Math.min(top, 50))
-      });
-      return successResponse(collectionValue4(result));
+      const result = next_link === "" ? await dependencies.graphClient.get(path2, {
+        $select: selectFields(DRIVE_ITEM_FIELDS, DRIVE_ITEM_COMPACT_FIELDS, compact),
+        $top: String(Math.min(top, 50)),
+        ...skipParameter(skip)
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue4(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -36505,23 +36786,30 @@ Args:
     {
       description: `Search for files in OneDrive by name or content.
 
+Graph rejects $skip on the search function, so page with next_link instead.
+
 Args:
     query: Search query string.
-    top: Maximum number of results (default 25).`,
+    top: Maximum number of results (default 25).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         query: external_exports.string(),
-        top: TOP_SCHEMA4
+        top: TOP_SCHEMA4,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ query, top }) => {
-      const result = await dependencies.graphClient.get(
+    async ({ query, top, compact, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(
         `/me/drive/root/search(q='${encodeSearchQuery(query)}')`,
         {
-          $select: DRIVE_ITEM_FIELDS,
+          $select: selectFields(DRIVE_ITEM_FIELDS, DRIVE_ITEM_COMPACT_FIELDS, compact),
           $top: String(Math.min(top, 25))
         }
-      );
-      return successResponse(collectionValue4(result));
+      ) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue4(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -36704,19 +36992,23 @@ Args:
     {
       description: `List files other people have shared with the user.
 
-Only $top is passed because sharedWithMe does not support $select reliably.
+Only $top is passed because sharedWithMe does not support $select or $skip
+reliably, so page with next_link instead.
 
 Args:
-    top: Maximum number of items to return (default 25).`,
+    top: Maximum number of items to return (default 25).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        top: TOP_SCHEMA4
+        top: TOP_SCHEMA4,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/drive/sharedWithMe", {
+    async ({ top, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get("/me/drive/sharedWithMe", {
         $top: String(Math.min(top, 50))
-      });
-      return successResponse(collectionValue4(result));
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue4(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -36760,17 +37052,18 @@ ${DRIVE_ID_ARGS_DOC}`,
 
 Args:
     item_id: The file or folder ID.
+${PAGING_ARGS_DOC}
 ${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         item_id: RESOURCE_ID_SCHEMA4,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
       }
     },
-    async ({ item_id, drive_id }) => {
-      const result = await dependencies.graphClient.get(
-        `${driveItemPath(drive_id, item_id)}/permissions`
-      );
-      return successResponse(collectionValue4(result));
+    async ({ item_id, next_link, include_next_link, drive_id }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(`${driveItemPath(drive_id, item_id)}/permissions`) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue4(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -36843,17 +37136,18 @@ ${DRIVE_ID_ARGS_DOC}`,
 
 Args:
     item_id: The file ID.
+${PAGING_ARGS_DOC}
 ${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         item_id: RESOURCE_ID_SCHEMA4,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
       }
     },
-    async ({ item_id, drive_id }) => {
-      const result = await dependencies.graphClient.get(
-        `${driveItemPath(drive_id, item_id)}/versions`
-      );
-      return successResponse(collectionValue4(result));
+    async ({ item_id, next_link, include_next_link, drive_id }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(`${driveItemPath(drive_id, item_id)}/versions`) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue4(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -36888,30 +37182,45 @@ ${DRIVE_ID_ARGS_DOC}`,
       description: `List what the user worked on recently across their OneDrive.
 
 Args:
-    top: Maximum number of items to return (default 25, maximum 50).`,
+    top: Maximum number of items to return (default 25, maximum 50).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        top: TOP_SCHEMA4
+        top: TOP_SCHEMA4,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/drive/recent", {
-        $top: String(Math.min(top, 50))
-      });
-      return successResponse(collectionValue4(result));
+    async ({ top, skip, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get("/me/drive/recent", {
+        $top: String(Math.min(top, 50)),
+        ...skipParameter(skip)
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue4(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
     server,
     "graph_list_drives",
     {
-      description: `List the drives the user can reach, including their OneDrive and followed document libraries.`,
-      inputSchema: {}
+      description: `List the drives the user can reach, including their OneDrive and followed document libraries.
+
+Args:
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
+      inputSchema: {
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
+      }
     },
-    async () => {
-      const result = await dependencies.graphClient.get("/me/drives", {
-        $select: "id,name,driveType,owner,quota"
-      });
-      return successResponse(collectionValue4(result));
+    async ({ skip, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get("/me/drives", {
+        $select: "id,name,driveType,owner,quota",
+        ...skipParameter(skip)
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue4(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -36967,17 +37276,22 @@ Args:
       description: `List the document libraries of a SharePoint site.
 
 Args:
-    site_id: The SharePoint site ID (from graph_search_sites).`,
+    site_id: The SharePoint site ID (from graph_search_sites).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        site_id: RESOURCE_ID_SCHEMA4
+        site_id: RESOURCE_ID_SCHEMA4,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ site_id }) => {
-      const result = await dependencies.graphClient.get(
-        `/sites/${encodeURIComponent(site_id)}/drives`,
-        { $select: "id,name,driveType,webUrl" }
-      );
-      return successResponse(collectionValue4(result));
+    async ({ site_id, skip, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(`/sites/${encodeURIComponent(site_id)}/drives`, {
+        $select: "id,name,driveType,webUrl",
+        ...skipParameter(skip)
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue4(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -36990,18 +37304,21 @@ Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx f
 
 Args:
     item_id: The workbook file ID.
+${PAGING_ARGS_DOC}
 ${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         item_id: RESOURCE_ID_SCHEMA4,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
       }
     },
-    async ({ item_id, drive_id }) => {
-      const result = await dependencies.graphClient.get(
+    async ({ item_id, next_link, include_next_link, drive_id }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(
         `${driveItemPath(drive_id, item_id)}/workbook/worksheets`,
         { $select: "id,name,position,visibility" }
-      );
-      return successResponse(collectionValue4(result));
+      ) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue4(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -37071,7 +37388,7 @@ ${DRIVE_ID_ARGS_DOC}`,
 }
 
 // src/tools/mail-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE5 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE6 = "Invalid Microsoft Graph response.";
 var RESOURCE_ID_SCHEMA5 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
@@ -37084,7 +37401,9 @@ var OPTIONAL_RESOURCE_ID_SCHEMA5 = external_exports.string().refine((value) => v
 var MAILBOX_SCHEMA = OPTIONAL_RESOURCE_ID_SCHEMA5;
 var MAILBOX_ARGS_DOC = `    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
         mailbox. Requires the delegated Mail.*.Shared permissions.`;
-var SKIP_SCHEMA = external_exports.number().int().min(0).default(0);
+var IMMUTABLE_IDS_ARGS_DOC = `    immutable_ids: Whether to ask Graph for immutable message IDs (default false).
+        A message ID changes when the message is moved, so a stored ID stops
+        working; an immutable ID survives the move.`;
 var MESSAGE_IDS_SCHEMA = external_exports.array(RESOURCE_ID_SCHEMA5).min(1).max(50);
 var IMPORTANCE_SCHEMA2 = external_exports.enum(["low", "normal", "high"]);
 var INCOMPLETE_MESSAGE_RULE_MESSAGE = "A message rule needs at least one condition and at least one action.";
@@ -37102,35 +37421,41 @@ var RICH_TEXT_OPTIONS = {
   htmlContentType: "HTML",
   textContentType: "Text"
 };
-function isNonArrayObject5(value) {
+function isNonArrayObject6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue5(response) {
-  if (!isNonArrayObject5(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
+  if (!isNonArrayObject6(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
   }
   return response.value;
 }
+async function pagedCollection2(graphClient, request) {
+  const response = request.nextLink === "" ? await graphClient.get(request.path, request.params, request.headers) : await graphClient.get(request.nextLink, void 0, request.headers);
+  return successResponse(
+    collectionResult(collectionValue5(response), response, request.includeNextLink)
+  );
+}
 function requireGraphObject5(response) {
-  if (!isNonArrayObject5(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
+  if (!isNonArrayObject6(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
   }
   return response;
 }
 function requireGraphObjectWithId3(response) {
-  if (!isNonArrayObject5(response) || typeof response.id !== "string" || response.id.length === 0) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE5);
+  if (!isNonArrayObject6(response) || typeof response.id !== "string" || response.id.length === 0) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
   }
   return response;
 }
 function deltaToken(response) {
-  if (!isNonArrayObject5(response)) {
+  if (!isNonArrayObject6(response)) {
     return "";
   }
   const deltaLink = response["@odata.deltaLink"];
@@ -37209,40 +37534,64 @@ function registerMailTools(server, dependencies) {
     {
       description: `List emails from a mail folder.
 
+Results are sorted newest first, except that the sort is dropped automatically when
+filter_query targets from/, sender/, toRecipients/ or ccRecipients/, because Graph
+cannot combine a sort with a filter on those properties.
+
 Args:
     folder: Mail folder name or ID (default "inbox"). Common: inbox, sentitems, drafts,
         deleteditems, archive.
     top: Maximum number of emails to return per call (default 25, maximum 50).
-    skip: Number of emails to skip before returning results (default 0). Graph
-        returns at most 50 per call, so page through larger folders by raising
-        skip in steps of top.
-    filter_query: Optional OData filter (e.g. "isRead eq false").
+${SKIP_ARGS_DOC}
+    filter_query: Optional OData filter (e.g. "isRead eq false"). Filtering on a
+        sender or recipient drops the sort order, as described above.
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}
+${IMMUTABLE_IDS_ARGS_DOC}
 ${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         folder: RESOURCE_ID_SCHEMA5.default("inbox"),
         top: LIST_TOP_SCHEMA,
         skip: SKIP_SCHEMA,
         filter_query: external_exports.string().default(""),
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+        immutable_ids: external_exports.boolean().default(false),
         mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ folder, top, skip, filter_query, mailbox }) => {
+    async ({
+      folder,
+      top,
+      skip,
+      filter_query,
+      compact,
+      next_link,
+      include_next_link,
+      immutable_ids,
+      mailbox
+    }) => {
       const params = {
-        $select: MAIL_LIST_FIELDS,
-        $top: String(Math.min(top, 50)),
-        $orderby: "receivedDateTime desc"
+        $select: selectFields(MAIL_LIST_FIELDS, MAIL_COMPACT_FIELDS, compact),
+        $top: String(Math.min(top, 50))
       };
+      if (!filterForbidsSort(filter_query)) {
+        params.$orderby = "receivedDateTime desc";
+      }
       if (skip > 0) {
         params.$skip = String(skip);
       }
       if (filter_query !== "") {
         params.$filter = filter_query;
       }
-      const result = await dependencies.graphClient.get(
-        `${mailboxRoot(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages`,
-        params
-      );
-      return successResponse(collectionValue5(result));
+      return await pagedCollection2(dependencies.graphClient, {
+        nextLink: next_link,
+        path: `${mailboxRoot(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages`,
+        params,
+        includeNextLink: include_next_link,
+        headers: immutableIdHeaders(immutable_ids)
+      });
     }
   );
   registerAuthenticatedTool(
@@ -37253,14 +37602,22 @@ ${MAILBOX_ARGS_DOC}`,
 
 Args:
     message_id: The email message ID.
+${BODY_TYPE_ARGS_DOC}
+${IMMUTABLE_IDS_ARGS_DOC}
 ${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         message_id: RESOURCE_ID_SCHEMA5,
+        body_type: BODY_TYPE_SCHEMA,
+        immutable_ids: external_exports.boolean().default(false),
         mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ message_id, mailbox }) => {
-      const result = await dependencies.graphClient.get(messagePath(mailbox, message_id));
+    async ({ message_id, body_type, immutable_ids, mailbox }) => {
+      const result = await dependencies.graphClient.get(
+        messagePath(mailbox, message_id),
+        void 0,
+        mergeHeaders(bodyTypeHeaders(body_type), immutableIdHeaders(immutable_ids))
+      );
       return successResponse(requireGraphObject5(result));
     }
   );
@@ -37273,21 +37630,46 @@ ${MAILBOX_ARGS_DOC}`,
 Args:
     query: Search query string.
     top: Maximum number of results (default 25).
+    folder: Mail folder name or ID to search (default "", the whole mailbox). Scope
+        the search to a folder when the mailbox holds thousands of messages.
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}
+${IMMUTABLE_IDS_ARGS_DOC}
 ${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         query: external_exports.string(),
         top: LIST_TOP_SCHEMA,
+        folder: OPTIONAL_RESOURCE_ID_SCHEMA5,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+        immutable_ids: external_exports.boolean().default(false),
         mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ query, top, mailbox }) => {
+    async ({
+      query,
+      top,
+      folder,
+      compact,
+      next_link,
+      include_next_link,
+      immutable_ids,
+      mailbox
+    }) => {
       const escapedQuery = query.replaceAll('"', '""');
-      const result = await dependencies.graphClient.get(`${mailboxRoot(mailbox)}/messages`, {
-        $search: `"${escapedQuery}"`,
-        $select: MAIL_LIST_FIELDS,
-        $top: String(Math.min(top, 50))
+      const root = mailboxRoot(mailbox);
+      return await pagedCollection2(dependencies.graphClient, {
+        nextLink: next_link,
+        path: folder === "" ? `${root}/messages` : `${root}/mailFolders/${encodeURIComponent(folder)}/messages`,
+        params: {
+          $search: `"${escapedQuery}"`,
+          $select: selectFields(MAIL_LIST_FIELDS, MAIL_COMPACT_FIELDS, compact),
+          $top: String(Math.min(top, 50))
+        },
+        includeNextLink: include_next_link,
+        headers: immutableIdHeaders(immutable_ids)
       });
-      return successResponse(collectionValue5(result));
     }
   );
   registerAuthenticatedTool(
@@ -37567,19 +37949,33 @@ Use the returned folder IDs with graph_list_mail or graph_move_mail.
 Args:
     parent_folder_id: Parent folder ID. Empty lists top-level folders.
     top: Maximum number of folders to return (default 25).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}
 ${MAILBOX_ARGS_DOC}`,
       inputSchema: {
         parent_folder_id: OPTIONAL_RESOURCE_ID_SCHEMA5,
         top: LIST_TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         mailbox: MAILBOX_SCHEMA
       }
     },
-    async ({ parent_folder_id, top, mailbox }) => {
-      const result = await dependencies.graphClient.get(mailFolderPath(mailbox, parent_folder_id), {
+    async ({ parent_folder_id, top, skip, next_link, include_next_link, mailbox }) => {
+      const params = {
         $select: MAIL_FOLDER_FIELDS,
         $top: String(Math.min(top, 50))
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await pagedCollection2(dependencies.graphClient, {
+        nextLink: next_link,
+        path: mailFolderPath(mailbox, parent_folder_id),
+        params,
+        includeNextLink: include_next_link,
+        headers: void 0
       });
-      return successResponse(collectionValue5(result));
     }
   );
   registerAuthenticatedTool(
@@ -38026,7 +38422,7 @@ ${MAILBOX_ARGS_DOC}`,
 }
 
 // src/tools/mailbox-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE6 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE7 = "Invalid Microsoft Graph response.";
 var MISSING_SCHEDULE_MESSAGE = 'start_datetime and end_datetime are required when status is "scheduled".';
 var MISSING_MAILBOX_SETTINGS_MESSAGE = "At least one mailbox setting is required.";
 var OPTIONAL_RESOURCE_ID_SCHEMA6 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
@@ -38034,12 +38430,12 @@ var OPTIONAL_RESOURCE_ID_SCHEMA6 = external_exports.string().refine((value) => v
 }).default("");
 var AUTOMATIC_REPLIES_STATUS_SCHEMA = external_exports.enum(["disabled", "alwaysEnabled", "scheduled"]);
 var EXTERNAL_AUDIENCE_SCHEMA = external_exports.enum(["none", "contactsOnly", "all"]);
-function isNonArrayObject6(value) {
+function isNonArrayObject7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function requireGraphObject6(response) {
-  if (!isNonArrayObject6(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE6);
+  if (!isNonArrayObject7(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
   }
   return response;
 }
@@ -38193,36 +38589,36 @@ function escapeAsPlainText(value) {
 }
 
 // src/tools/meeting-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE7 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE8 = "Invalid Microsoft Graph response.";
 var MEETING_METADATA_FIELDS = "id,meetingId,createdDateTime,meetingOrganizer";
 var ALLOWED_PRESENTERS_SCHEMA = external_exports.enum(["everyone", "organization", "roleIsPresenter", "organizer"]).default("everyone");
 var RESOURCE_ID_SCHEMA6 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
-function isNonArrayObject7(value) {
+function isNonArrayObject8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue6(response) {
-  if (!isNonArrayObject7(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
+  if (!isNonArrayObject8(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
   }
   return response.value;
 }
 function requireGraphObject7(response) {
-  if (!isNonArrayObject7(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
+  if (!isNonArrayObject8(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
   }
   return response;
 }
 function requireGraphString2(response) {
   if (typeof response !== "string") {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE7);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
   }
   return response;
 }
@@ -38238,19 +38634,22 @@ function registerMeetingTools(server, dependencies) {
 
 Args:
     join_url: Teams meeting join URL to look up a specific meeting.
-              If empty, returns recent meetings.`,
+              If empty, returns recent meetings.
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        join_url: external_exports.string().default("")
+        join_url: external_exports.string().default(""),
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ join_url }) => {
+    async ({ join_url, next_link, include_next_link }) => {
       const params = {};
       if (join_url !== "") {
         const escapedJoinUrl = join_url.replaceAll("'", "''");
         params.$filter = `JoinWebUrl eq '${encodeURIComponent(escapedJoinUrl)}'`;
       }
-      const result = await dependencies.graphClient.get("/me/onlineMeetings", params);
-      return successResponse(collectionValue6(result));
+      const result = next_link === "" ? await dependencies.graphClient.get("/me/onlineMeetings", params) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue6(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -38260,16 +38659,19 @@ Args:
       description: `List available transcripts for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+    meeting_id: The online meeting ID (from graph_list_online_meetings).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        meeting_id: RESOURCE_ID_SCHEMA6
+        meeting_id: RESOURCE_ID_SCHEMA6,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ meeting_id }) => {
-      const result = await dependencies.graphClient.get(`${meetingPath(meeting_id)}/transcripts`, {
+    async ({ meeting_id, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(`${meetingPath(meeting_id)}/transcripts`, {
         $select: MEETING_METADATA_FIELDS
-      });
-      return successResponse(collectionValue6(result));
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue6(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -38304,16 +38706,19 @@ Args:
       description: `List available recordings for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+    meeting_id: The online meeting ID (from graph_list_online_meetings).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        meeting_id: RESOURCE_ID_SCHEMA6
+        meeting_id: RESOURCE_ID_SCHEMA6,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ meeting_id }) => {
-      const result = await dependencies.graphClient.get(`${meetingPath(meeting_id)}/recordings`, {
+    async ({ meeting_id, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(`${meetingPath(meeting_id)}/recordings`, {
         $select: MEETING_METADATA_FIELDS
-      });
-      return successResponse(collectionValue6(result));
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue6(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -38410,24 +38815,29 @@ Args:
 
 Without report_id this lists the available attendance reports. With
 report_id it returns that report expanded with per-attendee join and leave
-times. Needs the OnlineMeetingArtifact.Read.All permission, which requires
-admin consent.
+times, and the paging arguments do not apply. Needs the
+OnlineMeetingArtifact.Read.All permission, which requires admin consent.
 
 Args:
     meeting_id: The online meeting ID (from graph_list_online_meetings).
-    report_id: Attendance report ID. Empty lists the available reports.`,
+    report_id: Attendance report ID. Empty lists the available reports.
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA6,
         report_id: external_exports.string().refine((value) => value !== "." && value !== "..", {
           message: "Resource IDs must not be '.' or '..'."
-        }).default("")
+        }).default(""),
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ meeting_id, report_id }) => {
+    async ({ meeting_id, report_id, next_link, include_next_link }) => {
       const reportsPath = `${meetingPath(meeting_id)}/attendanceReports`;
       if (report_id === "") {
-        const result2 = await dependencies.graphClient.get(reportsPath);
-        return successResponse(collectionValue6(result2));
+        const result2 = next_link === "" ? await dependencies.graphClient.get(reportsPath) : await dependencies.graphClient.get(next_link);
+        return successResponse(
+          collectionResult(collectionValue6(result2), result2, include_next_link)
+        );
       }
       const result = await dependencies.graphClient.get(
         `${reportsPath}/${encodeURIComponent(report_id)}`,
@@ -38443,19 +38853,19 @@ var USER_ID_SCHEMA = external_exports.string().refine((value) => value !== "" &&
   message: "user_id must not be empty, '.' or '..'."
 });
 var USER_IDS_SCHEMA = external_exports.array(USER_ID_SCHEMA).min(1).max(650);
-var INVALID_GRAPH_RESPONSE_MESSAGE8 = "Invalid Microsoft Graph response.";
-function isNonArrayObject8(value) {
+var INVALID_GRAPH_RESPONSE_MESSAGE9 = "Invalid Microsoft Graph response.";
+function isNonArrayObject9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue7(response) {
-  if (!isNonArrayObject8(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
+  if (!isNonArrayObject9(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE8);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
   }
   return response.value;
 }
@@ -38613,10 +39023,12 @@ function registerProfileTools(server, dependencies) {
 }
 
 // src/tools/search-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE9 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE10 = "Invalid Microsoft Graph response.";
 var INVALID_ENTITY_TYPE_COMBINATION_MESSAGE = "chatMessage cannot be combined with SharePoint entity types.";
 var SHAREPOINT_ENTITY_TYPES = /* @__PURE__ */ new Set(["drive", "driveItem", "site", "list", "listItem"]);
 var UNKNOWN_ENUM_ENTITY_TYPES = /* @__PURE__ */ new Set(["chatMessage", "person"]);
+var HIT_NAME_PROPERTIES = ["subject", "name", "displayName", "title"];
+var HIT_LINK_PROPERTIES = ["webUrl", "webLink"];
 var ENTITY_TYPE_SCHEMA = external_exports.enum([
   "message",
   "event",
@@ -38628,12 +39040,12 @@ var ENTITY_TYPE_SCHEMA = external_exports.enum([
   "chatMessage",
   "person"
 ]);
-function isNonArrayObject9(value) {
+function isNonArrayObject10(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function requireGraphObject8(value) {
-  if (!isNonArrayObject9(value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
+  if (!isNonArrayObject10(value)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE10);
   }
   return value;
 }
@@ -38643,9 +39055,59 @@ function optionalGraphArray(response, property) {
   }
   const value = response[property];
   if (!Array.isArray(value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE9);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE10);
   }
   return value;
+}
+function firstStringProperty(resource, properties) {
+  for (const property of properties) {
+    const value = resource[property];
+    if (typeof value === "string") {
+      return value;
+    }
+  }
+  return void 0;
+}
+function compactHit(hit) {
+  const resource = isNonArrayObject10(hit.resource) ? hit.resource : {};
+  const reduced = {};
+  const id = firstStringProperty(hit, ["hitId"]) ?? firstStringProperty(resource, ["id"]);
+  if (id !== void 0) {
+    reduced.id = id;
+  }
+  if (typeof hit.rank === "number") {
+    reduced.rank = hit.rank;
+  }
+  const summary = firstStringProperty(hit, ["summary"]);
+  if (summary !== void 0) {
+    reduced.summary = summary;
+  }
+  const resourceType = firstStringProperty(resource, ["@odata.type"]);
+  if (resourceType !== void 0) {
+    reduced.resource_type = resourceType;
+  }
+  const nameOrSubject = firstStringProperty(resource, HIT_NAME_PROPERTIES);
+  if (nameOrSubject !== void 0) {
+    reduced.name_or_subject = nameOrSubject;
+  }
+  const webUrl = firstStringProperty(resource, HIT_LINK_PROPERTIES);
+  if (webUrl !== void 0) {
+    reduced.web_url = webUrl;
+  }
+  return reduced;
+}
+function compactSearchHits(result) {
+  const hits = [];
+  for (const responseValue of optionalGraphArray(requireGraphObject8(result), "value")) {
+    const response = requireGraphObject8(responseValue);
+    for (const containerValue of optionalGraphArray(response, "hitsContainers")) {
+      const container = requireGraphObject8(containerValue);
+      for (const hitValue of optionalGraphArray(container, "hits")) {
+        hits.push(compactHit(requireGraphObject8(hitValue)));
+      }
+    }
+  }
+  return hits;
 }
 function registerSearchTools(server, dependencies) {
   registerAuthenticatedTool(
@@ -38699,15 +39161,22 @@ Args:
         One or more of: message, event, driveItem, drive, site, list, listItem,
         chatMessage, person.
     size: Maximum number of hits to return (default 25, maximum 50).
-    from: Number of hits to skip for paging (default 0).`,
+    from: Number of hits to skip for paging (default 0).
+    compact: Whether to flatten the response into one list of hits, each reduced to
+        {id, rank, summary, resource_type, name_or_subject, web_url} (default false,
+        which returns the full hitsContainers payload). id is the hitId, falling back
+        to the resource id; name_or_subject is the resource subject, name, displayName
+        or title; web_url is its webUrl or webLink; a field the hit does not carry is
+        omitted.`,
       inputSchema: {
         query: external_exports.string(),
         entity_types: external_exports.array(ENTITY_TYPE_SCHEMA).default(["message", "event", "driveItem"]),
         size: external_exports.number().int().default(25),
-        from: external_exports.number().int().default(0)
+        from: external_exports.number().int().default(0),
+        compact: COMPACT_SCHEMA
       }
     },
-    async ({ query, entity_types, size, from }) => {
+    async ({ query, entity_types, size, from, compact }) => {
       const hasSharePointType = entity_types.some(
         (entityType) => SHAREPOINT_ENTITY_TYPES.has(entityType)
       );
@@ -38732,13 +39201,13 @@ Args:
         void 0,
         needsUnknownEnumMembers ? { Prefer: "include-unknown-enum-members" } : void 0
       );
-      return successResponse(requireGraphObject8(result));
+      return successResponse(compact ? compactSearchHits(result) : requireGraphObject8(result));
     }
   );
 }
 
 // src/tools/tasks-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE10 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE11 = "Invalid Microsoft Graph response.";
 var MISSING_TASK_UPDATE_MESSAGE = "At least one task field is required.";
 var INCOMPLETE_FILTER = "status ne 'completed'";
 var RESOURCE_ID_SCHEMA7 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
@@ -38755,24 +39224,30 @@ var STATUS_SCHEMA = external_exports.enum([
   "deferred",
   ""
 ]);
-function isNonArrayObject10(value) {
+function isNonArrayObject11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue8(response) {
-  if (!isNonArrayObject10(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE10);
+  if (!isNonArrayObject11(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE11);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE10);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE11);
   }
   return response.value;
 }
+async function pagedCollection3(graphClient, request) {
+  const response = request.nextLink === "" ? await graphClient.get(request.path, request.params) : await graphClient.get(request.nextLink);
+  return successResponse(
+    collectionResult(collectionValue8(response), response, request.includeNextLink)
+  );
+}
 function requireGraphObject9(response) {
-  if (!isNonArrayObject10(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE10);
+  if (!isNonArrayObject11(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE11);
   }
   return response;
 }
@@ -38792,16 +39267,29 @@ function registerTasksTools(server, dependencies) {
 Use the returned list IDs with the other To Do tools.
 
 Args:
-    top: Maximum number of lists to return (default 25, maximum 50).`,
+    top: Maximum number of lists to return (default 25, maximum 50).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        top: TOP_SCHEMA5
+        top: TOP_SCHEMA5,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/todo/lists", {
+    async ({ top, skip, next_link, include_next_link }) => {
+      const params = {
         $top: String(Math.min(top, 50))
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await pagedCollection3(dependencies.graphClient, {
+        nextLink: next_link,
+        path: "/me/todo/lists",
+        params,
+        includeNextLink: include_next_link
       });
-      return successResponse(collectionValue8(result));
     }
   );
   registerAuthenticatedTool(
@@ -38816,15 +39304,28 @@ Args:
     filter_query: Optional OData filter (e.g. "status eq 'completed'"). Replaces
         the default incomplete-only filter.
     include_completed: Whether to include completed tasks (default false). When
-        false and no filter_query is given, only incomplete tasks are returned.`,
+        false and no filter_query is given, only incomplete tasks are returned.
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         list_id: RESOURCE_ID_SCHEMA7,
         top: TOP_SCHEMA5,
         filter_query: external_exports.string().default(""),
-        include_completed: external_exports.boolean().default(false)
+        include_completed: external_exports.boolean().default(false),
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ list_id, top, filter_query, include_completed }) => {
+    async ({
+      list_id,
+      top,
+      filter_query,
+      include_completed,
+      skip,
+      next_link,
+      include_next_link
+    }) => {
       const params = {
         $top: String(Math.min(top, 50))
       };
@@ -38833,8 +39334,15 @@ Args:
       } else if (!include_completed) {
         params.$filter = INCOMPLETE_FILTER;
       }
-      const result = await dependencies.graphClient.get(taskListPath(list_id), params);
-      return successResponse(collectionValue8(result));
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await pagedCollection3(dependencies.graphClient, {
+        nextLink: next_link,
+        path: taskListPath(list_id),
+        params,
+        includeNextLink: include_next_link
+      });
     }
   );
   registerAuthenticatedTool(
@@ -38964,49 +39472,73 @@ Planner tasks live on plans owned by Microsoft 365 groups, so this is separate
 from Microsoft To Do. Requires the Tasks.Read permission.
 
 Args:
-    top: Maximum number of tasks to return (default 25, maximum 50).`,
+    top: Maximum number of tasks to return (default 25, maximum 50).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        top: TOP_SCHEMA5
+        top: TOP_SCHEMA5,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ top }) => {
-      const result = await dependencies.graphClient.get("/me/planner/tasks", {
+    async ({ top, skip, next_link, include_next_link }) => {
+      const params = {
         $top: String(Math.min(top, 50))
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await pagedCollection3(dependencies.graphClient, {
+        nextLink: next_link,
+        path: "/me/planner/tasks",
+        params,
+        includeNextLink: include_next_link
       });
-      return successResponse(collectionValue8(result));
     }
   );
 }
 
 // src/tools/teams-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE11 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE12 = "Invalid Microsoft Graph response.";
 var RESOURCE_ID_SCHEMA8 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
 var TOP_SCHEMA6 = external_exports.number().int().default(50);
 var TEAM_DETAIL_FIELDS = "id,displayName,description,isArchived,visibility,webUrl";
+var CHANNEL_MESSAGE_COMPACT_FIELDS = "id,createdDateTime,from,subject,importance,webUrl";
+var CHANNEL_MESSAGE_COMPACT_DOC = `Messages carry full HTML bodies plus their attachments and mentions, so
+\`compact\` narrows them to the identifying fields. Without it no \`$select\` is
+sent and the response is unchanged.`;
 var MEMBERSHIP_TYPE_SCHEMA = external_exports.enum(["standard", "private", "shared"]).default("standard");
 var MENTIONS_SCHEMA2 = external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())).nullable().optional().default(null);
-function isNonArrayObject11(value) {
+function isNonArrayObject12(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function collectionValue9(response) {
-  if (!isNonArrayObject11(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE11);
+  if (!isNonArrayObject12(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE12);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE11);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE12);
   }
   return response.value;
 }
 function requireGraphObject10(response) {
-  if (!isNonArrayObject11(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE11);
+  if (!isNonArrayObject12(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE12);
   }
   return response;
+}
+function messageListParams2(top, compact) {
+  const select = selectFields("", CHANNEL_MESSAGE_COMPACT_FIELDS, compact);
+  return {
+    $top: String(Math.min(top, 50)),
+    ...select === "" ? {} : { $select: select }
+  };
 }
 function teamPath(teamId) {
   return `/teams/${encodeURIComponent(teamId)}`;
@@ -39023,48 +39555,73 @@ function registerTeamsTools(server, dependencies) {
     server,
     "graph_list_teams",
     {
-      description: "List Microsoft Teams that the authenticated user has joined.",
-      inputSchema: {}
+      description: `List Microsoft Teams that the authenticated user has joined.
+
+Args:
+${PAGING_ARGS_DOC}`,
+      inputSchema: {
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
+      }
     },
-    async () => {
-      const result = await dependencies.graphClient.get("/me/joinedTeams", {
+    async ({ next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get("/me/joinedTeams", {
         $select: TEAM_FIELDS
-      });
-      return successResponse(collectionValue9(result));
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue9(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
     server,
     "graph_list_channels",
     {
-      description: "List channels in a team.",
+      description: `List channels in a team.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
-        team_id: RESOURCE_ID_SCHEMA8
+        team_id: RESOURCE_ID_SCHEMA8,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ team_id }) => {
-      const result = await dependencies.graphClient.get(`${teamPath(team_id)}/channels`, {
+    async ({ team_id, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(`${teamPath(team_id)}/channels`, {
         $select: CHANNEL_FIELDS
-      });
-      return successResponse(collectionValue9(result));
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue9(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
     server,
     "graph_get_channel_messages",
     {
-      description: "Get messages from a channel.",
+      description: `Get messages from a channel.
+
+${CHANNEL_MESSAGE_COMPACT_DOC}
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    top: Maximum number of messages to return (default 50, maximum 50).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         team_id: RESOURCE_ID_SCHEMA8,
         channel_id: RESOURCE_ID_SCHEMA8,
-        top: TOP_SCHEMA6
+        top: TOP_SCHEMA6,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ team_id, channel_id, top }) => {
-      const result = await dependencies.graphClient.get(messagePath2(team_id, channel_id), {
-        $top: String(Math.min(top, 50))
-      });
-      return successResponse(collectionValue9(result));
+    async ({ team_id, channel_id, top, compact, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(
+        messagePath2(team_id, channel_id),
+        messageListParams2(top, compact)
+      ) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue9(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -39092,37 +39649,55 @@ function registerTeamsTools(server, dependencies) {
     server,
     "graph_list_channel_members",
     {
-      description: "List members of a channel.",
+      description: `List members of a channel.
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         team_id: RESOURCE_ID_SCHEMA8,
-        channel_id: RESOURCE_ID_SCHEMA8
+        channel_id: RESOURCE_ID_SCHEMA8,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ team_id, channel_id }) => {
-      const result = await dependencies.graphClient.get(
-        `${channelPath(team_id, channel_id)}/members`
-      );
-      return successResponse(collectionValue9(result));
+    async ({ team_id, channel_id, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(`${channelPath(team_id, channel_id)}/members`) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue9(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
     server,
     "graph_get_channel_message_replies",
     {
-      description: "Get replies to a channel message.",
+      description: `Get replies to a channel message.
+
+${CHANNEL_MESSAGE_COMPACT_DOC}
+
+Args:
+    team_id: The team ID (from graph_list_teams).
+    channel_id: The channel ID (from graph_list_channels).
+    message_id: The message ID whose replies to return.
+    top: Maximum number of replies to return (default 50, maximum 50).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         team_id: RESOURCE_ID_SCHEMA8,
         channel_id: RESOURCE_ID_SCHEMA8,
         message_id: RESOURCE_ID_SCHEMA8,
-        top: TOP_SCHEMA6
+        top: TOP_SCHEMA6,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ team_id, channel_id, message_id, top }) => {
-      const result = await dependencies.graphClient.get(
+    async ({ team_id, channel_id, message_id, top, compact, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(
         `${messagePath2(team_id, channel_id, message_id)}/replies`,
-        { $top: String(Math.min(top, 50)) }
-      );
-      return successResponse(collectionValue9(result));
+        messageListParams2(top, compact)
+      ) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue9(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -39157,17 +39732,20 @@ Needs the TeamMember.Read.All permission, which requires admin consent.
 
 Args:
     team_id: The team ID (from graph_list_teams).
-    top: Maximum number of members to return (default 50, maximum 50).`,
+    top: Maximum number of members to return (default 50, maximum 50).
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         team_id: RESOURCE_ID_SCHEMA8,
-        top: TOP_SCHEMA6
+        top: TOP_SCHEMA6,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ team_id, top }) => {
-      const result = await dependencies.graphClient.get(`${teamPath(team_id)}/members`, {
+    async ({ team_id, top, next_link, include_next_link }) => {
+      const result = next_link === "" ? await dependencies.graphClient.get(`${teamPath(team_id)}/members`, {
         $top: String(Math.min(top, 50))
-      });
-      return successResponse(collectionValue9(result));
+      }) : await dependencies.graphClient.get(next_link);
+      return successResponse(collectionResult(collectionValue9(result), result, include_next_link));
     }
   );
   registerAuthenticatedTool(
@@ -39338,31 +39916,37 @@ Args:
 }
 
 // src/tools/user-tools.ts
-var INVALID_GRAPH_RESPONSE_MESSAGE12 = "Invalid Microsoft Graph response.";
+var INVALID_GRAPH_RESPONSE_MESSAGE13 = "Invalid Microsoft Graph response.";
 var OPTIONAL_RESOURCE_ID_SCHEMA7 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
   message: "Resource IDs must not be '.' or '..'."
 }).default("");
 function escapeKqlStringToken(value) {
   return value.replaceAll('"', '""');
 }
-function isNonArrayObject12(value) {
+function isNonArrayObject13(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function userSearchValues(response) {
-  if (!isNonArrayObject12(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE12);
+  if (!isNonArrayObject13(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE13);
   }
   if (!Object.hasOwn(response, "value")) {
     return [];
   }
   if (!Array.isArray(response.value)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE12);
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE13);
   }
   return response.value;
 }
+async function pagedCollection4(graphClient, request) {
+  const response = request.nextLink === "" ? await graphClient.get(request.path, request.params, request.headers) : await graphClient.get(request.nextLink, void 0, request.headers);
+  return successResponse(
+    collectionResult(userSearchValues(response), response, request.includeNextLink)
+  );
+}
 function requireGraphObject11(response) {
-  if (!isNonArrayObject12(response)) {
-    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE12);
+  if (!isNonArrayObject13(response)) {
+    throw new GraphApiError(INVALID_GRAPH_RESPONSE_MESSAGE13);
   }
   return response;
 }
@@ -39374,24 +39958,37 @@ function registerUserTools(server, dependencies) {
     server,
     "graph_search_users",
     {
-      description: "Search for users in the organization directory by name or email.",
+      description: `Search for users in the organization directory by name or email.
+
+Graph does not support \`$skip\` alongside \`$search\` on /users, so page with
+next_link instead of an offset.
+
+Args:
+    query: Name or email address to look up.
+    top: Maximum number of users to return (default 10, maximum 25).
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         query: external_exports.string(),
-        top: external_exports.number().int().default(10)
+        top: external_exports.number().int().default(10),
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ query, top }) => {
+    async ({ query, top, compact, next_link, include_next_link }) => {
       const escapedQuery = escapeKqlStringToken(query);
-      const result = await dependencies.graphClient.get(
-        "/users",
-        {
+      return await pagedCollection4(dependencies.graphClient, {
+        nextLink: next_link,
+        path: "/users",
+        params: {
           $search: `"displayName:${escapedQuery}" OR "mail:${escapedQuery}"`,
-          $select: USER_PROFILE_FIELDS,
+          $select: selectFields(USER_PROFILE_FIELDS, USER_COMPACT_FIELDS, compact),
           $top: String(Math.min(top, 25))
         },
-        { ConsistencyLevel: "eventual" }
-      );
-      return successResponse(userSearchValues(result));
+        includeNextLink: include_next_link,
+        headers: { ConsistencyLevel: "eventual" }
+      });
     }
   );
   registerAuthenticatedTool(
@@ -39425,18 +40022,34 @@ Reading someone else's direct reports requires the User.Read.All permission.
 
 Args:
     user_id: User ID or email address. Empty targets the signed-in user.
-    top: Maximum number of reports to return (default 50, maximum 50).`,
+    top: Maximum number of reports to return (default 50, maximum 50).
+${SKIP_ARGS_DOC}
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         user_id: OPTIONAL_RESOURCE_ID_SCHEMA7,
-        top: external_exports.number().int().default(50)
+        top: external_exports.number().int().default(50),
+        skip: SKIP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ user_id, top }) => {
-      const result = await dependencies.graphClient.get(`${userRoot(user_id)}/directReports`, {
-        $select: USER_PROFILE_FIELDS,
+    async ({ user_id, top, skip, compact, next_link, include_next_link }) => {
+      const params = {
+        $select: selectFields(USER_PROFILE_FIELDS, USER_COMPACT_FIELDS, compact),
         $top: String(Math.min(top, 50))
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+      return await pagedCollection4(dependencies.graphClient, {
+        nextLink: next_link,
+        path: `${userRoot(user_id)}/directReports`,
+        params,
+        includeNextLink: include_next_link,
+        headers: void 0
       });
-      return successResponse(userSearchValues(result));
     }
   );
 }
@@ -39512,7 +40125,7 @@ async function createServer2(dependencies) {
     ownedAuthManager = defaults.authManager;
   }
   const server = new McpServer(
-    { name: "Graph MCP", version: "0.7.0" },
+    { name: "Graph MCP", version: "0.8.0" },
     { instructions: SERVER_INSTRUCTIONS }
   );
   registerAllTools(server, resolvedDependencies);
@@ -39549,7 +40162,7 @@ async function createServer2(dependencies) {
 }
 
 // src/cli.ts
-var VERSION = "0.7.0";
+var VERSION = "0.8.0";
 var PROTOCOL_ERROR_MESSAGE = "Graph MCP protocol error.";
 var HELP = `Graph MCP ${VERSION}
 

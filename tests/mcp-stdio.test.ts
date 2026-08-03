@@ -146,7 +146,7 @@ test("the compiled CLI serves valid MCP traffic over stdio and shuts down cleanl
 
   try {
     await client.connect(transport);
-    expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.7.0" });
+    expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.8.0" });
 
     const listed = await client.listTools();
     expect(listed.tools).toHaveLength(125);

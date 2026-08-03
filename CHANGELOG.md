@@ -2,6 +2,52 @@
 
 All notable changes to Graph MCP are documented in this file.
 
+## 0.8.0 - 2026-08-03
+
+### Fixed
+
+- `graph_list_mail` no longer fails when filtering by sender. It always sent
+  `$orderby receivedDateTime desc`, and Graph rejects that combined with a filter on
+  `from/`, `sender/`, `toRecipients/` or `ccRecipients/` with "The restriction or sort order
+  is too complex for this operation" — so the most natural triage query in the whole server,
+  "show me everything from this sender", was a guaranteed 400. The sort is now dropped
+  automatically for those filters, in mail and in `graph_list_events` alike.
+
+### Added
+
+Ergonomics learned from cleaning out a real 325-message inbox, applied consistently across
+every domain rather than only where it hurt first.
+
+- `compact` on the list and search tools, returning only identifying fields. A single page of
+  50 messages previously carried enough body preview and recipient data to swamp a caller's
+  context, which forced clumsy workarounds just to collect message IDs.
+- `next_link` and `include_next_link` on every list tool. Graph pages Teams chat and channel
+  messages with `$skiptoken` inside `@odata.nextLink`, which `$skip` cannot reach, so
+  anything past the newest 50 messages in a busy chat was previously unreachable. Passing
+  `include_next_link` wraps the result as `{items, next_link}`; the default response shape is
+  unchanged.
+- `skip` on the list tools where Graph supports `$skip`, including mail folders, events,
+  files, drives, contacts, To Do lists and tasks, and direct reports.
+- `folder` on `graph_search_mail`, so a search can be scoped to one folder instead of the
+  whole mailbox. Searching an account with 11,000 archived messages for something in the
+  inbox was not usable before.
+- `body_type` on `graph_read_mail`, `graph_get_event` and `graph_list_events`, so callers can
+  ask Graph for plain text instead of pulling large HTML bodies into context.
+- `immutable_ids` on the mail read, list and search tools. Graph message IDs change when a
+  message moves, so an ID captured before a move breaks afterwards; immutable IDs survive it.
+- `filter_query` on `graph_list_events`, applied on the `/events` path.
+- `compact` on `graph_search_all`, reducing each hit to its identity, rank, summary, type,
+  title and link instead of the full `hitsContainers` payload.
+
+### Changed
+
+- Install documentation now uses the GitHub plugin marketplace
+  (`claude plugin marketplace add JustStas/Graph-MCP --scope user`) instead of requiring a
+  local clone, with the local path kept as the plugin-development route.
+- Shared list behaviour lives in one new module, `src/tools/list-options.ts`, so paging,
+  compact projections, header preferences and next-link handling behave identically in every
+  domain.
+
 ## 0.7.0 - 2026-08-03
 
 ### Added

@@ -4,7 +4,7 @@ import { z, type ZodRawShape } from "zod";
 import { describe, expect, test } from "vitest";
 
 import { AuthenticationError } from "../../src/errors.js";
-import { EVENT_LIST_FIELDS } from "../../src/select-fields.js";
+import { EVENT_COMPACT_FIELDS, EVENT_LIST_FIELDS } from "../../src/select-fields.js";
 import { registerCalendarTools } from "../../src/tools/calendar-tools.js";
 import type { ToolDependencies } from "../../src/tools/tool-types.js";
 
@@ -48,6 +48,14 @@ const EXPECTED_CALENDAR_TOOLS = [
     description: `List the authenticated user's calendars.
 
 Args:
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).
     user: Shared or delegated calendar owner address or user ID to act on. Empty
         targets your own calendar. Requires the delegated Calendars.Read.Shared or
         Calendars.ReadWrite.Shared permissions.`,
@@ -61,6 +69,20 @@ Args:
     end_datetime: End of date range (ISO 8601). Required with start_datetime.
     calendar_id: Optional calendar ID. Defaults to primary calendar.
     top: Maximum number of events to return (default 50).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    filter_query: Optional OData filter (e.g. "isCancelled eq false"). Only applied
+        on the /events path, because calendarView does not accept arbitrary filters.
+        A filter on a recipient or organizer-style property also drops the sort,
+        which Graph refuses to combine with it.
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    body_type: Body format to request: "html" or "text" (default "html").
+        Use "text" to avoid pulling large HTML bodies into context.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).
     user: Shared or delegated calendar owner address or user ID to act on. Empty
         targets your own calendar. Requires the delegated Calendars.Read.Shared or
         Calendars.ReadWrite.Shared permissions.`,
@@ -71,6 +93,8 @@ Args:
 
 Args:
     event_id: The event ID.
+    body_type: Body format to request: "html" or "text" (default "html").
+        Use "text" to avoid pulling large HTML bodies into context.
     user: Shared or delegated calendar owner address or user ID to act on. Empty
         targets your own calendar. Requires the delegated Calendars.Read.Shared or
         Calendars.ReadWrite.Shared permissions.`,
@@ -229,6 +253,14 @@ Args:
     start_datetime: Start of the occurrence window (ISO 8601). Required by Graph.
     end_datetime: End of the occurrence window (ISO 8601). Required by Graph.
     top: Maximum number of occurrences to return (default 50, maximum 50).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).
     user: Shared or delegated calendar owner address or user ID to act on. Empty
         targets your own calendar. Requires the delegated Calendars.Read.Shared or
         Calendars.ReadWrite.Shared permissions.`,
@@ -244,7 +276,13 @@ graph_create_event to book a room.
 Args:
     room_list: Room list email address to list rooms from. Empty lists every
         room in the tenant.
-    top: Maximum number of rooms to return (default 50, maximum 50).`,
+    top: Maximum number of rooms to return (default 50, maximum 50).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
 ] as const;
 
@@ -418,6 +456,50 @@ function registerCalendarHarness(graphResponses: readonly unknown[] = []): {
 const SHARED_USER = "shared.calendar@bp.com";
 const SHARED_ROOT = `/users/${encodeURIComponent(SHARED_USER)}`;
 
+const NEXT_PAGE_LINK = "https://graph.microsoft.com/v1.0/me/events?$skiptoken=opaque-token";
+const OFF_ORIGIN_NEXT_LINK = "https://evil.example.com/v1.0/me/events?$skiptoken=stolen";
+const TEXT_BODY_HEADERS = { Prefer: 'outlook.body-content-type="text"' };
+
+const PAGING_TOOL_CASES = [
+  {
+    name: "graph_list_calendars",
+    firstPageArgs: {},
+    ignoredArgs: { skip: 10, compact: true, user: SHARED_USER },
+  },
+  {
+    name: "graph_list_events",
+    firstPageArgs: {},
+    ignoredArgs: {
+      start_datetime: "2026-07-01T00:00:00Z",
+      end_datetime: "2026-07-31T23:59:59Z",
+      calendar_id: "calendar-1",
+      top: 5,
+      skip: 10,
+      filter_query: "isCancelled eq false",
+      compact: true,
+      user: SHARED_USER,
+    },
+  },
+  {
+    name: "graph_list_event_instances",
+    firstPageArgs: { event_id: "series-1", start_datetime: "start", end_datetime: "end" },
+    ignoredArgs: {
+      event_id: "series-1",
+      start_datetime: "",
+      end_datetime: "",
+      top: 5,
+      skip: 10,
+      compact: true,
+      user: SHARED_USER,
+    },
+  },
+  {
+    name: "graph_list_rooms",
+    firstPageArgs: {},
+    ignoredArgs: { room_list: "building-1@bp.com", top: 5, skip: 10 },
+  },
+];
+
 const USER_ROUTING_CASES = [
   {
     name: "graph_list_calendars",
@@ -553,8 +635,20 @@ describe("calendar tool registration", () => {
     const { harness } = registerCalendarHarness();
 
     const calendarsShape = schemaFor(harness, "graph_list_calendars");
-    expect(Object.keys(calendarsShape)).toEqual(["user"]);
-    expect(z.object(calendarsShape).parse({})).toEqual({ user: "" });
+    expect(Object.keys(calendarsShape)).toEqual([
+      "skip",
+      "compact",
+      "next_link",
+      "include_next_link",
+      "user",
+    ]);
+    expect(z.object(calendarsShape).parse({})).toEqual({
+      skip: 0,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
+      user: "",
+    });
 
     const listShape = schemaFor(harness, "graph_list_events");
     expect(Object.keys(listShape)).toEqual([
@@ -562,6 +656,12 @@ describe("calendar tool registration", () => {
       "end_datetime",
       "calendar_id",
       "top",
+      "skip",
+      "filter_query",
+      "compact",
+      "body_type",
+      "next_link",
+      "include_next_link",
       "user",
     ]);
     const listSchema = z.object(listShape);
@@ -570,15 +670,34 @@ describe("calendar tool registration", () => {
       end_datetime: "",
       calendar_id: "",
       top: 50,
+      skip: 0,
+      filter_query: "",
+      compact: false,
+      body_type: "html",
+      next_link: "",
+      include_next_link: false,
       user: "",
     });
     expect(listSchema.safeParse({ top: 1.5 }).success).toBe(false);
     expect(listSchema.safeParse({ top: -1 }).success).toBe(true);
     expect(listSchema.safeParse({ top: 500 }).success).toBe(true);
+    expect(listSchema.safeParse({ skip: 25 }).success).toBe(true);
+    expect(listSchema.safeParse({ skip: -1 }).success).toBe(false);
+    expect(listSchema.safeParse({ skip: 2.5 }).success).toBe(false);
+    expect(listSchema.safeParse({ body_type: "text" }).success).toBe(true);
+    expect(listSchema.safeParse({ body_type: "markdown" }).success).toBe(false);
 
     const getShape = schemaFor(harness, "graph_get_event");
-    expect(Object.keys(getShape)).toEqual(["event_id", "user"]);
+    expect(Object.keys(getShape)).toEqual(["event_id", "body_type", "user"]);
     expect(z.object(getShape).safeParse({}).success).toBe(false);
+    expect(z.object(getShape).parse({ event_id: "event-1" })).toEqual({
+      event_id: "event-1",
+      body_type: "html",
+      user: "",
+    });
+    expect(z.object(getShape).safeParse({ event_id: "event-1", body_type: "rtf" }).success).toBe(
+      false,
+    );
 
     const createShape = schemaFor(harness, "graph_create_event");
     expect(Object.keys(createShape)).toEqual([
@@ -824,6 +943,10 @@ describe("calendar tool registration", () => {
       "start_datetime",
       "end_datetime",
       "top",
+      "skip",
+      "compact",
+      "next_link",
+      "include_next_link",
       "user",
     ]);
     const instancesSchema = z.object(instancesShape);
@@ -838,14 +961,31 @@ describe("calendar tool registration", () => {
       start_datetime: "2026-07-01T00:00:00Z",
       end_datetime: "2026-07-31T23:59:59Z",
       top: 50,
+      skip: 0,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
       user: "",
     });
     expect(instancesSchema.safeParse({ event_id: "event-1" }).success).toBe(false);
 
     const roomsShape = schemaFor(harness, "graph_list_rooms");
-    expect(Object.keys(roomsShape)).toEqual(["room_list", "top"]);
-    expect(z.object(roomsShape).parse({})).toEqual({ room_list: "", top: 50 });
+    expect(Object.keys(roomsShape)).toEqual([
+      "room_list",
+      "top",
+      "skip",
+      "next_link",
+      "include_next_link",
+    ]);
+    expect(z.object(roomsShape).parse({})).toEqual({
+      room_list: "",
+      top: 50,
+      skip: 0,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(z.object(roomsShape).safeParse({ top: 2.5 }).success).toBe(false);
+    expect(z.object(roomsShape).safeParse({ skip: -1 }).success).toBe(false);
 
     for (const { name } of EXPECTED_CALENDAR_TOOLS) {
       const keys = Object.keys(schemaFor(harness, name));
@@ -1988,5 +2128,219 @@ describe("calendar authenticated wrapper errors", () => {
     const { harness } = registerCalendarHarness([new AuthenticationError("Not authenticated.")]);
 
     await expect(harness.invoke(name, args)).resolves.toEqual(AUTHENTICATION_ERROR_RESULT);
+  });
+});
+
+describe("calendar list ergonomics", () => {
+  test("filters and sorts the events path while leaving calendarView untouched", async () => {
+    const { harness, graph } = registerCalendarHarness([
+      { value: [] },
+      { value: [] },
+      { value: [] },
+    ]);
+
+    await harness.invoke("graph_list_events", { filter_query: "isCancelled eq false" });
+    await harness.invoke("graph_list_events", {
+      filter_query: "from/emailAddress/address eq 'ada@example.com'",
+    });
+    await harness.invoke("graph_list_events", {
+      start_datetime: "2026-07-01T00:00:00Z",
+      end_datetime: "2026-07-31T23:59:59Z",
+      filter_query: "isCancelled eq false",
+    });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/events",
+        params: {
+          $select: EVENT_LIST_FIELDS,
+          $top: "50",
+          $filter: "isCancelled eq false",
+          $orderby: "start/dateTime desc",
+        },
+      },
+      {
+        method: "GET",
+        path: "/me/events",
+        params: {
+          $select: EVENT_LIST_FIELDS,
+          $top: "50",
+          $filter: "from/emailAddress/address eq 'ada@example.com'",
+        },
+      },
+      {
+        method: "GET",
+        path: "/me/calendarView",
+        params: {
+          $select: EVENT_LIST_FIELDS,
+          $top: "50",
+          startDateTime: "2026-07-01T00:00:00Z",
+          endDateTime: "2026-07-31T23:59:59Z",
+        },
+      },
+    ]);
+  });
+
+  test("sends the compact select fields and $skip on every paged calendar list", async () => {
+    const { harness, graph } = registerCalendarHarness([
+      { value: [] },
+      { value: [] },
+      { value: [] },
+      { value: [] },
+    ]);
+
+    await harness.invoke("graph_list_calendars", { compact: true, skip: 25 });
+    await harness.invoke("graph_list_events", { compact: true, skip: 25 });
+    await harness.invoke("graph_list_event_instances", {
+      event_id: "series-1",
+      start_datetime: "start",
+      end_datetime: "end",
+      compact: true,
+      skip: 25,
+    });
+    await harness.invoke("graph_list_rooms", { skip: 25 });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/calendars",
+        params: { $select: "id,name,isDefaultCalendar", $skip: "25" },
+      },
+      {
+        method: "GET",
+        path: "/me/events",
+        params: {
+          $select: EVENT_COMPACT_FIELDS,
+          $top: "50",
+          $orderby: "start/dateTime desc",
+          $skip: "25",
+        },
+      },
+      {
+        method: "GET",
+        path: "/me/events/series-1/instances",
+        params: {
+          startDateTime: "start",
+          endDateTime: "end",
+          $select: EVENT_COMPACT_FIELDS,
+          $top: "50",
+          $skip: "25",
+        },
+      },
+      {
+        method: "GET",
+        path: "/places/microsoft.graph.room",
+        params: { $top: "50", $skip: "25" },
+      },
+    ]);
+  });
+
+  test.each(PAGING_TOOL_CASES)(
+    "$name fetches next_link as a bare absolute URL and ignores the other arguments",
+    async ({ name, ignoredArgs }) => {
+      const { harness, graph } = registerCalendarHarness([{ value: [{ id: "page-2" }] }]);
+
+      expect(
+        dataFrom(await harness.invoke(name, { ...ignoredArgs, next_link: NEXT_PAGE_LINK })),
+      ).toEqual([{ id: "page-2" }]);
+      expect(graph.calls).toEqual([{ method: "GET", path: NEXT_PAGE_LINK }]);
+    },
+  );
+
+  test.each(PAGING_TOOL_CASES)(
+    "$name wraps its page as {items, next_link} only when include_next_link is true",
+    async ({ name, firstPageArgs }) => {
+      const page = { value: [{ id: "item-1" }], "@odata.nextLink": NEXT_PAGE_LINK };
+      const { harness } = registerCalendarHarness([page, page]);
+
+      expect(
+        dataFrom(await harness.invoke(name, { ...firstPageArgs, include_next_link: true })),
+      ).toEqual({ items: [{ id: "item-1" }], next_link: NEXT_PAGE_LINK });
+      expect(dataFrom(await harness.invoke(name, firstPageArgs))).toEqual([{ id: "item-1" }]);
+    },
+  );
+
+  test("reports an empty next_link when Graph stops paging or points off origin", async () => {
+    const { harness } = registerCalendarHarness([
+      { value: [{ id: "event-1" }] },
+      { value: [], "@odata.nextLink": OFF_ORIGIN_NEXT_LINK },
+    ]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_list_events", { include_next_link: true })),
+    ).toEqual({ items: [{ id: "event-1" }], next_link: "" });
+    expect(
+      dataFrom(await harness.invoke("graph_list_events", { include_next_link: true })),
+    ).toEqual({ items: [], next_link: "" });
+  });
+
+  test.each(PAGING_TOOL_CASES)(
+    "$name rejects a next_link that is not a Microsoft Graph v1.0 URL",
+    ({ name, firstPageArgs }) => {
+      const { harness, graph } = registerCalendarHarness();
+      const schema = z.object(schemaFor(harness, name));
+
+      for (const next_link of [
+        OFF_ORIGIN_NEXT_LINK,
+        "http://graph.microsoft.com/v1.0/me/events",
+        "https://graph.microsoft.com/beta/me/events",
+        "https://graph.microsoft.com.evil.example.com/v1.0/me/events",
+        "/me/events?$skiptoken=opaque-token",
+      ]) {
+        expect(schema.safeParse({ ...firstPageArgs, next_link }).success).toBe(false);
+      }
+      expect(schema.safeParse({ ...firstPageArgs, next_link: NEXT_PAGE_LINK }).success).toBe(true);
+      expect(graph.calls).toEqual([]);
+    },
+  );
+
+  test("asks Graph for plain text bodies when body_type is text", async () => {
+    const { harness, graph } = registerCalendarHarness([
+      { value: [] },
+      { id: "event-1" },
+      { value: [] },
+    ]);
+
+    await harness.invoke("graph_list_events", { body_type: "text" });
+    await harness.invoke("graph_get_event", { event_id: "event-1", body_type: "text" });
+    await harness.invoke("graph_list_events", { next_link: NEXT_PAGE_LINK, body_type: "text" });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/events",
+        params: {
+          $select: EVENT_LIST_FIELDS,
+          $top: "50",
+          $orderby: "start/dateTime desc",
+        },
+        headers: TEXT_BODY_HEADERS,
+      },
+      { method: "GET", path: "/me/events/event-1", headers: TEXT_BODY_HEADERS },
+      { method: "GET", path: NEXT_PAGE_LINK, headers: TEXT_BODY_HEADERS },
+    ]);
+  });
+
+  test("sends no body preference for the default html body_type", async () => {
+    const { harness, graph } = registerCalendarHarness([{ value: [] }, { id: "event-1" }]);
+
+    await harness.invoke("graph_list_events");
+    await harness.invoke("graph_get_event", { event_id: "event-1" });
+
+    for (const call of graph.calls) {
+      expect(call).not.toHaveProperty("headers");
+    }
+  });
+
+  test("keeps user last on every paged calendar schema", () => {
+    const { harness } = registerCalendarHarness();
+
+    for (const { name } of PAGING_TOOL_CASES) {
+      const keys = Object.keys(schemaFor(harness, name));
+      expect(keys.at(-1)).toBe(name === "graph_list_rooms" ? "include_next_link" : "user");
+      expect(keys).toContain("next_link");
+      expect(keys).toContain("include_next_link");
+    }
   });
 });

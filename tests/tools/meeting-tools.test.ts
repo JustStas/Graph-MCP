@@ -49,14 +49,22 @@ const EXPECTED_MEETING_TOOLS = [
 
 Args:
     join_url: Teams meeting join URL to look up a specific meeting.
-              If empty, returns recent meetings.`,
+              If empty, returns recent meetings.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_list_meeting_transcripts",
     description: `List available transcripts for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+    meeting_id: The online meeting ID (from graph_list_online_meetings).
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_meeting_transcript_content",
@@ -74,7 +82,11 @@ Args:
     description: `List available recordings for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+    meeting_id: The online meeting ID (from graph_list_online_meetings).
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_meeting_recording_url",
@@ -118,12 +130,16 @@ Args:
 
 Without report_id this lists the available attendance reports. With
 report_id it returns that report expanded with per-attendee join and leave
-times. Needs the OnlineMeetingArtifact.Read.All permission, which requires
-admin consent.
+times, and the paging arguments do not apply. Needs the
+OnlineMeetingArtifact.Read.All permission, which requires admin consent.
 
 Args:
     meeting_id: The online meeting ID (from graph_list_online_meetings).
-    report_id: Attendance report ID. Empty lists the available reports.`,
+    report_id: Attendance report ID. Empty lists the available reports.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
 ] as const;
 
@@ -323,20 +339,34 @@ describe("meeting tool registration", () => {
     const { harness } = registerMeetingHarness();
 
     const listShape = schemaFor(harness, "graph_list_online_meetings");
-    expect(Object.keys(listShape)).toEqual(["join_url"]);
-    expect(z.object(listShape).parse({})).toEqual({ join_url: "" });
+    expect(Object.keys(listShape)).toEqual(["join_url", "next_link", "include_next_link"]);
+    expect(z.object(listShape).parse({})).toEqual({
+      join_url: "",
+      next_link: "",
+      include_next_link: false,
+    });
 
     const transcriptsShape = schemaFor(harness, "graph_list_meeting_transcripts");
-    expect(Object.keys(transcriptsShape)).toEqual(["meeting_id"]);
+    expect(Object.keys(transcriptsShape)).toEqual(["meeting_id", "next_link", "include_next_link"]);
     expect(z.object(transcriptsShape).safeParse({}).success).toBe(false);
+    expect(z.object(transcriptsShape).parse({ meeting_id: "meeting-1" })).toEqual({
+      meeting_id: "meeting-1",
+      next_link: "",
+      include_next_link: false,
+    });
 
     const contentShape = schemaFor(harness, "graph_get_meeting_transcript_content");
     expect(Object.keys(contentShape)).toEqual(["meeting_id", "transcript_id"]);
     expect(z.object(contentShape).safeParse({ meeting_id: "meeting-1" }).success).toBe(false);
 
     const recordingsShape = schemaFor(harness, "graph_list_meeting_recordings");
-    expect(Object.keys(recordingsShape)).toEqual(["meeting_id"]);
+    expect(Object.keys(recordingsShape)).toEqual(["meeting_id", "next_link", "include_next_link"]);
     expect(z.object(recordingsShape).safeParse({}).success).toBe(false);
+    expect(z.object(recordingsShape).parse({ meeting_id: "meeting-1" })).toEqual({
+      meeting_id: "meeting-1",
+      next_link: "",
+      include_next_link: false,
+    });
 
     const recordingShape = schemaFor(harness, "graph_get_meeting_recording_url");
     expect(Object.keys(recordingShape)).toEqual(["meeting_id", "recording_id"]);
@@ -650,11 +680,18 @@ describe("online meeting creation and lookup", () => {
     }
 
     const attendanceShape = schemaFor(harness, "graph_get_meeting_attendance");
-    expect(Object.keys(attendanceShape)).toEqual(["meeting_id", "report_id"]);
+    expect(Object.keys(attendanceShape)).toEqual([
+      "meeting_id",
+      "report_id",
+      "next_link",
+      "include_next_link",
+    ]);
     const attendanceSchema = z.object(attendanceShape);
     expect(attendanceSchema.parse({ meeting_id: "meeting-1" })).toEqual({
       meeting_id: "meeting-1",
       report_id: "",
+      next_link: "",
+      include_next_link: false,
     });
     for (const value of [".", ".."]) {
       expect(
@@ -850,5 +887,88 @@ describe("online meeting creation and lookup", () => {
         },
       ],
     });
+  });
+});
+
+describe("meeting list paging", () => {
+  const MEETING_NEXT_LINK =
+    "https://graph.microsoft.com/v1.0/me/onlineMeetings/meeting-1/transcripts?$skiptoken=abc123";
+
+  const PAGING_INVOCATIONS = [
+    { name: "graph_list_online_meetings", args: { join_url: "https://teams.example/meet" } },
+    { name: "graph_list_meeting_transcripts", args: { meeting_id: "meeting-1" } },
+    { name: "graph_list_meeting_recordings", args: { meeting_id: "meeting-1" } },
+    { name: "graph_get_meeting_attendance", args: { meeting_id: "meeting-1" } },
+  ] as const;
+
+  test.each(PAGING_INVOCATIONS)(
+    "$name fetches next_link as a bare absolute URL and ignores the other arguments",
+    async ({ name, args }) => {
+      const { harness, graph } = registerMeetingHarness([{ value: [{ id: "page-2" }] }]);
+
+      expect(
+        dataFrom(await harness.invoke(name, { ...args, next_link: MEETING_NEXT_LINK })),
+      ).toEqual([{ id: "page-2" }]);
+      expect(graph.calls).toEqual([{ method: "GET", path: MEETING_NEXT_LINK }]);
+    },
+  );
+
+  test.each(PAGING_INVOCATIONS)(
+    "$name wraps the result as {items, next_link} only when include_next_link is set",
+    async ({ name, args }) => {
+      const bare = registerMeetingHarness([
+        { value: [{ id: "item-1" }], "@odata.nextLink": MEETING_NEXT_LINK },
+      ]);
+      expect(dataFrom(await bare.harness.invoke(name, args))).toEqual([{ id: "item-1" }]);
+
+      const wrapped = registerMeetingHarness([
+        { value: [{ id: "item-1" }], "@odata.nextLink": MEETING_NEXT_LINK },
+      ]);
+      expect(
+        dataFrom(await wrapped.harness.invoke(name, { ...args, include_next_link: true })),
+      ).toEqual({ items: [{ id: "item-1" }], next_link: MEETING_NEXT_LINK });
+
+      const lastPage = registerMeetingHarness([{ value: [{ id: "item-1" }] }]);
+      expect(
+        dataFrom(await lastPage.harness.invoke(name, { ...args, include_next_link: true })),
+      ).toEqual({ items: [{ id: "item-1" }], next_link: "" });
+    },
+  );
+
+  test.each(PAGING_INVOCATIONS)("$name only accepts a Graph v1.0 next_link", ({ name, args }) => {
+    const { harness } = registerMeetingHarness();
+    const schema = z.object(schemaFor(harness, name));
+
+    for (const next_link of [
+      "https://evil.example.com/v1.0/me/onlineMeetings",
+      "https://graph.microsoft.com/beta/me/onlineMeetings",
+      "/me/onlineMeetings?$skiptoken=abc",
+    ]) {
+      expect(schema.safeParse({ ...args, next_link }).success).toBe(false);
+    }
+    expect(schema.safeParse({ ...args, next_link: MEETING_NEXT_LINK }).success).toBe(true);
+  });
+
+  test("ignores next_link when a single attendance report is requested", async () => {
+    const report = { id: "report-1", attendanceRecords: [] };
+    const { harness, graph } = registerMeetingHarness([report]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_meeting_attendance", {
+          meeting_id: "meeting-1",
+          report_id: "report-1",
+          next_link: MEETING_NEXT_LINK,
+          include_next_link: true,
+        }),
+      ),
+    ).toEqual(report);
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/onlineMeetings/meeting-1/attendanceReports/report-1",
+        params: { $expand: "attendanceRecords" },
+      },
+    ]);
   });
 });

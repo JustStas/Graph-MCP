@@ -43,6 +43,11 @@ interface ToolHarness {
 const PERSON_FIELDS = "id,displayName,scoredEmailAddresses,jobTitle,companyName,personType";
 const CONTACT_FIELDS =
   "id,displayName,emailAddresses,mobilePhone,businessPhones,companyName,jobTitle";
+const PERSON_COMPACT_FIELDS = "id,displayName,scoredEmailAddresses";
+const CONTACT_COMPACT_FIELDS = "id,displayName,emailAddresses";
+const NEXT_LINK = "https://graph.microsoft.com/v1.0/me/contacts?%24skip=25&%24top=25";
+const PEOPLE_NEXT_LINK = "https://graph.microsoft.com/v1.0/me/people?%24skiptoken=abc";
+const FOLDERS_NEXT_LINK = "https://graph.microsoft.com/v1.0/me/contactFolders?%24skip=50";
 
 const EXPECTED_CONTACTS_TOOLS = [
   {
@@ -51,12 +56,19 @@ const EXPECTED_CONTACTS_TOOLS = [
 
 Covers colleagues, saved contacts, and external people the user has mailed,
 so prefer this over graph_search_users when looking someone up by name.
-\`$search\` on /me/people only works for the signed-in user. Requires the
-People.Read permission.
+\`$search\` on /me/people only works for the signed-in user, and Graph does not
+support \`$skip\` alongside it, so page with next_link instead of an offset.
+Requires the People.Read permission.
 
 Args:
     query: Name, email address, or partial text to look up.
-    top: Maximum number of people to return (default 10, maximum 50).`,
+    top: Maximum number of people to return (default 10, maximum 50).
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_list_contacts",
@@ -64,7 +76,15 @@ Args:
 
 Args:
     top: Maximum number of contacts to return (default 25, maximum 50).
-    folder_id: Contact folder ID. Empty lists the default contacts folder.`,
+    folder_id: Contact folder ID. Empty lists the default contacts folder.
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_create_contact",
@@ -107,7 +127,13 @@ Args:
 Use the returned folder IDs with graph_list_contacts.
 
 Args:
-    top: Maximum number of folders to return (default 25, maximum 50).`,
+    top: Maximum number of folders to return (default 25, maximum 50).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
 ] as const;
 
@@ -302,16 +328,48 @@ describe("contacts tool registration", () => {
   test("exposes exact snake_case schemas, defaults, and required fields", () => {
     const { harness } = registerContactsHarness();
 
+    expect(Object.keys(schemaFor(harness, "graph_search_people"))).toEqual([
+      "query",
+      "top",
+      "compact",
+      "next_link",
+      "include_next_link",
+    ]);
     const peopleSchema = z.object(schemaFor(harness, "graph_search_people"));
-    expect(peopleSchema.parse({ query: "Ada" })).toEqual({ query: "Ada", top: 10 });
+    expect(peopleSchema.parse({ query: "Ada" })).toEqual({
+      query: "Ada",
+      top: 10,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(peopleSchema.safeParse({}).success).toBe(false);
     expect(peopleSchema.safeParse({ query: "Ada", top: 1.5 }).success).toBe(false);
+    expect(peopleSchema.safeParse({ query: "Ada", skip: 10 }).success).toBe(true);
+    expect(peopleSchema.parse({ query: "Ada", skip: 10 })).not.toHaveProperty("skip");
 
+    expect(Object.keys(schemaFor(harness, "graph_list_contacts"))).toEqual([
+      "top",
+      "folder_id",
+      "skip",
+      "compact",
+      "next_link",
+      "include_next_link",
+    ]);
     const listSchema = z.object(schemaFor(harness, "graph_list_contacts"));
-    expect(listSchema.parse({})).toEqual({ top: 25, folder_id: "" });
+    expect(listSchema.parse({})).toEqual({
+      top: 25,
+      folder_id: "",
+      skip: 0,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
+    });
     for (const folderId of [".", ".."]) {
       expect(listSchema.safeParse({ folder_id: folderId }).success).toBe(false);
     }
+    expect(listSchema.safeParse({ skip: -1 }).success).toBe(false);
+    expect(listSchema.safeParse({ skip: 1.5 }).success).toBe(false);
 
     expect(Object.keys(schemaFor(harness, "graph_create_contact"))).toEqual([
       "given_name",
@@ -350,10 +408,44 @@ describe("contacts tool registration", () => {
     expect(deleteSchema.parse({ contact_id: "contact-1" })).toEqual({ contact_id: "contact-1" });
     expect(deleteSchema.safeParse({ contact_id: "" }).success).toBe(false);
 
+    expect(Object.keys(schemaFor(harness, "graph_list_contact_folders"))).toEqual([
+      "top",
+      "skip",
+      "next_link",
+      "include_next_link",
+    ]);
     const foldersSchema = z.object(schemaFor(harness, "graph_list_contact_folders"));
-    expect(foldersSchema.parse({})).toEqual({ top: 25 });
+    expect(foldersSchema.parse({})).toEqual({
+      top: 25,
+      skip: 0,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(foldersSchema.safeParse({ top: 2.5 }).success).toBe(false);
   });
+
+  test.each(["graph_search_people", "graph_list_contacts", "graph_list_contact_folders"])(
+    "%s rejects a next_link that is not a Graph v1.0 URL",
+    (name) => {
+      const { harness } = registerContactsHarness();
+      const schema = z.object(schemaFor(harness, name));
+
+      for (const nextLink of [
+        "https://evil.example.com/v1.0/me/contacts",
+        "https://graph.microsoft.com/beta/me/contacts",
+        "/me/contacts?$skip=25",
+      ]) {
+        const result = schema.safeParse({ query: "Ada", list_id: "list-1", next_link: nextLink });
+        expect(result.success).toBe(false);
+        if (!result.success) {
+          expect(result.error.issues[0]?.message).toBe(
+            "next_link must be a Microsoft Graph v1.0 URL returned by a previous call.",
+          );
+        }
+      }
+      expect(schema.safeParse({ query: "Ada", next_link: NEXT_LINK }).success).toBe(true);
+    },
+  );
 });
 
 describe("people search", () => {
@@ -388,6 +480,37 @@ describe("people search", () => {
         path: "/me/people",
         params: { $search: '"nobody"', $select: PERSON_FIELDS, $top: "10" },
       },
+    ]);
+  });
+
+  test("selects the compact person fields and pages with a bare next_link", async () => {
+    const { harness, graph } = registerContactsHarness([
+      { value: [{ id: "person-1" }] },
+      { value: [{ id: "person-2" }], "@odata.nextLink": PEOPLE_NEXT_LINK },
+    ]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_search_people", { query: "Ada", compact: true })),
+    ).toEqual([{ id: "person-1" }]);
+    expect(
+      dataFrom(
+        await harness.invoke("graph_search_people", {
+          query: "ignored",
+          top: 50,
+          compact: true,
+          next_link: PEOPLE_NEXT_LINK,
+          include_next_link: true,
+        }),
+      ),
+    ).toEqual({ items: [{ id: "person-2" }], next_link: PEOPLE_NEXT_LINK });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/people",
+        params: { $search: '"Ada"', $select: PERSON_COMPACT_FIELDS, $top: "10" },
+      },
+      { method: "GET", path: PEOPLE_NEXT_LINK },
     ]);
   });
 
@@ -426,6 +549,94 @@ describe("contact listing", () => {
         path: "/me/contactFolders/folder%2Fone%20id/contacts",
         params: { $select: CONTACT_FIELDS, $top: "50" },
       },
+    ]);
+  });
+
+  test("selects the compact contact fields and sends skip only above zero", async () => {
+    const { harness, graph } = registerContactsHarness([
+      { value: [] },
+      { value: [] },
+      { value: [] },
+    ]);
+
+    await harness.invoke("graph_list_contacts", { compact: true });
+    await harness.invoke("graph_list_contacts", { skip: 25 });
+    await harness.invoke("graph_list_contacts", { skip: 0, compact: false });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/contacts",
+        params: { $select: CONTACT_COMPACT_FIELDS, $top: "25" },
+      },
+      {
+        method: "GET",
+        path: "/me/contacts",
+        params: { $select: CONTACT_FIELDS, $top: "25", $skip: "25" },
+      },
+      {
+        method: "GET",
+        path: "/me/contacts",
+        params: { $select: CONTACT_FIELDS, $top: "25" },
+      },
+    ]);
+  });
+
+  test("fetches the contacts next_link bare and ignores the other arguments", async () => {
+    const { harness, graph } = registerContactsHarness([
+      { value: [{ id: "contact-2" }], "@odata.nextLink": NEXT_LINK },
+    ]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_list_contacts", {
+          top: 50,
+          folder_id: "folder-1",
+          skip: 25,
+          compact: true,
+          next_link: NEXT_LINK,
+          include_next_link: true,
+        }),
+      ),
+    ).toEqual({ items: [{ id: "contact-2" }], next_link: NEXT_LINK });
+
+    expect(graph.calls).toEqual([{ method: "GET", path: NEXT_LINK }]);
+  });
+
+  test("keeps a bare list by default and reports an empty next_link on the last page", async () => {
+    const { harness, graph } = registerContactsHarness([
+      { value: [{ id: "contact-1" }], "@odata.nextLink": NEXT_LINK },
+      { value: [{ id: "folder-1" }] },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_list_contacts"))).toEqual([{ id: "contact-1" }]);
+    expect(
+      dataFrom(await harness.invoke("graph_list_contact_folders", { include_next_link: true })),
+    ).toEqual({ items: [{ id: "folder-1" }], next_link: "" });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/contacts",
+        params: { $select: CONTACT_FIELDS, $top: "25" },
+      },
+      { method: "GET", path: "/me/contactFolders", params: { $top: "25" } },
+    ]);
+  });
+
+  test("sends folder skip only above zero and pages folders with a bare next_link", async () => {
+    const { harness, graph } = registerContactsHarness([{ value: [] }, { value: [] }]);
+
+    await harness.invoke("graph_list_contact_folders", { top: 90, skip: 50 });
+    await harness.invoke("graph_list_contact_folders", {
+      top: 10,
+      skip: 25,
+      next_link: FOLDERS_NEXT_LINK,
+    });
+
+    expect(graph.calls).toEqual([
+      { method: "GET", path: "/me/contactFolders", params: { $top: "50", $skip: "50" } },
+      { method: "GET", path: FOLDERS_NEXT_LINK },
     ]);
   });
 

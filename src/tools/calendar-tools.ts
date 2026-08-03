@@ -3,7 +3,22 @@ import { z } from "zod";
 
 import { GraphApiError } from "../errors.js";
 import { successResponse } from "../responses.js";
-import { EVENT_LIST_FIELDS } from "../select-fields.js";
+import { EVENT_COMPACT_FIELDS, EVENT_LIST_FIELDS } from "../select-fields.js";
+import {
+  BODY_TYPE_ARGS_DOC,
+  BODY_TYPE_SCHEMA,
+  bodyTypeHeaders,
+  collectionResult,
+  COMPACT_ARGS_DOC,
+  COMPACT_SCHEMA,
+  filterForbidsSort,
+  INCLUDE_NEXT_LINK_SCHEMA,
+  NEXT_LINK_SCHEMA,
+  PAGING_ARGS_DOC,
+  selectFields,
+  SKIP_ARGS_DOC,
+  SKIP_SCHEMA,
+} from "./list-options.js";
 import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.js";
 
 const INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
@@ -23,6 +38,13 @@ const USER_ARGS_DOC = `    user: Shared or delegated calendar owner address or u
         targets your own calendar. Requires the delegated Calendars.Read.Shared or
         Calendars.ReadWrite.Shared permissions.`;
 const TOP_SCHEMA = z.number().int().default(50);
+const CALENDAR_LIST_FIELDS = "id,name,color,isDefaultCalendar";
+const CALENDAR_COMPACT_FIELDS = "id,name,isDefaultCalendar";
+const EVENT_ORDER_BY = "start/dateTime desc";
+const EVENT_FILTER_ARGS_DOC = `    filter_query: Optional OData filter (e.g. "isCancelled eq false"). Only applied
+        on the /events path, because calendarView does not accept arbitrary filters.
+        A filter on a recipient or organizer-style property also drops the sort,
+        which Graph refuses to combine with it.`;
 const ATTENDEES_SCHEMA = z.array(z.string()).nullable().optional().default(null);
 const SHOW_AS_SCHEMA = z
   .enum(["free", "tentative", "busy", "oof", "workingElsewhere", "unknown"])
@@ -223,6 +245,30 @@ function buildRecurrence(
   };
 }
 
+interface CollectionPageRequest {
+  readonly path: string;
+  readonly params?: Record<string, string>;
+  readonly headers?: Record<string, string>;
+  readonly includeNextLink: boolean;
+}
+
+/**
+ * Fetch one page of a collection and shape it for the caller. A nextLink already carries
+ * its own paging state, so those requests pass the absolute URL with no query parameters.
+ *
+ * @param graphClient The Graph client to read through.
+ * @param request The page path, query parameters, headers, and paging preference.
+ */
+async function collectionPage(
+  graphClient: ToolDependencies["graphClient"],
+  request: CollectionPageRequest,
+): Promise<string> {
+  const response = await graphClient.get(request.path, request.params, request.headers);
+  return successResponse(
+    collectionResult(collectionValue(response), response, request.includeNextLink),
+  );
+}
+
 export function registerCalendarTools(
   server: Pick<McpServer, "registerTool">,
   dependencies: ToolDependencies,
@@ -234,16 +280,38 @@ export function registerCalendarTools(
       description: `List the authenticated user's calendars.
 
 Args:
+${SKIP_ARGS_DOC}
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}
 ${USER_ARGS_DOC}`,
       inputSchema: {
+        skip: SKIP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         user: USER_SCHEMA,
       },
     },
-    async ({ user }) => {
-      const result = await dependencies.graphClient.get(`${calendarRoot(user)}/calendars`, {
-        $select: "id,name,color,isDefaultCalendar",
+    async ({ skip, compact, next_link, include_next_link, user }) => {
+      if (next_link !== "") {
+        return await collectionPage(dependencies.graphClient, {
+          path: next_link,
+          includeNextLink: include_next_link,
+        });
+      }
+
+      const params: Record<string, string> = {
+        $select: selectFields(CALENDAR_LIST_FIELDS, CALENDAR_COMPACT_FIELDS, compact),
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+
+      return await collectionPage(dependencies.graphClient, {
+        path: `${calendarRoot(user)}/calendars`,
+        params,
+        includeNextLink: include_next_link,
       });
-      return successResponse(collectionValue(result));
     },
   );
 
@@ -258,18 +326,50 @@ Args:
     end_datetime: End of date range (ISO 8601). Required with start_datetime.
     calendar_id: Optional calendar ID. Defaults to primary calendar.
     top: Maximum number of events to return (default 50).
+${SKIP_ARGS_DOC}
+${EVENT_FILTER_ARGS_DOC}
+${COMPACT_ARGS_DOC}
+${BODY_TYPE_ARGS_DOC}
+${PAGING_ARGS_DOC}
 ${USER_ARGS_DOC}`,
       inputSchema: {
         start_datetime: z.string().default(""),
         end_datetime: z.string().default(""),
         calendar_id: OPTIONAL_RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        filter_query: z.string().default(""),
+        compact: COMPACT_SCHEMA,
+        body_type: BODY_TYPE_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         user: USER_SCHEMA,
       },
     },
-    async ({ start_datetime, end_datetime, calendar_id, top, user }) => {
+    async ({
+      start_datetime,
+      end_datetime,
+      calendar_id,
+      top,
+      skip,
+      filter_query,
+      compact,
+      body_type,
+      next_link,
+      include_next_link,
+      user,
+    }) => {
+      const headers = bodyTypeHeaders(body_type);
+      if (next_link !== "") {
+        return await collectionPage(dependencies.graphClient, {
+          path: next_link,
+          ...(headers === undefined ? {} : { headers }),
+          includeNextLink: include_next_link,
+        });
+      }
+
       const params: Record<string, string> = {
-        $select: EVENT_LIST_FIELDS,
+        $select: selectFields(EVENT_LIST_FIELDS, EVENT_COMPACT_FIELDS, compact),
         $top: String(Math.min(top, 50)),
       };
 
@@ -279,12 +379,24 @@ ${USER_ARGS_DOC}`,
         params.endDateTime = end_datetime;
         path = calendarCollectionPath(user, calendar_id, "calendarView");
       } else {
-        params.$orderby = "start/dateTime desc";
+        if (filter_query !== "") {
+          params.$filter = filter_query;
+        }
+        if (!filterForbidsSort(filter_query)) {
+          params.$orderby = EVENT_ORDER_BY;
+        }
         path = calendarCollectionPath(user, calendar_id, "events");
       }
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
 
-      const result = await dependencies.graphClient.get(path, params);
-      return successResponse(collectionValue(result));
+      return await collectionPage(dependencies.graphClient, {
+        path,
+        params,
+        ...(headers === undefined ? {} : { headers }),
+        includeNextLink: include_next_link,
+      });
     },
   );
 
@@ -296,14 +408,20 @@ ${USER_ARGS_DOC}`,
 
 Args:
     event_id: The event ID.
+${BODY_TYPE_ARGS_DOC}
 ${USER_ARGS_DOC}`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
+        body_type: BODY_TYPE_SCHEMA,
         user: USER_SCHEMA,
       },
     },
-    async ({ event_id, user }) => {
-      const result = await dependencies.graphClient.get(eventPath(user, event_id));
+    async ({ event_id, body_type, user }) => {
+      const result = await dependencies.graphClient.get(
+        eventPath(user, event_id),
+        undefined,
+        bodyTypeHeaders(body_type),
+      );
       return successResponse(requireGraphObject(result));
     },
   );
@@ -729,27 +847,58 @@ Args:
     start_datetime: Start of the occurrence window (ISO 8601). Required by Graph.
     end_datetime: End of the occurrence window (ISO 8601). Required by Graph.
     top: Maximum number of occurrences to return (default 50, maximum 50).
+${SKIP_ARGS_DOC}
+${COMPACT_ARGS_DOC}
+${PAGING_ARGS_DOC}
 ${USER_ARGS_DOC}`,
       inputSchema: {
         event_id: RESOURCE_ID_SCHEMA,
         start_datetime: z.string(),
         end_datetime: z.string(),
         top: TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        compact: COMPACT_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
         user: USER_SCHEMA,
       },
     },
-    async ({ event_id, start_datetime, end_datetime, top, user }) => {
+    async ({
+      event_id,
+      start_datetime,
+      end_datetime,
+      top,
+      skip,
+      compact,
+      next_link,
+      include_next_link,
+      user,
+    }) => {
+      if (next_link !== "") {
+        return await collectionPage(dependencies.graphClient, {
+          path: next_link,
+          includeNextLink: include_next_link,
+        });
+      }
       if (start_datetime === "" || end_datetime === "") {
         return successResponse({ error: MISSING_INSTANCE_WINDOW_MESSAGE }, "error");
       }
 
-      const result = await dependencies.graphClient.get(`${eventPath(user, event_id)}/instances`, {
+      const params: Record<string, string> = {
         startDateTime: start_datetime,
         endDateTime: end_datetime,
-        $select: EVENT_LIST_FIELDS,
+        $select: selectFields(EVENT_LIST_FIELDS, EVENT_COMPACT_FIELDS, compact),
         $top: String(Math.min(top, 50)),
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+
+      return await collectionPage(dependencies.graphClient, {
+        path: `${eventPath(user, event_id)}/instances`,
+        params,
+        includeNextLink: include_next_link,
       });
-      return successResponse(collectionValue(result));
     },
   );
 
@@ -766,22 +915,42 @@ graph_create_event to book a room.
 Args:
     room_list: Room list email address to list rooms from. Empty lists every
         room in the tenant.
-    top: Maximum number of rooms to return (default 50, maximum 50).`,
+    top: Maximum number of rooms to return (default 50, maximum 50).
+${SKIP_ARGS_DOC}
+${PAGING_ARGS_DOC}`,
       inputSchema: {
         room_list: OPTIONAL_RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
+        skip: SKIP_SCHEMA,
+        next_link: NEXT_LINK_SCHEMA,
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
       },
     },
-    async ({ room_list, top }) => {
+    async ({ room_list, top, skip, next_link, include_next_link }) => {
+      if (next_link !== "") {
+        return await collectionPage(dependencies.graphClient, {
+          path: next_link,
+          includeNextLink: include_next_link,
+        });
+      }
+
       const path =
         room_list === ""
           ? "/places/microsoft.graph.room"
           : `/places/${encodeURIComponent(room_list)}/microsoft.graph.roomlist/rooms`;
 
-      const result = await dependencies.graphClient.get(path, {
+      const params: Record<string, string> = {
         $top: String(Math.min(top, 50)),
+      };
+      if (skip > 0) {
+        params.$skip = String(skip);
+      }
+
+      return await collectionPage(dependencies.graphClient, {
+        path,
+        params,
+        includeNextLink: include_next_link,
       });
-      return successResponse(collectionValue(result));
     },
   );
 }

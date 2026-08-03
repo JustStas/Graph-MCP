@@ -6,6 +6,7 @@ import { describe, expect, test, vi } from "vitest";
 import { AuthenticationError } from "../../src/errors.js";
 import { GraphClient } from "../../src/graph-client.js";
 import { RateLimiter } from "../../src/rate-limiter.js";
+import { DRIVE_ITEM_COMPACT_FIELDS } from "../../src/select-fields.js";
 import { DRIVE_ITEM_FIELDS, registerFilesTools } from "../../src/tools/files-tools.js";
 import type { ToolDependencies } from "../../src/tools/tool-types.js";
 
@@ -57,15 +58,31 @@ const EXPECTED_FILE_TOOLS = [
 
 Args:
     folder_id: Folder ID to list contents of. Empty for root folder.
-    top: Maximum number of items to return (default 25).`,
+    top: Maximum number of items to return (default 25).
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_search_files",
     description: `Search for files in OneDrive by name or content.
 
+Graph rejects $skip on the search function, so page with next_link instead.
+
 Args:
     query: Search query string.
-    top: Maximum number of results (default 25).`,
+    top: Maximum number of results (default 25).
+    compact: Whether to return only the identifying fields instead of the full
+        record (default false). Use it to page through large collections cheaply.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_get_file_content",
@@ -127,10 +144,15 @@ Args:
     name: "graph_list_shared_files",
     description: `List files other people have shared with the user.
 
-Only $top is passed because sharedWithMe does not support $select reliably.
+Only $top is passed because sharedWithMe does not support $select or $skip
+reliably, so page with next_link instead.
 
 Args:
-    top: Maximum number of items to return (default 25).`,
+    top: Maximum number of items to return (default 25).
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_copy_file",
@@ -151,6 +173,10 @@ Args:
 
 Args:
     item_id: The file or folder ID.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).
     drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
   },
   {
@@ -180,6 +206,10 @@ Args:
 
 Args:
     item_id: The file ID.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).
     drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
   },
   {
@@ -196,11 +226,25 @@ Args:
     description: `List what the user worked on recently across their OneDrive.
 
 Args:
-    top: Maximum number of items to return (default 25, maximum 50).`,
+    top: Maximum number of items to return (default 25, maximum 50).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_list_drives",
-    description: `List the drives the user can reach, including their OneDrive and followed document libraries.`,
+    description: `List the drives the user can reach, including their OneDrive and followed document libraries.
+
+Args:
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_resolve_share_link",
@@ -225,7 +269,13 @@ Args:
     description: `List the document libraries of a SharePoint site.
 
 Args:
-    site_id: The SharePoint site ID (from graph_search_sites).`,
+    site_id: The SharePoint site ID (from graph_search_sites).
+    skip: Number of items to skip before returning results (default 0). Graph
+        returns at most 50 per call, so page by raising skip in steps of top.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).`,
   },
   {
     name: "graph_list_worksheets",
@@ -235,6 +285,10 @@ Excel workbook APIs need the Files.ReadWrite permission and only work on .xlsx f
 
 Args:
     item_id: The workbook file ID.
+    next_link: Opaque nextLink URL from a previous call, used to fetch the next
+        page. Overrides the other paging arguments when supplied.
+    include_next_link: Whether to wrap the result as {items, next_link} so paging
+        can continue (default false, which returns a bare list).
     drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
   },
   {
@@ -491,17 +545,43 @@ describe("file tool registration", () => {
     const { harness } = registerFilesHarness();
 
     const listShape = schemaFor(harness, "graph_list_files");
-    expect(Object.keys(listShape)).toEqual(["folder_id", "top"]);
+    expect(Object.keys(listShape)).toEqual([
+      "folder_id",
+      "top",
+      "compact",
+      "skip",
+      "next_link",
+      "include_next_link",
+    ]);
     const listSchema = z.object(listShape);
-    expect(listSchema.parse({})).toEqual({ folder_id: "", top: 25 });
+    expect(listSchema.parse({})).toEqual({
+      folder_id: "",
+      top: 25,
+      compact: false,
+      skip: 0,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(listSchema.safeParse({ top: 1.5 }).success).toBe(false);
     expect(listSchema.safeParse({ top: -1 }).success).toBe(true);
     expect(listSchema.safeParse({ top: 500 }).success).toBe(true);
 
     const searchShape = schemaFor(harness, "graph_search_files");
-    expect(Object.keys(searchShape)).toEqual(["query", "top"]);
+    expect(Object.keys(searchShape)).toEqual([
+      "query",
+      "top",
+      "compact",
+      "next_link",
+      "include_next_link",
+    ]);
     const searchSchema = z.object(searchShape);
-    expect(searchSchema.parse({ query: "planning" })).toEqual({ query: "planning", top: 25 });
+    expect(searchSchema.parse({ query: "planning" })).toEqual({
+      query: "planning",
+      top: 25,
+      compact: false,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(searchSchema.safeParse({}).success).toBe(false);
     expect(searchSchema.safeParse({ query: "planning", top: 2.5 }).success).toBe(false);
 
@@ -1201,9 +1281,9 @@ describe("OneDrive shared items", () => {
   test("exposes exact shared files schema keys and default top", () => {
     const { harness } = registerFilesHarness();
     const shape = schemaFor(harness, "graph_list_shared_files");
-    expect(Object.keys(shape)).toEqual(["top"]);
+    expect(Object.keys(shape)).toEqual(["top", "next_link", "include_next_link"]);
     const schema = z.object(shape);
-    expect(schema.parse({})).toEqual({ top: 25 });
+    expect(schema.parse({})).toEqual({ top: 25, next_link: "", include_next_link: false });
     expect(schema.safeParse({ top: 1.5 }).success).toBe(false);
   });
 
@@ -1387,6 +1467,11 @@ describe("drive_id routing", () => {
     for (const driveId of [".", ".."]) {
       expect(schema.safeParse({ drive_id: driveId }).success).toBe(false);
     }
+  });
+
+  test.each(DRIVE_ROUTING_CASES)("$name keeps drive_id as its last argument", ({ name }) => {
+    const { harness } = registerFilesHarness();
+    expect(Object.keys(schemaFor(harness, name)).at(-1)).toBe("drive_id");
   });
 
   test.each(["graph_list_recent_files", "graph_list_drives", "graph_search_sites"])(
@@ -1639,12 +1724,17 @@ describe("OneDrive recent files and drives", () => {
   test("exposes exact recent files schema keys and default top", () => {
     const { harness } = registerFilesHarness();
     const shape = schemaFor(harness, "graph_list_recent_files");
-    expect(Object.keys(shape)).toEqual(["top"]);
-    expect(z.object(shape).parse({})).toEqual({ top: 25 });
+    expect(Object.keys(shape)).toEqual(["top", "skip", "next_link", "include_next_link"]);
+    expect(z.object(shape).parse({})).toEqual({
+      top: 25,
+      skip: 0,
+      next_link: "",
+      include_next_link: false,
+    });
     expect(z.object(shape).safeParse({ top: 1.5 }).success).toBe(false);
   });
 
-  test("lists drives with the exact select and no arguments", async () => {
+  test("lists drives with the exact select and the paging arguments", async () => {
     const drives = [{ id: "drive-1", driveType: "business" }];
     const { harness, graph } = registerFilesHarness([{ value: drives }]);
 
@@ -1656,7 +1746,11 @@ describe("OneDrive recent files and drives", () => {
         params: { $select: "id,name,driveType,owner,quota" },
       },
     ]);
-    expect(Object.keys(schemaFor(harness, "graph_list_drives"))).toEqual([]);
+    expect(Object.keys(schemaFor(harness, "graph_list_drives"))).toEqual([
+      "skip",
+      "next_link",
+      "include_next_link",
+    ]);
   });
 });
 
@@ -1786,7 +1880,12 @@ describe("SharePoint sites", () => {
   test("exposes exact site schema keys and rejects sentinel site IDs", () => {
     const { harness } = registerFilesHarness();
     expect(Object.keys(schemaFor(harness, "graph_search_sites"))).toEqual(["query", "top"]);
-    expect(Object.keys(schemaFor(harness, "graph_list_site_drives"))).toEqual(["site_id"]);
+    expect(Object.keys(schemaFor(harness, "graph_list_site_drives"))).toEqual([
+      "site_id",
+      "skip",
+      "next_link",
+      "include_next_link",
+    ]);
     const schema = z.object(schemaFor(harness, "graph_list_site_drives"));
     for (const siteId of ["", ".", ".."]) {
       expect(schema.safeParse({ site_id: siteId }).success).toBe(false);
@@ -1915,6 +2014,8 @@ describe("Excel workbooks", () => {
     const { harness } = registerFilesHarness();
     expect(Object.keys(schemaFor(harness, "graph_list_worksheets"))).toEqual([
       "item_id",
+      "next_link",
+      "include_next_link",
       "drive_id",
     ]);
 
@@ -2002,4 +2103,257 @@ describe("Excel workbooks", () => {
       expect(JSON.stringify(result)).not.toContain("TypeError");
     }
   });
+});
+
+interface ListPagingCase {
+  readonly name: string;
+  readonly args: Record<string, unknown>;
+}
+
+interface SkipCase extends ListPagingCase {
+  readonly path: string;
+  readonly params: Record<string, string>;
+}
+
+const NEXT_PAGE_LINK = "https://graph.microsoft.com/v1.0/me/drive/root/children?$skiptoken=abc123";
+
+const LIST_PAGING_CASES: readonly ListPagingCase[] = [
+  { name: "graph_list_files", args: {} },
+  { name: "graph_search_files", args: { query: "planning" } },
+  { name: "graph_list_shared_files", args: {} },
+  { name: "graph_list_file_permissions", args: { item_id: "file-1" } },
+  { name: "graph_list_file_versions", args: { item_id: "file-1" } },
+  { name: "graph_list_recent_files", args: {} },
+  { name: "graph_list_drives", args: {} },
+  { name: "graph_list_site_drives", args: { site_id: "site-1" } },
+  { name: "graph_list_worksheets", args: { item_id: "file-1" } },
+];
+
+const SKIP_CASES: readonly SkipCase[] = [
+  {
+    name: "graph_list_files",
+    args: {},
+    path: "/me/drive/root/children",
+    params: { $select: DRIVE_ITEM_FIELDS, $top: "25" },
+  },
+  {
+    name: "graph_list_recent_files",
+    args: {},
+    path: "/me/drive/recent",
+    params: { $top: "25" },
+  },
+  {
+    name: "graph_list_drives",
+    args: {},
+    path: "/me/drives",
+    params: { $select: "id,name,driveType,owner,quota" },
+  },
+  {
+    name: "graph_list_site_drives",
+    args: { site_id: "site-1" },
+    path: "/sites/site-1/drives",
+    params: { $select: "id,name,driveType,webUrl" },
+  },
+];
+
+describe("file list ergonomics", () => {
+  test("exports the exact compact drive item select value", () => {
+    expect(DRIVE_ITEM_COMPACT_FIELDS).toBe("id,name,size,lastModifiedDateTime,file,folder,webUrl");
+  });
+
+  test("swaps the drive item select for the compact fields only when asked", async () => {
+    const { harness, graph } = registerFilesHarness([
+      { value: [] },
+      { value: [] },
+      { value: [] },
+      { value: [] },
+    ]);
+
+    await harness.invoke("graph_list_files", { compact: false });
+    await harness.invoke("graph_list_files", { compact: true });
+    await harness.invoke("graph_search_files", { query: "planning", compact: false });
+    await harness.invoke("graph_search_files", { query: "planning", compact: true });
+
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: "/me/drive/root/children",
+        params: { $select: DRIVE_ITEM_FIELDS, $top: "25" },
+      },
+      {
+        method: "GET",
+        path: "/me/drive/root/children",
+        params: { $select: "id,name,size,lastModifiedDateTime,file,folder,webUrl", $top: "25" },
+      },
+      {
+        method: "GET",
+        path: "/me/drive/root/search(q='planning')",
+        params: { $select: DRIVE_ITEM_FIELDS, $top: "25" },
+      },
+      {
+        method: "GET",
+        path: "/me/drive/root/search(q='planning')",
+        params: { $select: "id,name,size,lastModifiedDateTime,file,folder,webUrl", $top: "25" },
+      },
+    ]);
+  });
+
+  test.each([
+    "graph_list_shared_files",
+    "graph_list_file_permissions",
+    "graph_list_file_versions",
+    "graph_list_recent_files",
+    "graph_list_drives",
+    "graph_list_site_drives",
+    "graph_list_worksheets",
+  ])("%s exposes no compact argument", (name) => {
+    const { harness } = registerFilesHarness();
+    expect(Object.keys(schemaFor(harness, name))).not.toContain("compact");
+  });
+
+  test.each(SKIP_CASES)(
+    "$name sends $skip only when it is greater than zero",
+    async ({ name, args, path, params }) => {
+      const { harness, graph } = registerFilesHarness([
+        { value: [] },
+        { value: [] },
+        { value: [] },
+      ]);
+
+      await harness.invoke(name, args);
+      await harness.invoke(name, { ...args, skip: 0 });
+      await harness.invoke(name, { ...args, skip: 50 });
+
+      expect(graph.calls).toEqual([
+        { method: "GET", path, params },
+        { method: "GET", path, params },
+        { method: "GET", path, params: { ...params, $skip: "50" } },
+      ]);
+    },
+  );
+
+  test.each(SKIP_CASES)("$name rejects a fractional or negative skip", ({ name, args }) => {
+    const { harness } = registerFilesHarness();
+    const schema = z.object(schemaFor(harness, name));
+    expect(schema.safeParse({ ...args, skip: -1 }).success).toBe(false);
+    expect(schema.safeParse({ ...args, skip: 1.5 }).success).toBe(false);
+    expect(schema.safeParse({ ...args, skip: 10 }).success).toBe(true);
+  });
+
+  test.each([
+    "graph_search_files",
+    "graph_list_shared_files",
+    "graph_list_file_permissions",
+    "graph_list_file_versions",
+    "graph_list_worksheets",
+  ])("%s exposes no skip argument", (name) => {
+    const { harness } = registerFilesHarness();
+    expect(Object.keys(schemaFor(harness, name))).not.toContain("skip");
+  });
+
+  test.each(LIST_PAGING_CASES)(
+    "$name exposes both paging arguments with their bare-list defaults",
+    ({ name, args }) => {
+      const { harness } = registerFilesHarness();
+      const keys = Object.keys(schemaFor(harness, name));
+      expect(keys).toContain("next_link");
+      expect(keys).toContain("include_next_link");
+      expect(z.object(schemaFor(harness, name)).parse(args)).toMatchObject({
+        next_link: "",
+        include_next_link: false,
+      });
+    },
+  );
+
+  test.each(LIST_PAGING_CASES)(
+    "$name follows next_link as a bare absolute URL and ignores the other arguments",
+    async ({ name, args }) => {
+      const { harness, graph } = registerFilesHarness([{ value: [{ id: "page-2" }] }]);
+
+      expect(
+        dataFrom(
+          await harness.invoke(name, {
+            ...args,
+            top: 5,
+            skip: 7,
+            compact: true,
+            next_link: NEXT_PAGE_LINK,
+          }),
+        ),
+      ).toEqual([{ id: "page-2" }]);
+
+      expect(graph.calls).toEqual([{ method: "GET", path: NEXT_PAGE_LINK }]);
+    },
+  );
+
+  test("sends a followed next_link through the real client with no extra query parameters", async () => {
+    const { harness, fetch } = registerRealGraphFilesHarness();
+
+    expect(
+      dataFrom(await harness.invoke("graph_list_files", { next_link: NEXT_PAGE_LINK, top: 5 })),
+    ).toEqual([]);
+
+    const url = new URL(firstRequest(fetch).url);
+    expect(url.origin).toBe("https://graph.microsoft.com");
+    expect(url.pathname).toBe("/v1.0/me/drive/root/children");
+    expect(url.searchParams.get("$skiptoken")).toBe("abc123");
+    expect([...url.searchParams.keys()]).toEqual(["$skiptoken"]);
+  });
+
+  test.each(LIST_PAGING_CASES)(
+    "$name wraps the page only when include_next_link is true",
+    async ({ name, args }) => {
+      const page = { value: [{ id: "item-1" }], "@odata.nextLink": NEXT_PAGE_LINK };
+      const bare = registerFilesHarness([page]);
+      const wrapped = registerFilesHarness([page]);
+
+      expect(dataFrom(await bare.harness.invoke(name, args))).toEqual([{ id: "item-1" }]);
+      expect(
+        dataFrom(await wrapped.harness.invoke(name, { ...args, include_next_link: true })),
+      ).toEqual({ items: [{ id: "item-1" }], next_link: NEXT_PAGE_LINK });
+    },
+  );
+
+  test.each(LIST_PAGING_CASES)(
+    "$name reports an empty next_link when Graph returns no further page",
+    async ({ name, args }) => {
+      const { harness } = registerFilesHarness([{ value: [] }]);
+
+      expect(dataFrom(await harness.invoke(name, { ...args, include_next_link: true }))).toEqual({
+        items: [],
+        next_link: "",
+      });
+    },
+  );
+
+  test("drops a nextLink that does not point at Graph v1.0", async () => {
+    const { harness } = registerFilesHarness([
+      { value: [], "@odata.nextLink": "https://attacker.example.com/v1.0/me/drive/root/children" },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_list_files", { include_next_link: true }))).toEqual(
+      {
+        items: [],
+        next_link: "",
+      },
+    );
+  });
+
+  test.each(LIST_PAGING_CASES)(
+    "$name rejects a next_link that is not a Graph v1.0 URL",
+    ({ name, args }) => {
+      const { harness } = registerFilesHarness();
+      const schema = z.object(schemaFor(harness, name));
+
+      for (const link of [
+        "https://attacker.example.com/v1.0/me/drive/root/children",
+        "https://graph.microsoft.com/beta/me/drive/root/children",
+        "/me/drive/root/children?$skiptoken=abc123",
+        "graph.microsoft.com/v1.0/me/drive/root/children",
+      ]) {
+        expect(schema.safeParse({ ...args, next_link: link }).success).toBe(false);
+      }
+      expect(schema.safeParse({ ...args, next_link: NEXT_PAGE_LINK }).success).toBe(true);
+    },
+  );
 });

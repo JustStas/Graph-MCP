@@ -1,6 +1,6 @@
 {
   "name": "graph-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Use Microsoft Graph from Codex through a local MCP server.",
   "author": {
     "name": "JustStas",
