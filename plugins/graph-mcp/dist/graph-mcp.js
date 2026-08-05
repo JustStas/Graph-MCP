@@ -23208,6 +23208,33 @@ function parseBoolean(variable, value) {
 function tenantOrDefault(value) {
   return value.trim() || DEFAULTS.azureTenantId;
 }
+function parseScopeList(variable, value) {
+  const entries = value.split(/[\s,]+/).filter((entry) => entry !== "");
+  for (const entry of entries) {
+    if (/["'\\]/.test(entry)) {
+      throw new Error(
+        `${variable} entry ${JSON.stringify(entry)} must not contain quotes or backslashes. Separate scopes with spaces or commas and do not quote individual entries.`
+      );
+    }
+  }
+  return entries;
+}
+function withAdditionalScopes(base, additional) {
+  if (additional.length === 0) {
+    return base;
+  }
+  const seen = new Set(base.map((scope) => scope.toLowerCase()));
+  const merged = [...base];
+  for (const scope of additional) {
+    const key = scope.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(scope);
+  }
+  return Object.freeze(merged);
+}
 async function loadSettings(options = {}) {
   const homeDir = options.homeDir ?? homedir();
   const env = options.env ?? process.env;
@@ -23223,6 +23250,10 @@ async function loadSettings(options = {}) {
   const graphRateLimitMaxRequests = env.GRAPH_RATE_LIMIT_MAX_REQUESTS !== void 0 ? parsePositiveInteger("GRAPH_RATE_LIMIT_MAX_REQUESTS", env.GRAPH_RATE_LIMIT_MAX_REQUESTS) : DEFAULTS.graphRateLimitMaxRequests;
   const graphRateLimitWindow = env.GRAPH_RATE_LIMIT_WINDOW !== void 0 ? parsePositiveInteger("GRAPH_RATE_LIMIT_WINDOW", env.GRAPH_RATE_LIMIT_WINDOW) : DEFAULTS.graphRateLimitWindow;
   const graphDebug = env.GRAPH_DEBUG !== void 0 ? parseBoolean("GRAPH_DEBUG", env.GRAPH_DEBUG) : DEFAULTS.graphDebug;
+  const scopes = withAdditionalScopes(
+    SCOPES,
+    env.GRAPH_ADDITIONAL_SCOPES !== void 0 ? parseScopeList("GRAPH_ADDITIONAL_SCOPES", env.GRAPH_ADDITIONAL_SCOPES) : []
+  );
   const authority = `https://login.microsoftonline.com/${azureTenantId}`;
   const settings = {
     azureClientId,
@@ -23237,7 +23268,7 @@ async function loadSettings(options = {}) {
     authority,
     authorizeEndpoint: `${authority}/oauth2/v2.0/authorize`,
     tokenEndpoint: `${authority}/oauth2/v2.0/token`,
-    scopes: SCOPES
+    scopes
   };
   return Object.freeze(settings);
 }

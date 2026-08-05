@@ -125,6 +125,78 @@ describe("loadSettings", () => {
     expect(mutationError).toBeInstanceOf(TypeError);
   });
 
+  test("appends GRAPH_ADDITIONAL_SCOPES after the built-in scopes", async () => {
+    const settings = await loadSettings({
+      homeDir,
+      env: { GRAPH_ADDITIONAL_SCOPES: "Community.Read.All Directory.Read.All" },
+    });
+
+    expect(settings.scopes).toEqual([
+      ...expectedScopes,
+      "Community.Read.All",
+      "Directory.Read.All",
+    ]);
+    expect(Object.isFrozen(settings.scopes)).toBe(true);
+  });
+
+  test("accepts commas, extra whitespace, and newlines as separators", async () => {
+    const settings = await loadSettings({
+      homeDir,
+      env: { GRAPH_ADDITIONAL_SCOPES: " Community.Read.All ,,\n Directory.Read.All,\t" },
+    });
+
+    expect(settings.scopes).toEqual([
+      ...expectedScopes,
+      "Community.Read.All",
+      "Directory.Read.All",
+    ]);
+  });
+
+  test("never drops a built-in scope and ignores duplicates case-insensitively", async () => {
+    const settings = await loadSettings({
+      homeDir,
+      env: {
+        GRAPH_ADDITIONAL_SCOPES:
+          "mail.read,User.Read,Community.Read.All,community.read.all,Community.Read.All",
+      },
+    });
+
+    expect(settings.scopes).toEqual([...expectedScopes, "Community.Read.All"]);
+    for (const scope of expectedScopes) {
+      expect(settings.scopes).toContain(scope);
+    }
+  });
+
+  test("treats an empty or separator-only value as no additional scopes", async () => {
+    const empty = await loadSettings({ homeDir, env: { GRAPH_ADDITIONAL_SCOPES: "" } });
+    const separatorsOnly = await loadSettings({
+      homeDir,
+      env: { GRAPH_ADDITIONAL_SCOPES: " , ,\n" },
+    });
+
+    expect(empty.scopes).toEqual(expectedScopes);
+    expect(separatorsOnly.scopes).toEqual(expectedScopes);
+    expect(separatorsOnly.scopes).toHaveLength(41);
+  });
+
+  test("rejects quoted or backslash-bearing scope entries", async () => {
+    await expect(
+      loadSettings({ homeDir, env: { GRAPH_ADDITIONAL_SCOPES: '"Community.Read.All"' } }),
+    ).rejects.toThrow(/GRAPH_ADDITIONAL_SCOPES entry .* must not contain quotes or backslashes/);
+  });
+
+  test("keeps additional scopes out of unrelated loads", async () => {
+    const withExtra = await loadSettings({
+      homeDir,
+      env: { GRAPH_ADDITIONAL_SCOPES: "Community.Read.All" },
+    });
+    const withoutExtra = await loadSettings({ homeDir, env: {} });
+
+    expect(withExtra.scopes).toContain("Community.Read.All");
+    expect(withoutExtra.scopes).toEqual(expectedScopes);
+    expect(withoutExtra.scopes).not.toContain("Community.Read.All");
+  });
+
   test("loads client and tenant values from persisted config", async () => {
     await persistSetupConfig(
       { azureClientId: "file-client", azureTenantId: "file-tenant" },

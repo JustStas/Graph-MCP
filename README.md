@@ -191,9 +191,22 @@ built-in defaults.
 | `GRAPH_RATE_LIMIT_MAX_REQUESTS` | No | `10000` | Sliding-window request limit |
 | `GRAPH_RATE_LIMIT_WINDOW` | No | `600` | Sliding-window duration in seconds |
 | `GRAPH_DEBUG` | No | `false` | Enable diagnostic logging on stderr |
+| `GRAPH_ADDITIONAL_SCOPES` | No | none | Extra delegated scopes to request on top of the built-in set |
 
 Positive integer options reject zero, negatives, decimals, and malformed values. Boolean
 values accept `true`, `false`, `1`, `0`, `yes`, `no`, `on`, or `off`.
+
+`GRAPH_ADDITIONAL_SCOPES` accepts scopes separated by spaces or commas, for example
+`GRAPH_ADDITIONAL_SCOPES="Community.Read.All,Directory.Read.All"`. It is additive only: the
+built-in scopes are always requested, so every bundled tool keeps working, and entries that
+already appear in the built-in set are ignored. Quoting individual entries is rejected, since
+a stray quote would otherwise be sent to Entra as part of a scope name.
+
+Use it to reach Graph resources this server does not ship tools for yet, or that your tenant
+exposes through additional permissions. Two caveats. Scopes are only requested at sign-in, so
+after changing this value run `graph_auth_logout` and then `graph_auth_login` for the new
+consent to take effect. And a scope your tenant requires an administrator to approve will
+block the whole sign-in until that approval exists, not just the calls that need it.
 
 ## Token storage and migration from Python
 
