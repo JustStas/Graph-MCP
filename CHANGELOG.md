@@ -4,6 +4,16 @@ All notable changes to Graph MCP are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `GRAPH_ADDITIONAL_SCOPES` requests extra delegated scopes on top of the built-in set, space
+  or comma separated. The scope list was a frozen constant, so reaching any Graph resource
+  outside it — a permission a tenant grants only to some apps, or a resource this server has
+  no tools for yet — meant forking the package to edit one array. The variable is additive
+  only: the built-in scopes are always requested, so no bundled tool can lose a permission it
+  relies on, and entries already present are ignored case-insensitively. Quoted entries are
+  rejected, because a stray quote is otherwise sent to Entra as part of a scope name.
+
 ### Changed
 
 - Removed `docs/superpowers/` from version control and ignored it. Those six plan and design

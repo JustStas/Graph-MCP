@@ -178,6 +178,44 @@ function tenantOrDefault(value: string): string {
   return value.trim() || DEFAULTS.azureTenantId;
 }
 
+function parseScopeList(variable: string, value: string): readonly string[] {
+  const entries = value.split(/[\s,]+/).filter((entry) => entry !== "");
+
+  for (const entry of entries) {
+    if (/["'\\]/.test(entry)) {
+      throw new Error(
+        `${variable} entry ${JSON.stringify(entry)} must not contain quotes or backslashes. ` +
+          "Separate scopes with spaces or commas and do not quote individual entries.",
+      );
+    }
+  }
+
+  return entries;
+}
+
+function withAdditionalScopes(
+  base: readonly string[],
+  additional: readonly string[],
+): readonly string[] {
+  if (additional.length === 0) {
+    return base;
+  }
+
+  const seen = new Set(base.map((scope) => scope.toLowerCase()));
+  const merged = [...base];
+
+  for (const scope of additional) {
+    const key = scope.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(scope);
+  }
+
+  return Object.freeze(merged);
+}
+
 export async function loadSettings(options: LoadSettingsOptions = {}): Promise<Settings> {
   const homeDir = options.homeDir ?? homedir();
   const env = options.env ?? process.env;
@@ -215,6 +253,12 @@ export async function loadSettings(options: LoadSettingsOptions = {}): Promise<S
     env.GRAPH_DEBUG !== undefined
       ? parseBoolean("GRAPH_DEBUG", env.GRAPH_DEBUG)
       : DEFAULTS.graphDebug;
+  const scopes = withAdditionalScopes(
+    SCOPES,
+    env.GRAPH_ADDITIONAL_SCOPES !== undefined
+      ? parseScopeList("GRAPH_ADDITIONAL_SCOPES", env.GRAPH_ADDITIONAL_SCOPES)
+      : [],
+  );
   const authority = `https://login.microsoftonline.com/${azureTenantId}`;
 
   const settings: Settings = {
@@ -230,7 +274,7 @@ export async function loadSettings(options: LoadSettingsOptions = {}): Promise<S
     authority,
     authorizeEndpoint: `${authority}/oauth2/v2.0/authorize`,
     tokenEndpoint: `${authority}/oauth2/v2.0/token`,
-    scopes: SCOPES,
+    scopes,
   };
   return Object.freeze(settings);
 }
