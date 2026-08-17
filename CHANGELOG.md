@@ -37,10 +37,14 @@ All notable changes to Graph MCP are documented in this file.
 
 ### Fixed
 
-- `graph_resolve_share_link` now returns `@microsoft.graph.downloadUrl`. Graph omits that
-  property unless an explicit `$select` asks for it, and the tool's `$select` did not, so the
-  one tool whose job is turning a sharing link into something readable withheld the only field
-  that made the target readable.
+- `graph_resolve_share_link` and `graph_get_file_content` now really return a download URL.
+  Graph drops `@microsoft.graph.downloadUrl` from any response that carries an explicit
+  `$select`, and naming the annotation in that `$select` does not bring it back — the annotation
+  hangs off the `content` stream property, so `content.downloadUrl` is what selects it.
+  `graph_get_file_content` had asked for the annotation by name since 0.7.0, which means its
+  binary branch returned `downloadUrl: null` for every PDF, image, and Office document it was
+  ever pointed at, while still telling the caller to use that URL. Verified against a live
+  tenant: both tools previously returned no URL, and both now return one.
 - The release helper now retries the post-publish registry readback six times with exponential
   backoff, capped at 30 seconds, instead of three times one second apart. npm's registry is
   eventually consistent, so a successful publish routinely became visible after the old

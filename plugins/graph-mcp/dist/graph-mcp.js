@@ -36650,10 +36650,11 @@ ${PAGING_ARGS_DOC}`,
 
 // src/tools/files-tools.ts
 var DRIVE_ITEM_FIELDS = "id,name,size,createdDateTime,lastModifiedDateTime,file,folder,webUrl,parentReference";
-var SHARE_LINK_FIELDS = `${DRIVE_ITEM_FIELDS},@microsoft.graph.downloadUrl`;
+var DOWNLOAD_URL_FIELD = "content.downloadUrl";
+var SHARE_LINK_FIELDS = `${DRIVE_ITEM_FIELDS},${DOWNLOAD_URL_FIELD}`;
 var INVALID_GRAPH_RESPONSE_MESSAGE5 = "Invalid Microsoft Graph response.";
 var INVALID_BASE64_MESSAGE = "Invalid base64 content.";
-var FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
+var FILE_METADATA_FIELDS = `id,name,size,file,${DOWNLOAD_URL_FIELD}`;
 var MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 var MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024;
 var OVERSIZE_DOWNLOAD_MESSAGE = "File too large. Maximum download size is 4MB.";

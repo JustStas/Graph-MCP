@@ -20,12 +20,18 @@ import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.j
 export const DRIVE_ITEM_FIELDS =
   "id,name,size,createdDateTime,lastModifiedDateTime,file,folder,webUrl,parentReference";
 
-/** Graph omits `@microsoft.graph.downloadUrl` unless an explicit `$select` asks for it. */
-export const SHARE_LINK_FIELDS = `${DRIVE_ITEM_FIELDS},@microsoft.graph.downloadUrl`;
+/**
+ * Graph drops `@microsoft.graph.downloadUrl` from a response as soon as an explicit `$select`
+ * is present, and naming the annotation in the `$select` does not bring it back. The annotation
+ * belongs to the `content` stream property, so `content.downloadUrl` is what selects it.
+ */
+export const DOWNLOAD_URL_FIELD = "content.downloadUrl";
+
+export const SHARE_LINK_FIELDS = `${DRIVE_ITEM_FIELDS},${DOWNLOAD_URL_FIELD}`;
 
 const INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
 const INVALID_BASE64_MESSAGE = "Invalid base64 content.";
-const FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
+const FILE_METADATA_FIELDS = `id,name,size,file,${DOWNLOAD_URL_FIELD}`;
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024;
 const OVERSIZE_DOWNLOAD_MESSAGE = "File too large. Maximum download size is 4MB.";

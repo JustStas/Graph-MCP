@@ -46,13 +46,13 @@ interface ToolHarness {
   invokeRaw(name: string, args: unknown): Promise<CallToolResult>;
 }
 
-const FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
+const FILE_METADATA_FIELDS = "id,name,size,file,content.downloadUrl";
 const BINARY_NOTE = "Binary file — use the downloadUrl to access content.";
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024;
 const OVERSIZE_DOWNLOAD_MESSAGE = "File too large. Maximum download size is 4MB.";
 const MAX_STANDARD_BASE64_LENGTH = 4 * Math.ceil(MAX_UPLOAD_BYTES / 3);
-const SHARE_LINK_FIELDS = `${DRIVE_ITEM_FIELDS},@microsoft.graph.downloadUrl`;
+const SHARE_LINK_FIELDS = `${DRIVE_ITEM_FIELDS},content.downloadUrl`;
 
 const EXPECTED_FILE_TOOLS = [
   {
@@ -2030,7 +2030,10 @@ describe("share link resolution", () => {
       ),
     ).toEqual(item);
     expect(graph.calls[0]?.params).toEqual({ $select: SHARE_LINK_FIELDS });
-    expect(SHARE_LINK_FIELDS.endsWith(",@microsoft.graph.downloadUrl")).toBe(true);
+    // Graph ignores the annotation name inside a $select and returns nothing, so the select has
+    // to ask for the `content` stream property it hangs off instead.
+    expect(SHARE_LINK_FIELDS).toContain("content.downloadUrl");
+    expect(SHARE_LINK_FIELDS).not.toContain("@microsoft.graph.downloadUrl");
   });
 
   test("exposes exact share link schema keys", () => {
