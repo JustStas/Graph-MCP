@@ -179,6 +179,7 @@ function createGraphFake(initialResponses: readonly unknown[] = []): GraphFake {
       });
       return Promise.resolve(nextGraphResponse(responses));
     },
+    getBytes: () => Promise.reject(new Error("These tools never read raw bytes.")),
     post: (path, body, params, headers) => {
       calls.push({
         method: "POST",
@@ -310,7 +311,14 @@ function alwaysRejectingGraphClient(reason: unknown): ToolDependencies["graphCli
   const reject = (): Promise<never> =>
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
     Promise.reject(reason);
-  return { get: reject, post: reject, patch: reject, put: reject, delete: reject };
+  return {
+    get: reject,
+    getBytes: reject,
+    post: reject,
+    patch: reject,
+    put: reject,
+    delete: reject,
+  };
 }
 
 describe("contacts tool registration", () => {

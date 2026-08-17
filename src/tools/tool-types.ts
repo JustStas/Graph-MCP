@@ -18,7 +18,7 @@ export interface ToolDependencies {
     AuthManager,
     "getStatus" | "login" | "logout" | "getValidAccessToken" | "refreshAccessToken"
   >;
-  readonly graphClient: Pick<GraphClient, "get" | "post" | "patch" | "put" | "delete">;
+  readonly graphClient: Pick<GraphClient, "get" | "getBytes" | "post" | "patch" | "put" | "delete">;
 }
 
 export interface AuthenticatedToolConfig<InputSchema extends ToolInputSchema> {

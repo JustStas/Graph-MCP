@@ -34586,6 +34586,18 @@ var GraphClient = class {
   get(path2, params, headers) {
     return this.#request("GET", path2, params, void 0, headers);
   }
+  /** Reads a response as raw bytes, so binary downloads survive without UTF-8 decoding. */
+  getBytes(path2, params, headers) {
+    return this.#send(
+      "GET",
+      path2,
+      params,
+      void 0,
+      headers,
+      void 0,
+      (response, signal) => this.#readResponseBytes(response, signal)
+    );
+  }
   post(path2, jsonBody, params, headers) {
     return this.#request("POST", path2, params, jsonBody, headers);
   }
@@ -34598,7 +34610,18 @@ var GraphClient = class {
   delete(path2, headers) {
     return this.#request("DELETE", path2, void 0, void 0, headers);
   }
-  async #request(method, path2, params, jsonBody, callerHeaders, binaryBody) {
+  #request(method, path2, params, jsonBody, callerHeaders, binaryBody) {
+    return this.#send(
+      method,
+      path2,
+      params,
+      jsonBody,
+      callerHeaders,
+      binaryBody,
+      (response, signal) => this.#parseSuccessfulResponse(response, signal)
+    );
+  }
+  async #send(method, path2, params, jsonBody, callerHeaders, binaryBody, readResponse) {
     const url2 = this.#buildUrl(path2, params);
     await this.#rateLimiter.acquire();
     const body = this.#requestBody(jsonBody, binaryBody);
@@ -34646,7 +34669,7 @@ var GraphClient = class {
       if (!response.ok) {
         throw await this.#graphApiError(response, signal);
       }
-      const result = await this.#parseSuccessfulResponse(response, signal);
+      const result = await readResponse(response, signal);
       this.#rateLimiter.resetBackoff();
       return result;
     }
@@ -34717,6 +34740,16 @@ var GraphClient = class {
   async #readResponseText(response, signal) {
     try {
       return await response.text();
+    } catch {
+      throw this.#requestFailure(signal);
+    }
+  }
+  async #readResponseBytes(response, signal) {
+    if (response.status === 204) {
+      return new Uint8Array();
+    }
+    try {
+      return new Uint8Array(await response.arrayBuffer());
     } catch {
       throw this.#requestFailure(signal);
     }
@@ -36617,10 +36650,14 @@ ${PAGING_ARGS_DOC}`,
 
 // src/tools/files-tools.ts
 var DRIVE_ITEM_FIELDS = "id,name,size,createdDateTime,lastModifiedDateTime,file,folder,webUrl,parentReference";
+var SHARE_LINK_FIELDS = `${DRIVE_ITEM_FIELDS},@microsoft.graph.downloadUrl`;
 var INVALID_GRAPH_RESPONSE_MESSAGE5 = "Invalid Microsoft Graph response.";
 var INVALID_BASE64_MESSAGE = "Invalid base64 content.";
 var FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
 var MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+var MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024;
+var OVERSIZE_DOWNLOAD_MESSAGE = "File too large. Maximum download size is 4MB.";
+var BINARY_NOTE = "Binary file \u2014 use the downloadUrl to access content.";
 var MAX_STANDARD_BASE64_LENGTH = 4 * Math.ceil(MAX_UPLOAD_BYTES / 3);
 var TEXT_MIME_PREFIXES = [
   "text/",
@@ -36753,25 +36790,27 @@ function registerFilesTools(server, dependencies) {
     server,
     "graph_list_files",
     {
-      description: `List files and folders in OneDrive.
+      description: `List files and folders in OneDrive or a SharePoint document library.
 
 Args:
     folder_id: Folder ID to list contents of. Empty for root folder.
     top: Maximum number of items to return (default 25).
 ${COMPACT_ARGS_DOC}
 ${SKIP_ARGS_DOC}
-${PAGING_ARGS_DOC}`,
+${PAGING_ARGS_DOC}
+${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         folder_id: OPTIONAL_RESOURCE_ID_SCHEMA4,
         top: TOP_SCHEMA4,
         compact: COMPACT_SCHEMA,
         skip: SKIP_SCHEMA,
         next_link: NEXT_LINK_SCHEMA,
-        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
       }
     },
-    async ({ folder_id, top, compact, skip, next_link, include_next_link }) => {
-      const path2 = folder_id === "" ? "/me/drive/root/children" : `/me/drive/items/${encodeURIComponent(folder_id)}/children`;
+    async ({ folder_id, top, compact, skip, next_link, include_next_link, drive_id }) => {
+      const path2 = folder_id === "" ? `${driveRoot(drive_id)}/root/children` : `${driveItemPath(drive_id, folder_id)}/children`;
       const result = next_link === "" ? await dependencies.graphClient.get(path2, {
         $select: selectFields(DRIVE_ITEM_FIELDS, DRIVE_ITEM_COMPACT_FIELDS, compact),
         $top: String(Math.min(top, 50)),
@@ -36784,7 +36823,7 @@ ${PAGING_ARGS_DOC}`,
     server,
     "graph_search_files",
     {
-      description: `Search for files in OneDrive by name or content.
+      description: `Search for files by name or content in OneDrive or a SharePoint document library.
 
 Graph rejects $skip on the search function, so page with next_link instead.
 
@@ -36792,18 +36831,20 @@ Args:
     query: Search query string.
     top: Maximum number of results (default 25).
 ${COMPACT_ARGS_DOC}
-${PAGING_ARGS_DOC}`,
+${PAGING_ARGS_DOC}
+${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         query: external_exports.string(),
         top: TOP_SCHEMA4,
         compact: COMPACT_SCHEMA,
         next_link: NEXT_LINK_SCHEMA,
-        include_next_link: INCLUDE_NEXT_LINK_SCHEMA
+        include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
       }
     },
-    async ({ query, top, compact, next_link, include_next_link }) => {
+    async ({ query, top, compact, next_link, include_next_link, drive_id }) => {
       const result = next_link === "" ? await dependencies.graphClient.get(
-        `/me/drive/root/search(q='${encodeSearchQuery(query)}')`,
+        `${driveRoot(drive_id)}/root/search(q='${encodeSearchQuery(query)}')`,
         {
           $select: selectFields(DRIVE_ITEM_FIELDS, DRIVE_ITEM_COMPACT_FIELDS, compact),
           $top: String(Math.min(top, 25))
@@ -36816,20 +36857,23 @@ ${PAGING_ARGS_DOC}`,
     server,
     "graph_get_file_content",
     {
-      description: `Get the content of a file from OneDrive.
+      description: `Get the content of a file from OneDrive or a SharePoint document library.
 
 For text-based files (txt, csv, json, etc.), returns the file content
-directly. For binary files (images, docx, pdf, etc.), returns a
-temporary download URL instead.
+directly. For binary files (images, docx, pdf, etc.), returns a temporary
+download URL instead. Use graph_get_file_bytes when you have no way to
+fetch that URL yourself.
 
 Args:
-    file_id: The file ID (from graph_list_files or graph_search_files).`,
+    file_id: The file ID (from graph_list_files or graph_search_files).
+${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
-        file_id: RESOURCE_ID_SCHEMA4
+        file_id: RESOURCE_ID_SCHEMA4,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
       }
     },
-    async ({ file_id }) => {
-      const path2 = `/me/drive/items/${encodeURIComponent(file_id)}`;
+    async ({ file_id, drive_id }) => {
+      const path2 = driveItemPath(drive_id, file_id);
       const metadata = requireGraphObject4(
         await dependencies.graphClient.get(path2, { $select: FILE_METADATA_FIELDS })
       );
@@ -36841,7 +36885,7 @@ Args:
           mimeType,
           size: optionalPythonValue(metadata, "size"),
           downloadUrl: downloadUrlFrom(metadata),
-          note: "Binary file \u2014 use the downloadUrl to access content."
+          note: BINARY_NOTE
         });
       }
       const content = requireGraphString(await dependencies.graphClient.get(`${path2}/content`));
@@ -36849,6 +36893,46 @@ Args:
         name: optionalPythonValue(metadata, "name"),
         mimeType,
         content
+      });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_file_bytes",
+    {
+      description: `Download a file as base64-encoded bytes (max 4MB).
+
+Use this for a binary file when you cannot fetch the downloadUrl that
+graph_get_file_content hands back. The bytes are returned in the
+'contentBytes' field. Larger files are rejected, so use the downloadUrl
+for those.
+
+Args:
+    file_id: The file ID (from graph_list_files or graph_search_files).
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        file_id: RESOURCE_ID_SCHEMA4,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA4
+      }
+    },
+    async ({ file_id, drive_id }) => {
+      const path2 = driveItemPath(drive_id, file_id);
+      const metadata = requireGraphObject4(
+        await dependencies.graphClient.get(path2, { $select: FILE_METADATA_FIELDS })
+      );
+      const declaredSize = metadata.size;
+      if (typeof declaredSize === "number" && declaredSize > MAX_DOWNLOAD_BYTES) {
+        return successResponse({ error: OVERSIZE_DOWNLOAD_MESSAGE }, "error");
+      }
+      const bytes = await dependencies.graphClient.getBytes(`${path2}/content`);
+      if (bytes.byteLength > MAX_DOWNLOAD_BYTES) {
+        return successResponse({ error: OVERSIZE_DOWNLOAD_MESSAGE }, "error");
+      }
+      return successResponse({
+        name: optionalPythonValue(metadata, "name"),
+        mimeType: mimeTypeFrom(metadata),
+        size: bytes.byteLength,
+        contentBytes: Buffer.from(bytes).toString("base64")
       });
     }
   );
@@ -36992,8 +37076,9 @@ Args:
     {
       description: `List files other people have shared with the user.
 
-Only $top is passed because sharedWithMe does not support $select or $skip
-reliably, so page with next_link instead.
+Teams chat attachments do not show up here, so use graph_resolve_share_link on
+the attachment contentUrl instead. Only $top is passed because sharedWithMe does
+not support $select or $skip reliably, so page with next_link instead.
 
 Args:
     top: Maximum number of items to return (default 25).
@@ -37229,6 +37314,10 @@ ${PAGING_ARGS_DOC}`,
     {
       description: `Resolve a sharing link to the file or folder it points to.
 
+The response carries a short-lived '@microsoft.graph.downloadUrl' that needs no
+Authorization header, plus the 'parentReference.driveId' to pass as drive_id to
+the other file tools.
+
 Args:
     share_url: The sharing URL to resolve.`,
       inputSchema: {
@@ -37238,7 +37327,7 @@ Args:
     async ({ share_url }) => {
       const result = await dependencies.graphClient.get(
         `/shares/${encodeSharingUrl(share_url)}/driveItem`,
-        { $select: DRIVE_ITEM_FIELDS }
+        { $select: SHARE_LINK_FIELDS }
       );
       return successResponse(requireGraphObject4(result));
     }
@@ -39825,9 +39914,10 @@ Args:
     {
       description: `Get the SharePoint folder that stores a channel's files.
 
-This is the bridge from a channel to its SharePoint folder: the returned
-folder ID works with the OneDrive file tools. Needs the Files.Read.All
-permission.
+This is the bridge from a channel to its SharePoint folder. Pass the returned
+folder ID together with its 'parentReference.driveId' as drive_id to the OneDrive
+file tools, which need both to reach a drive other than your own. Needs the
+Files.Read.All permission.
 
 Args:
     team_id: The team ID (from graph_list_teams).
@@ -40125,7 +40215,7 @@ async function createServer2(dependencies) {
     ownedAuthManager = defaults.authManager;
   }
   const server = new McpServer(
-    { name: "Graph MCP", version: "0.8.1" },
+    { name: "Graph MCP", version: "0.9.0" },
     { instructions: SERVER_INSTRUCTIONS }
   );
   registerAllTools(server, resolvedDependencies);
@@ -40162,7 +40252,7 @@ async function createServer2(dependencies) {
 }
 
 // src/cli.ts
-var VERSION = "0.8.1";
+var VERSION = "0.9.0";
 var PROTOCOL_ERROR_MESSAGE = "Graph MCP protocol error.";
 var HELP = `Graph MCP ${VERSION}
 

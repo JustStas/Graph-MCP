@@ -24,7 +24,7 @@ interface RecordedRegistration {
 }
 
 interface GraphCall {
-  readonly method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  readonly method: "GET" | "GET_BYTES" | "POST" | "PATCH" | "PUT" | "DELETE";
   readonly path: string;
   readonly params?: unknown;
   readonly body?: unknown;
@@ -49,12 +49,15 @@ interface ToolHarness {
 const FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
 const BINARY_NOTE = "Binary file — use the downloadUrl to access content.";
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024;
+const OVERSIZE_DOWNLOAD_MESSAGE = "File too large. Maximum download size is 4MB.";
 const MAX_STANDARD_BASE64_LENGTH = 4 * Math.ceil(MAX_UPLOAD_BYTES / 3);
+const SHARE_LINK_FIELDS = `${DRIVE_ITEM_FIELDS},@microsoft.graph.downloadUrl`;
 
 const EXPECTED_FILE_TOOLS = [
   {
     name: "graph_list_files",
-    description: `List files and folders in OneDrive.
+    description: `List files and folders in OneDrive or a SharePoint document library.
 
 Args:
     folder_id: Folder ID to list contents of. Empty for root folder.
@@ -66,11 +69,12 @@ Args:
     next_link: Opaque nextLink URL from a previous call, used to fetch the next
         page. Overrides the other paging arguments when supplied.
     include_next_link: Whether to wrap the result as {items, next_link} so paging
-        can continue (default false, which returns a bare list).`,
+        can continue (default false, which returns a bare list).
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
   },
   {
     name: "graph_search_files",
-    description: `Search for files in OneDrive by name or content.
+    description: `Search for files by name or content in OneDrive or a SharePoint document library.
 
 Graph rejects $skip on the search function, so page with next_link instead.
 
@@ -82,18 +86,34 @@ Args:
     next_link: Opaque nextLink URL from a previous call, used to fetch the next
         page. Overrides the other paging arguments when supplied.
     include_next_link: Whether to wrap the result as {items, next_link} so paging
-        can continue (default false, which returns a bare list).`,
+        can continue (default false, which returns a bare list).
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
   },
   {
     name: "graph_get_file_content",
-    description: `Get the content of a file from OneDrive.
+    description: `Get the content of a file from OneDrive or a SharePoint document library.
 
 For text-based files (txt, csv, json, etc.), returns the file content
-directly. For binary files (images, docx, pdf, etc.), returns a
-temporary download URL instead.
+directly. For binary files (images, docx, pdf, etc.), returns a temporary
+download URL instead. Use graph_get_file_bytes when you have no way to
+fetch that URL yourself.
 
 Args:
-    file_id: The file ID (from graph_list_files or graph_search_files).`,
+    file_id: The file ID (from graph_list_files or graph_search_files).
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
+  },
+  {
+    name: "graph_get_file_bytes",
+    description: `Download a file as base64-encoded bytes (max 4MB).
+
+Use this for a binary file when you cannot fetch the downloadUrl that
+graph_get_file_content hands back. The bytes are returned in the
+'contentBytes' field. Larger files are rejected, so use the downloadUrl
+for those.
+
+Args:
+    file_id: The file ID (from graph_list_files or graph_search_files).
+    drive_id: Drive ID to act on. Empty targets your own OneDrive.`,
   },
   {
     name: "graph_upload_file",
@@ -144,8 +164,9 @@ Args:
     name: "graph_list_shared_files",
     description: `List files other people have shared with the user.
 
-Only $top is passed because sharedWithMe does not support $select or $skip
-reliably, so page with next_link instead.
+Teams chat attachments do not show up here, so use graph_resolve_share_link on
+the attachment contentUrl instead. Only $top is passed because sharedWithMe does
+not support $select or $skip reliably, so page with next_link instead.
 
 Args:
     top: Maximum number of items to return (default 25).
@@ -249,6 +270,10 @@ Args:
   {
     name: "graph_resolve_share_link",
     description: `Resolve a sharing link to the file or folder it points to.
+
+The response carries a short-lived '@microsoft.graph.downloadUrl' that needs no
+Authorization header, plus the 'parentReference.driveId' to pass as drive_id to
+the other file tools.
 
 Args:
     share_url: The sharing URL to resolve.`,
@@ -370,6 +395,19 @@ function createGraphFake(initialResponses: readonly unknown[] = []): GraphFake {
         ...(headers === undefined ? {} : { headers }),
       });
       return Promise.resolve(nextGraphResponse(responses));
+    },
+    getBytes: (path, params, headers) => {
+      calls.push({
+        method: "GET_BYTES",
+        path,
+        ...(params === undefined ? {} : { params }),
+        ...(headers === undefined ? {} : { headers }),
+      });
+      const response = nextGraphResponse(responses);
+      if (!(response instanceof Uint8Array)) {
+        throw new Error("Expected a fake byte response.");
+      }
+      return Promise.resolve(response);
     },
     post: (path, body, params, headers) => {
       calls.push({
@@ -552,6 +590,7 @@ describe("file tool registration", () => {
       "skip",
       "next_link",
       "include_next_link",
+      "drive_id",
     ]);
     const listSchema = z.object(listShape);
     expect(listSchema.parse({})).toEqual({
@@ -561,6 +600,7 @@ describe("file tool registration", () => {
       skip: 0,
       next_link: "",
       include_next_link: false,
+      drive_id: "",
     });
     expect(listSchema.safeParse({ top: 1.5 }).success).toBe(false);
     expect(listSchema.safeParse({ top: -1 }).success).toBe(true);
@@ -573,6 +613,7 @@ describe("file tool registration", () => {
       "compact",
       "next_link",
       "include_next_link",
+      "drive_id",
     ]);
     const searchSchema = z.object(searchShape);
     expect(searchSchema.parse({ query: "planning" })).toEqual({
@@ -581,13 +622,26 @@ describe("file tool registration", () => {
       compact: false,
       next_link: "",
       include_next_link: false,
+      drive_id: "",
     });
     expect(searchSchema.safeParse({}).success).toBe(false);
     expect(searchSchema.safeParse({ query: "planning", top: 2.5 }).success).toBe(false);
 
     const contentShape = schemaFor(harness, "graph_get_file_content");
-    expect(Object.keys(contentShape)).toEqual(["file_id"]);
+    expect(Object.keys(contentShape)).toEqual(["file_id", "drive_id"]);
+    expect(z.object(contentShape).parse({ file_id: "file-1" })).toEqual({
+      file_id: "file-1",
+      drive_id: "",
+    });
     expect(z.object(contentShape).safeParse({}).success).toBe(false);
+
+    const bytesShape = schemaFor(harness, "graph_get_file_bytes");
+    expect(Object.keys(bytesShape)).toEqual(["file_id", "drive_id"]);
+    expect(z.object(bytesShape).parse({ file_id: "file-1" })).toEqual({
+      file_id: "file-1",
+      drive_id: "",
+    });
+    expect(z.object(bytesShape).safeParse({}).success).toBe(false);
 
     const uploadShape = schemaFor(harness, "graph_upload_file");
     expect(Object.keys(uploadShape)).toEqual(["file_path", "content_base64"]);
@@ -829,6 +883,133 @@ describe("OneDrive file content routing", () => {
 
       expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
       expect(graph.calls).toHaveLength(2);
+      expect(JSON.stringify(result)).not.toContain("payload-secret");
+      expect(JSON.stringify(result)).not.toContain("TypeError");
+    },
+  );
+});
+
+const OVERSIZE_DOWNLOAD_RESULT: CallToolResult = {
+  content: [
+    {
+      type: "text",
+      text: JSON.stringify({ data: { error: OVERSIZE_DOWNLOAD_MESSAGE }, message: "error" }),
+    },
+  ],
+};
+
+describe("OneDrive file bytes", () => {
+  test("returns base64 bytes with the measured size from the exact encoded paths", async () => {
+    const fileId = "../file/path\\name#fragment?query=:value%";
+    const metadata = {
+      id: fileId,
+      name: "report.pdf",
+      size: 3,
+      file: { mimeType: "application/pdf" },
+    };
+    const bytes = new Uint8Array([0x00, 0x01, 0xfd]);
+    const { harness, graph } = registerFilesHarness([metadata, bytes]);
+
+    expect(dataFrom(await harness.invoke("graph_get_file_bytes", { file_id: fileId }))).toEqual({
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      size: 3,
+      contentBytes: "AAH9",
+    });
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/me/drive/items/${encodeURIComponent(fileId)}`,
+        params: { $select: FILE_METADATA_FIELDS },
+      },
+      {
+        method: "GET_BYTES",
+        path: `/me/drive/items/${encodeURIComponent(fileId)}/content`,
+      },
+    ]);
+  });
+
+  test("reads bytes from an explicit drive", async () => {
+    const bytes = new Uint8Array([0x61]);
+    const { harness, graph } = registerFilesHarness([{ name: "a.bin" }, bytes]);
+
+    await harness.invoke("graph_get_file_bytes", {
+      file_id: ENCODED_ITEM_ID,
+      drive_id: OTHER_DRIVE_ID,
+    });
+
+    const itemPath = `/drives/${encodeURIComponent(OTHER_DRIVE_ID)}/items/${encodeURIComponent(
+      ENCODED_ITEM_ID,
+    )}`;
+    expect(graph.calls.map((call) => [call.method, call.path])).toEqual([
+      ["GET", itemPath],
+      ["GET_BYTES", `${itemPath}/content`],
+    ]);
+  });
+
+  test("reports the measured size even when the metadata size disagrees", async () => {
+    const bytes = new Uint8Array([0x61, 0x62]);
+    const { harness } = registerFilesHarness([{ name: "a.bin", size: 99 }, bytes]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_get_file_bytes", { file_id: "file-1" })),
+    ).toMatchObject({ size: 2, contentBytes: "YWI=" });
+  });
+
+  test("preserves Python missing-field defaults", async () => {
+    const { harness } = registerFilesHarness([{}, new Uint8Array()]);
+
+    expect(dataFrom(await harness.invoke("graph_get_file_bytes", { file_id: "file-1" }))).toEqual({
+      name: null,
+      mimeType: "",
+      size: 0,
+      contentBytes: "",
+    });
+  });
+
+  test("rejects an oversize declared length without fetching bytes", async () => {
+    const { harness, graph } = registerFilesHarness([
+      { name: "large.bin", size: MAX_DOWNLOAD_BYTES + 1 },
+    ]);
+
+    expect(await harness.invoke("graph_get_file_bytes", { file_id: "file-1" })).toEqual(
+      OVERSIZE_DOWNLOAD_RESULT,
+    );
+    expect(graph.calls).toHaveLength(1);
+  });
+
+  test("accepts a declared length at the limit", async () => {
+    const { harness, graph } = registerFilesHarness([
+      { name: "limit.bin", size: MAX_DOWNLOAD_BYTES },
+      new Uint8Array([0x61]),
+    ]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_get_file_bytes", { file_id: "file-1" })),
+    ).toMatchObject({ size: 1 });
+    expect(graph.calls).toHaveLength(2);
+  });
+
+  test("rejects bytes that exceed the limit once measured", async () => {
+    const { harness, graph } = registerFilesHarness([
+      { name: "large.bin" },
+      new Uint8Array(MAX_DOWNLOAD_BYTES + 1),
+    ]);
+
+    expect(await harness.invoke("graph_get_file_bytes", { file_id: "file-1" })).toEqual(
+      OVERSIZE_DOWNLOAD_RESULT,
+    );
+    expect(graph.calls).toHaveLength(2);
+  });
+
+  test.each([null, [], "payload-secret", 42])(
+    "rejects malformed metadata %# without fetching bytes",
+    async (response) => {
+      const { harness, graph } = registerFilesHarness([response]);
+      const result = await harness.invoke("graph_get_file_bytes", { file_id: "file-1" });
+
+      expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
+      expect(graph.calls).toHaveLength(1);
       expect(JSON.stringify(result)).not.toContain("payload-secret");
       expect(JSON.stringify(result)).not.toContain("TypeError");
     },
@@ -1310,6 +1491,7 @@ describe("file authenticated wrapper errors", () => {
     { name: "graph_list_files", args: {} },
     { name: "graph_search_files", args: { query: "planning" } },
     { name: "graph_get_file_content", args: { file_id: "file-1" } },
+    { name: "graph_get_file_bytes", args: { file_id: "file-1" } },
     {
       name: "graph_upload_file",
       args: { file_path: "report.txt", content_base64: "SGVsbG8=" },
@@ -1358,6 +1540,13 @@ interface DriveRoutingCase {
 }
 
 const DRIVE_ROUTING_CASES: readonly DriveRoutingCase[] = [
+  {
+    name: "graph_get_file_content",
+    args: { file_id: ENCODED_ITEM_ID },
+    method: "GET",
+    suffix: "",
+    response: { file: { mimeType: "application/pdf" } },
+  },
   {
     name: "graph_copy_file",
     args: { item_id: ENCODED_ITEM_ID, new_name: "copy.txt" },
@@ -1428,6 +1617,14 @@ const DRIVE_ROUTING_CASES: readonly DriveRoutingCase[] = [
   },
 ];
 
+/** Tools reached by a drive root or a second Graph call still take the same drive_id argument. */
+const DRIVE_ID_TOOL_NAMES: readonly string[] = [
+  ...DRIVE_ROUTING_CASES.map((routingCase) => routingCase.name),
+  "graph_list_files",
+  "graph_search_files",
+  "graph_get_file_bytes",
+];
+
 describe("drive_id routing", () => {
   test.each(DRIVE_ROUTING_CASES)(
     "$name targets the default drive with an encoded item ID",
@@ -1461,7 +1658,7 @@ describe("drive_id routing", () => {
     },
   );
 
-  test.each(DRIVE_ROUTING_CASES)("$name rejects sentinel drive IDs", ({ name }) => {
+  test.each(DRIVE_ID_TOOL_NAMES)("%s rejects sentinel drive IDs", (name) => {
     const { harness } = registerFilesHarness();
     const schema = z.object(schemaFor(harness, name));
     for (const driveId of [".", ".."]) {
@@ -1469,9 +1666,34 @@ describe("drive_id routing", () => {
     }
   });
 
-  test.each(DRIVE_ROUTING_CASES)("$name keeps drive_id as its last argument", ({ name }) => {
+  test.each(DRIVE_ID_TOOL_NAMES)("%s keeps drive_id as its last argument", (name) => {
     const { harness } = registerFilesHarness();
     expect(Object.keys(schemaFor(harness, name)).at(-1)).toBe("drive_id");
+  });
+
+  test.each([
+    {
+      name: "graph_list_files",
+      args: {},
+      suffix: "/root/children",
+      response: { value: [] },
+    },
+    {
+      name: "graph_search_files",
+      args: { query: "plan's" },
+      suffix: `/root/search(q='plan''s')`,
+      response: { value: [] },
+    },
+  ])("$name reaches the drive root", async ({ name, args, suffix, response }) => {
+    const own = registerFilesHarness([response]);
+    await own.harness.invoke(name, args);
+    expect(own.graph.calls[0]?.path).toBe(`/me/drive${suffix}`);
+
+    const other = registerFilesHarness([response]);
+    await other.harness.invoke(name, { ...args, drive_id: OTHER_DRIVE_ID });
+    expect(other.graph.calls[0]?.path).toBe(
+      `/drives/${encodeURIComponent(OTHER_DRIVE_ID)}${suffix}`,
+    );
   });
 
   test.each(["graph_list_recent_files", "graph_list_drives", "graph_search_sites"])(
@@ -1779,7 +2001,7 @@ describe("share link resolution", () => {
       {
         method: "GET",
         path: `/shares/${encoded}/driveItem`,
-        params: { $select: DRIVE_ITEM_FIELDS },
+        params: { $select: SHARE_LINK_FIELDS },
       },
     ]);
     expect(encoded.startsWith("u!")).toBe(true);
@@ -1791,6 +2013,24 @@ describe("share link resolution", () => {
         .replace(/=+$/, "")}`,
     );
     expect(encoded.slice(2)).not.toMatch(/[+/=]/);
+  });
+
+  test("selects the download URL alongside the drive ID needed to reach the item", async () => {
+    const item = {
+      id: "file-1",
+      name: "design.docx",
+      parentReference: { driveId: "b!other-drive" },
+      "@microsoft.graph.downloadUrl": "https://contoso.sharepoint.com/download?token=abc",
+    };
+    const { harness, graph } = registerFilesHarness([item]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_resolve_share_link", { share_url: "https://a.example/s" }),
+      ),
+    ).toEqual(item);
+    expect(graph.calls[0]?.params).toEqual({ $select: SHARE_LINK_FIELDS });
+    expect(SHARE_LINK_FIELDS.endsWith(",@microsoft.graph.downloadUrl")).toBe(true);
   });
 
   test("exposes exact share link schema keys", () => {

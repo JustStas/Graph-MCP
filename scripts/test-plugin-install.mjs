@@ -121,6 +121,7 @@ const expectedToolNames = [
   "graph_get_chat",
   "graph_get_chat_messages",
   "graph_get_event",
+  "graph_get_file_bytes",
   "graph_get_file_content",
   "graph_get_mail_attachment",
   "graph_get_mail_delta",
@@ -850,14 +851,14 @@ async function runMcpSmoke({ label, pluginRoot, server, environment }) {
       requireRecord(tool, `${label} MCP tool`),
     );
     const serverVersion = client.getServerVersion();
-    if (serverVersion?.version !== "0.8.1" || serverVersion.name !== "Graph MCP") {
-      throw new Error(`${label} MCP server version was not Graph MCP 0.8.1.`);
+    if (serverVersion?.version !== "0.9.0" || serverVersion.name !== "Graph MCP") {
+      throw new Error(`${label} MCP server version was not Graph MCP 0.9.0.`);
     }
     const actualNames = tools
       .map((tool) => requireString(tool.name, "tool name", `${label} MCP tools/list`))
       .sort();
     const names = [...expectedToolNames].sort();
-    if (actualNames.length !== 125 || actualNames.some((name, index) => name !== names[index])) {
+    if (actualNames.length !== 126 || actualNames.some((name, index) => name !== names[index])) {
       throw new Error(`${label} MCP tools mismatch: got ${actualNames.length} names.`);
     }
     result = {
@@ -1099,7 +1100,7 @@ async function main() {
       process.stdout.write(
         `CLAUDE_PLUGIN_INSTALL_PATH ${await relativeToTempRoot(tempRoot, claudeInstalled.installedPluginRoot)}\n`,
       );
-      process.stdout.write("CLAUDE_PLUGIN_INSTALL_OK 125\n");
+      process.stdout.write("CLAUDE_PLUGIN_INSTALL_OK 126\n");
 
       const codexEnvironment = environmentFor({ home, claudeConfigDir, codexHome, tempRoot });
       const expectedCodexInstall = join(
@@ -1187,7 +1188,7 @@ async function main() {
       process.stdout.write(
         `CODEX_PLUGIN_INSTALL_PATH ${await relativeToTempRoot(tempRoot, codexInstalled.installedPluginRoot)}\n`,
       );
-      process.stdout.write("CODEX_PLUGIN_INSTALL_OK 125\n");
+      process.stdout.write("CODEX_PLUGIN_INSTALL_OK 126\n");
     });
   });
 }

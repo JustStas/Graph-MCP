@@ -45,6 +45,7 @@ export const EXPECTED_TOOL_NAMES = [
   "graph_get_chat",
   "graph_get_chat_messages",
   "graph_get_event",
+  "graph_get_file_bytes",
   "graph_get_file_content",
   "graph_get_mail_attachment",
   "graph_get_mail_delta",
@@ -145,6 +146,7 @@ function createDependencies(): ToolDependencies {
     },
     graphClient: {
       get: () => Promise.resolve({}),
+      getBytes: () => Promise.resolve(new Uint8Array()),
       post: () => Promise.resolve({}),
       patch: () => Promise.resolve({}),
       put: () => Promise.resolve({}),
@@ -174,7 +176,7 @@ function requireSchemaProperty(tool: Tool, propertyName: string): Record<string,
 }
 
 describe("Graph MCP tool contract", () => {
-  test("exposes the exact 125-tool inventory and representative input schemas", async () => {
+  test("exposes the exact 126-tool inventory and representative input schemas", async () => {
     const server = await createServer(createDependencies());
     const client = new Client({ name: "tool-contract-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -183,14 +185,14 @@ describe("Graph MCP tool contract", () => {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
 
-      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.8.1" });
+      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.9.0" });
       expect(client.getInstructions()).toBe(
         "Microsoft Teams, Outlook Calendar, Mail, meetings, users, presence, and OneDrive integration via Microsoft Graph API",
       );
 
       const result = await client.listTools();
       expect(result.tools.map((tool) => tool.name).sort()).toEqual(EXPECTED_TOOL_NAMES);
-      expect(result.tools).toHaveLength(125);
+      expect(result.tools).toHaveLength(126);
 
       expect(requireTool(result.tools, "graph_get_profile").inputSchema).toMatchObject({
         type: "object",

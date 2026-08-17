@@ -59,6 +59,7 @@ function createDependencies(): ToolDependencies {
     },
     graphClient: {
       get: () => Promise.resolve({ method: "GET" }),
+      getBytes: () => Promise.resolve(new Uint8Array()),
       post: () => Promise.resolve({ method: "POST" }),
       patch: () => Promise.resolve({ method: "PATCH" }),
       put: () => Promise.resolve({ method: "PUT" }),
@@ -115,6 +116,7 @@ describe("tool contracts", () => {
     expect(Object.keys(dependencies.graphClient).sort()).toEqual([
       "delete",
       "get",
+      "getBytes",
       "patch",
       "post",
       "put",

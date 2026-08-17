@@ -2,15 +2,29 @@
 
 All notable changes to Graph MCP are documented in this file.
 
-## Unreleased
+## 0.9.0 - 2026-08-17
+
+### Added
+
+- `graph_get_file_bytes` downloads a file as base64-encoded bytes in a `contentBytes` field,
+  capped at 4MB, the same shape `graph_get_mail_attachment` already used. `graph_get_file_content`
+  only ever hands back a `downloadUrl` for a binary file, so a host without an HTTP fetch tool
+  could not read a PDF at all.
 
 ### Changed
 
+- `graph_get_file_content`, `graph_get_file_bytes`, `graph_list_files`, and `graph_search_files`
+  take an optional `drive_id`, so they reach SharePoint document libraries and other people's
+  OneDrive instead of only `/me/drive`. A Teams channel file or a shared attachment previously
+  returned 404, because a driveItem ID only resolves under the drive that owns it.
+- `graph_get_channel_files_folder`, `graph_list_shared_files`, and `graph_resolve_share_link`
+  now say how to carry `parentReference.driveId` into the file tools, and that Teams chat
+  attachments never appear in `sharedWithMe`. The channel-folder description previously steered
+  callers straight into the 404 above.
 - Removed `docs/superpowers/` from version control and ignored it. Those six plan and design
   documents were point-in-time internal notes totalling 240KB, referenced by nothing in the
   build, tests, or runtime, and already contradicted by later releases. They remain in git
   history.
-
 - Install documentation now uses the GitHub marketplace for Codex as well as Claude Code.
   `codex plugin marketplace add` accepts `owner/repo[@ref]` and Git URLs, so requiring a local
   clone was never necessary; both host sections keep the local path as the plugin-development
@@ -19,10 +33,14 @@ All notable changes to Graph MCP are documented in this file.
   mail, cancel meetings, edit and delete Teams messages, change presence and automatic replies,
   and create, move, and delete files — so the consent prompt is not misleading. The previous
   wording dated from the 44-tool release.
-- The bundled plugin README said "exactly 44 tools" and now says 125.
+- The bundled plugin README said "exactly 44 tools" and now says 126.
 
 ### Fixed
 
+- `graph_resolve_share_link` now returns `@microsoft.graph.downloadUrl`. Graph omits that
+  property unless an explicit `$select` asks for it, and the tool's `$select` did not, so the
+  one tool whose job is turning a sharing link into something readable withheld the only field
+  that made the target readable.
 - The release helper now retries the post-publish registry readback six times with exponential
   backoff, capped at 30 seconds, instead of three times one second apart. npm's registry is
   eventually consistent, so a successful publish routinely became visible after the old
