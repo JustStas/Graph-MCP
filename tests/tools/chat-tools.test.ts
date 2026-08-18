@@ -256,6 +256,7 @@ function createGraphFake(initialResponses: readonly unknown[] = []): GraphFake {
       });
       return responsePromise(readResponse);
     },
+    getBytes: () => Promise.reject(new Error("These tools never read raw bytes.")),
     post: (path, body, params, headers) => {
       calls.push({
         method: "POST",

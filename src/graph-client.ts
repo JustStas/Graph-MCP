@@ -59,6 +59,17 @@ export class GraphClient {
     return this.#request("GET", path, params, undefined, headers);
   }
 
+  /** Reads a response as raw bytes, so binary downloads survive without UTF-8 decoding. */
+  getBytes(
+    path: string,
+    params?: GraphQueryParameters,
+    headers?: HeadersInit,
+  ): Promise<Uint8Array> {
+    return this.#send("GET", path, params, undefined, headers, undefined, (response, signal) =>
+      this.#readResponseBytes(response, signal),
+    );
+  }
+
   post(
     path: string,
     jsonBody?: unknown,
@@ -85,7 +96,7 @@ export class GraphClient {
     return this.#request("DELETE", path, undefined, undefined, headers);
   }
 
-  async #request(
+  #request(
     method: string,
     path: string,
     params?: GraphQueryParameters,
@@ -93,6 +104,26 @@ export class GraphClient {
     callerHeaders?: HeadersInit,
     binaryBody?: Uint8Array,
   ): Promise<unknown> {
+    return this.#send(
+      method,
+      path,
+      params,
+      jsonBody,
+      callerHeaders,
+      binaryBody,
+      (response, signal) => this.#parseSuccessfulResponse(response, signal),
+    );
+  }
+
+  async #send<Result>(
+    method: string,
+    path: string,
+    params: GraphQueryParameters | undefined,
+    jsonBody: unknown,
+    callerHeaders: HeadersInit | undefined,
+    binaryBody: Uint8Array | undefined,
+    readResponse: (response: Response, signal: AbortSignal) => Promise<Result>,
+  ): Promise<Result> {
     const url = this.#buildUrl(path, params);
     await this.#rateLimiter.acquire();
 
@@ -147,7 +178,7 @@ export class GraphClient {
         throw await this.#graphApiError(response, signal);
       }
 
-      const result = await this.#parseSuccessfulResponse(response, signal);
+      const result = await readResponse(response, signal);
       this.#rateLimiter.resetBackoff();
       return result;
     }
@@ -238,6 +269,17 @@ export class GraphClient {
   async #readResponseText(response: Response, signal: AbortSignal): Promise<string> {
     try {
       return await response.text();
+    } catch {
+      throw this.#requestFailure(signal);
+    }
+  }
+
+  async #readResponseBytes(response: Response, signal: AbortSignal): Promise<Uint8Array> {
+    if (response.status === 204) {
+      return new Uint8Array();
+    }
+    try {
+      return new Uint8Array(await response.arrayBuffer());
     } catch {
       throw this.#requestFailure(signal);
     }

@@ -390,9 +390,10 @@ Args:
     {
       description: `Get the SharePoint folder that stores a channel's files.
 
-This is the bridge from a channel to its SharePoint folder: the returned
-folder ID works with the OneDrive file tools. Needs the Files.Read.All
-permission.
+This is the bridge from a channel to its SharePoint folder. Pass the returned
+folder ID together with its 'parentReference.driveId' as drive_id to the OneDrive
+file tools, which need both to reach a drive other than your own. Needs the
+Files.Read.All permission.
 
 Args:
     team_id: The team ID (from graph_list_teams).

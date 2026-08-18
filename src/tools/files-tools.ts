@@ -20,10 +20,22 @@ import { registerAuthenticatedTool, type ToolDependencies } from "./tool-types.j
 export const DRIVE_ITEM_FIELDS =
   "id,name,size,createdDateTime,lastModifiedDateTime,file,folder,webUrl,parentReference";
 
+/**
+ * Graph drops `@microsoft.graph.downloadUrl` from a response as soon as an explicit `$select`
+ * is present, and naming the annotation in the `$select` does not bring it back. The annotation
+ * belongs to the `content` stream property, so `content.downloadUrl` is what selects it.
+ */
+export const DOWNLOAD_URL_FIELD = "content.downloadUrl";
+
+export const SHARE_LINK_FIELDS = `${DRIVE_ITEM_FIELDS},${DOWNLOAD_URL_FIELD}`;
+
 const INVALID_GRAPH_RESPONSE_MESSAGE = "Invalid Microsoft Graph response.";
 const INVALID_BASE64_MESSAGE = "Invalid base64 content.";
-const FILE_METADATA_FIELDS = "id,name,size,file,@microsoft.graph.downloadUrl";
+const FILE_METADATA_FIELDS = `id,name,size,file,${DOWNLOAD_URL_FIELD}`;
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024;
+const OVERSIZE_DOWNLOAD_MESSAGE = "File too large. Maximum download size is 4MB.";
+const BINARY_NOTE = "Binary file — use the downloadUrl to access content.";
 const MAX_STANDARD_BASE64_LENGTH = 4 * Math.ceil(MAX_UPLOAD_BYTES / 3);
 const TEXT_MIME_PREFIXES = [
   "text/",
@@ -198,14 +210,15 @@ export function registerFilesTools(
     server,
     "graph_list_files",
     {
-      description: `List files and folders in OneDrive.
+      description: `List files and folders in OneDrive or a SharePoint document library.
 
 Args:
     folder_id: Folder ID to list contents of. Empty for root folder.
     top: Maximum number of items to return (default 25).
 ${COMPACT_ARGS_DOC}
 ${SKIP_ARGS_DOC}
-${PAGING_ARGS_DOC}`,
+${PAGING_ARGS_DOC}
+${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         folder_id: OPTIONAL_RESOURCE_ID_SCHEMA,
         top: TOP_SCHEMA,
@@ -213,13 +226,14 @@ ${PAGING_ARGS_DOC}`,
         skip: SKIP_SCHEMA,
         next_link: NEXT_LINK_SCHEMA,
         include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
       },
     },
-    async ({ folder_id, top, compact, skip, next_link, include_next_link }) => {
+    async ({ folder_id, top, compact, skip, next_link, include_next_link, drive_id }) => {
       const path =
         folder_id === ""
-          ? "/me/drive/root/children"
-          : `/me/drive/items/${encodeURIComponent(folder_id)}/children`;
+          ? `${driveRoot(drive_id)}/root/children`
+          : `${driveItemPath(drive_id, folder_id)}/children`;
       const result =
         next_link === ""
           ? await dependencies.graphClient.get(path, {
@@ -236,7 +250,7 @@ ${PAGING_ARGS_DOC}`,
     server,
     "graph_search_files",
     {
-      description: `Search for files in OneDrive by name or content.
+      description: `Search for files by name or content in OneDrive or a SharePoint document library.
 
 Graph rejects $skip on the search function, so page with next_link instead.
 
@@ -244,20 +258,22 @@ Args:
     query: Search query string.
     top: Maximum number of results (default 25).
 ${COMPACT_ARGS_DOC}
-${PAGING_ARGS_DOC}`,
+${PAGING_ARGS_DOC}
+${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         query: z.string(),
         top: TOP_SCHEMA,
         compact: COMPACT_SCHEMA,
         next_link: NEXT_LINK_SCHEMA,
         include_next_link: INCLUDE_NEXT_LINK_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
       },
     },
-    async ({ query, top, compact, next_link, include_next_link }) => {
+    async ({ query, top, compact, next_link, include_next_link, drive_id }) => {
       const result =
         next_link === ""
           ? await dependencies.graphClient.get(
-              `/me/drive/root/search(q='${encodeSearchQuery(query)}')`,
+              `${driveRoot(drive_id)}/root/search(q='${encodeSearchQuery(query)}')`,
               {
                 $select: selectFields(DRIVE_ITEM_FIELDS, DRIVE_ITEM_COMPACT_FIELDS, compact),
                 $top: String(Math.min(top, 25)),
@@ -272,20 +288,23 @@ ${PAGING_ARGS_DOC}`,
     server,
     "graph_get_file_content",
     {
-      description: `Get the content of a file from OneDrive.
+      description: `Get the content of a file from OneDrive or a SharePoint document library.
 
 For text-based files (txt, csv, json, etc.), returns the file content
-directly. For binary files (images, docx, pdf, etc.), returns a
-temporary download URL instead.
+directly. For binary files (images, docx, pdf, etc.), returns a temporary
+download URL instead. Use graph_get_file_bytes when you have no way to
+fetch that URL yourself.
 
 Args:
-    file_id: The file ID (from graph_list_files or graph_search_files).`,
+    file_id: The file ID (from graph_list_files or graph_search_files).
+${DRIVE_ID_ARGS_DOC}`,
       inputSchema: {
         file_id: RESOURCE_ID_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
       },
     },
-    async ({ file_id }) => {
-      const path = `/me/drive/items/${encodeURIComponent(file_id)}`;
+    async ({ file_id, drive_id }) => {
+      const path = driveItemPath(drive_id, file_id);
       const metadata = requireGraphObject(
         await dependencies.graphClient.get(path, { $select: FILE_METADATA_FIELDS }),
       );
@@ -298,7 +317,7 @@ Args:
           mimeType,
           size: optionalPythonValue(metadata, "size"),
           downloadUrl: downloadUrlFrom(metadata),
-          note: "Binary file — use the downloadUrl to access content.",
+          note: BINARY_NOTE,
         });
       }
 
@@ -307,6 +326,49 @@ Args:
         name: optionalPythonValue(metadata, "name"),
         mimeType,
         content,
+      });
+    },
+  );
+
+  registerAuthenticatedTool(
+    server,
+    "graph_get_file_bytes",
+    {
+      description: `Download a file as base64-encoded bytes (max 4MB).
+
+Use this for a binary file when you cannot fetch the downloadUrl that
+graph_get_file_content hands back. The bytes are returned in the
+'contentBytes' field. Larger files are rejected, so use the downloadUrl
+for those.
+
+Args:
+    file_id: The file ID (from graph_list_files or graph_search_files).
+${DRIVE_ID_ARGS_DOC}`,
+      inputSchema: {
+        file_id: RESOURCE_ID_SCHEMA,
+        drive_id: OPTIONAL_RESOURCE_ID_SCHEMA,
+      },
+    },
+    async ({ file_id, drive_id }) => {
+      const path = driveItemPath(drive_id, file_id);
+      const metadata = requireGraphObject(
+        await dependencies.graphClient.get(path, { $select: FILE_METADATA_FIELDS }),
+      );
+      const declaredSize = metadata.size;
+      if (typeof declaredSize === "number" && declaredSize > MAX_DOWNLOAD_BYTES) {
+        return successResponse({ error: OVERSIZE_DOWNLOAD_MESSAGE }, "error");
+      }
+
+      const bytes = await dependencies.graphClient.getBytes(`${path}/content`);
+      if (bytes.byteLength > MAX_DOWNLOAD_BYTES) {
+        return successResponse({ error: OVERSIZE_DOWNLOAD_MESSAGE }, "error");
+      }
+
+      return successResponse({
+        name: optionalPythonValue(metadata, "name"),
+        mimeType: mimeTypeFrom(metadata),
+        size: bytes.byteLength,
+        contentBytes: Buffer.from(bytes).toString("base64"),
       });
     },
   );
@@ -463,8 +525,9 @@ Args:
     {
       description: `List files other people have shared with the user.
 
-Only $top is passed because sharedWithMe does not support $select or $skip
-reliably, so page with next_link instead.
+Teams chat attachments do not show up here, so use graph_resolve_share_link on
+the attachment contentUrl instead. Only $top is passed because sharedWithMe does
+not support $select or $skip reliably, so page with next_link instead.
 
 Args:
     top: Maximum number of items to return (default 25).
@@ -726,6 +789,10 @@ ${PAGING_ARGS_DOC}`,
     {
       description: `Resolve a sharing link to the file or folder it points to.
 
+The response carries a short-lived '@microsoft.graph.downloadUrl' that needs no
+Authorization header, plus the 'parentReference.driveId' to pass as drive_id to
+the other file tools.
+
 Args:
     share_url: The sharing URL to resolve.`,
       inputSchema: {
@@ -735,7 +802,7 @@ Args:
     async ({ share_url }) => {
       const result = await dependencies.graphClient.get(
         `/shares/${encodeSharingUrl(share_url)}/driveItem`,
-        { $select: DRIVE_ITEM_FIELDS },
+        { $select: SHARE_LINK_FIELDS },
       );
       return successResponse(requireGraphObject(result));
     },

@@ -183,6 +183,7 @@ describe("GraphClient", () => {
     harness.fetch.mockResolvedValue(new Response(null, { status: 204 }));
 
     await harness.client.get("/get");
+    await harness.client.getBytes("get-bytes");
     await harness.client.post("post");
     await harness.client.patch("/patch");
     await harness.client.put("put");
@@ -195,13 +196,14 @@ describe("GraphClient", () => {
       })),
     ).toEqual([
       { method: "GET", pathname: "/v1.0/get" },
+      { method: "GET", pathname: "/v1.0/get-bytes" },
       { method: "POST", pathname: "/v1.0/post" },
       { method: "PATCH", pathname: "/v1.0/patch" },
       { method: "PUT", pathname: "/v1.0/put" },
       { method: "DELETE", pathname: "/v1.0/delete" },
     ]);
-    expect(harness.acquire).toHaveBeenCalledTimes(5);
-    expect(harness.resetBackoff).toHaveBeenCalledTimes(5);
+    expect(harness.acquire).toHaveBeenCalledTimes(6);
+    expect(harness.resetBackoff).toHaveBeenCalledTimes(6);
   });
 
   test("merges caller headers without allowing Authorization to be removed or replaced", async () => {
@@ -353,6 +355,55 @@ describe("GraphClient", () => {
     await expect(harness.client.get("/malformed-json")).resolves.toBe(malformedJson);
 
     expect(harness.resetBackoff).toHaveBeenCalledOnce();
+  });
+
+  test("reads bytes without UTF-8 decoding and resets backoff", async () => {
+    const harness = createHarness();
+    const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0xff, 0xfe, 0x00]);
+    harness.fetch.mockResolvedValue(
+      new Response(pdfBytes, { status: 200, headers: { "Content-Type": "application/pdf" } }),
+    );
+
+    const bytes = await harness.client.getBytes("/items/1/content");
+
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(Array.from(bytes)).toEqual([0x25, 0x50, 0x44, 0x46, 0xff, 0xfe, 0x00]);
+    expect(harness.resetBackoff).toHaveBeenCalledOnce();
+  });
+
+  test("returns empty bytes for a 204 byte response", async () => {
+    const harness = createHarness();
+    harness.fetch.mockResolvedValue(new Response(null, { status: 204 }));
+
+    await expect(harness.client.getBytes("/items/empty/content")).resolves.toEqual(
+      new Uint8Array(),
+    );
+  });
+
+  test("normalizes a byte body failure without leaking the stream error", async () => {
+    const secretToken = "byte-body-secret-token";
+    const harness = createHarness();
+    harness.authManager.getValidAccessToken.mockResolvedValue(secretToken);
+    harness.fetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error(`byte read failed with Bearer ${secretToken}`));
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/pdf" } },
+      ),
+    );
+
+    const error = await rejectedError(harness.client.getBytes("/items/broken/content"));
+
+    expect(error).toBeInstanceOf(GraphMcpError);
+    expect(error.message).toBe(
+      "Microsoft Graph request failed. Check your network connection and try again.",
+    );
+    expect(error.message).not.toContain(secretToken);
+    expect(error.message).not.toMatch(/authorization|bearer|byte read failed/i);
+    expect(harness.resetBackoff).not.toHaveBeenCalled();
   });
 
   test("converts a nested Graph error message into GraphApiError", async () => {

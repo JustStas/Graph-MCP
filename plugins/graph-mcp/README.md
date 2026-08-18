@@ -2,7 +2,7 @@
 
 Graph MCP connects Claude and Codex to Microsoft Graph through a local Node MCP server.
 It provides approved access to Microsoft Teams, Outlook mail and calendar, meetings,
-files, users, contacts, tasks, and presence through exactly 125 tools. Node.js 22 or newer is required.
+files, users, contacts, tasks, and presence through exactly 126 tools. Node.js 22 or newer is required.
 
 ## Install
 
