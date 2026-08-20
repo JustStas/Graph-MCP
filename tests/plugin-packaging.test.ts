@@ -177,7 +177,7 @@ describe("Graph MCP plugin packaging", () => {
       await client.connect(transport);
       expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.9.0" });
       const listed = await client.listTools();
-      expect(listed.tools).toHaveLength(126);
+      expect(listed.tools).toHaveLength(127);
     } finally {
       await client.close();
       await rm(home, { recursive: true, force: true });

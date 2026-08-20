@@ -2,6 +2,59 @@
 
 All notable changes to Graph MCP are documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- Meeting transcripts are reachable again. Two independent defects combined to make a transcript
+  that exists in Teams look like one that does not.
+
+  `graph_list_online_meetings` embedded the join URL in its OData filter as
+  `encodeURIComponent(join_url)`, and the HTTP layer then percent-encoded the whole query string
+  again, so Graph compared `JoinWebUrl` against a doubly encoded string that can never match. Every
+  join-URL lookup failed with `404 3004: Specified meeting is not found` — an error that reads as
+  "no such meeting" rather than "the client built the filter wrong". Graph matches the join URL
+  exactly as it stores it, so the value now goes in verbatim and only the transport layer encodes
+  it. The `''` apostrophe escaping that keeps a hostile join URL inside one OData literal is
+  unchanged. Verified against live Graph: the verbatim filter returns the meeting, the previous
+  filter returns 404 3004, and the failure reproduced on a meeting organized by the signed-in user,
+  so it was never specific to Bookings or to shared mailboxes.
+
+  `graph_get_meeting_transcript_content` was 36 characters, which is 65 with the
+  `mcp__plugin_graph-mcp_graph__` prefix a plugin install adds — one over the 64-character limit on
+  a prefixed tool name. The client replaced it with a truncated hashed alias that does not route, so
+  the only tool that returns transcript text answered `No such tool available`. It is now
+  `graph_get_transcript_content` (57 with the prefix). **This is a breaking rename** for standalone
+  MCP installs, where the shorter `mcp__graph__` prefix kept the old name working; no alias is kept,
+  because a second registration would still be unreachable in plugin installs. A contract test now
+  fails if any tool name exceeds the prefixed limit, rather than letting it disappear silently at
+  runtime. The next longest name is `graph_get_channel_message_replies` at 62.
+
+- `graph_list_online_meetings` no longer claims that an empty `join_url` "returns recent meetings".
+  Graph has no unfiltered listing; it answers 400 with "One of the required parameters to lookup
+  meeting by QueryOptions is null or empty". The tool now requires a lookup and reports a missing or
+  ambiguous one without spending a request.
+
+### Added
+
+- `graph_get_meeting_id` resolves the meeting ID that the six meeting tools require, from a calendar
+  event, a Teams join URL, or a meeting chat thread. It prefers the join-URL lookup Graph documents
+  and, when that finds nothing, derives the ID from the meeting thread and organizer, which are both
+  carried in a long join URL's path and `context` parameter. The derivation is the
+  `base64("1*<organizer object ID>*0**<thread ID>")` composite Graph reports as `onlineMeeting.id`;
+  it previously had to be assembled by hand outside the tool surface, from two unrelated calls plus
+  a shell `base64`. The response says which route produced the ID. Confirmed against live Graph that
+  a hand-derived composite is byte-identical to the ID the API reports for the same meeting, and
+  that it lists that meeting's real transcripts.
+
+- `graph_list_online_meetings` accepts `join_meeting_id`, the numeric meeting ID printed in every
+  Teams invite, with or without the spaces the invite prints. That is a documented lookup and the
+  only one that works for short `teams.microsoft.com/meet/<code>` links, which carry no thread ID.
+
+- The six tools that take `meeting_id` now point at `graph_get_meeting_id` rather than at
+  `graph_list_online_meetings`, which only ever produced an ID for a meeting the caller could
+  already identify by join URL.
+
 ## 0.9.0 - 2026-08-17
 
 ### Added
