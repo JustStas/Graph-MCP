@@ -38681,10 +38681,38 @@ function escapeAsPlainText(value) {
 // src/tools/meeting-tools.ts
 var INVALID_GRAPH_RESPONSE_MESSAGE8 = "Invalid Microsoft Graph response.";
 var MEETING_METADATA_FIELDS = "id,meetingId,createdDateTime,meetingOrganizer";
+var EVENT_MEETING_FIELDS = "id,subject,isOnlineMeeting,onlineMeeting";
 var ALLOWED_PRESENTERS_SCHEMA = external_exports.enum(["everyone", "organization", "roleIsPresenter", "organizer"]).default("everyone");
 var RESOURCE_ID_SCHEMA6 = external_exports.string().refine((value) => value !== "" && value !== "." && value !== "..", {
   message: "Resource IDs must not be empty, '.' or '..'."
 });
+var OPTIONAL_RESOURCE_ID_SCHEMA7 = external_exports.string().refine((value) => value !== "." && value !== "..", {
+  message: "Resource IDs must not be '.' or '..'."
+}).default("");
+var THREAD_ID_PATTERN = /^19:meeting_[\w+/=-]+@thread\.v2$/;
+var ORGANIZER_ID_PATTERN = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
+var JOIN_MEETING_ID_PATTERN = /^[\d ]+$/;
+var JOIN_URL_SCHEMA = external_exports.string().refine((value) => value === "" || value.startsWith("https://"), {
+  message: "join_url must be an https Teams join URL."
+}).default("");
+var THREAD_ID_SCHEMA = external_exports.string().refine((value) => value === "" || THREAD_ID_PATTERN.test(value), {
+  message: "thread_id must look like 19:meeting_<id>@thread.v2."
+}).default("");
+var ORGANIZER_ID_SCHEMA = external_exports.string().refine((value) => value === "" || ORGANIZER_ID_PATTERN.test(value), {
+  message: "organizer_id must be a Microsoft Entra object ID."
+}).default("");
+var JOIN_MEETING_ID_SCHEMA = external_exports.string().refine((value) => value === "" || JOIN_MEETING_ID_PATTERN.test(value), {
+  message: "join_meeting_id must contain only digits and spaces."
+}).default("");
+var MISSING_MEETING_LOOKUP_MESSAGE = "One of join_url or join_meeting_id is required. Microsoft Graph cannot list online meetings without a lookup filter; call graph_get_meeting_id to resolve a calendar event or a meeting chat thread.";
+var AMBIGUOUS_MEETING_LOOKUP_MESSAGE = "Pass only one of join_url or join_meeting_id.";
+var MISSING_MEETING_SOURCE_MESSAGE = "Pass exactly one of event_id, join_url or thread_id.";
+var EVENT_WITHOUT_MEETING_MESSAGE = "That event has no online meeting. Only events whose onlineMeeting.joinUrl is set have a meeting ID.";
+var UNRESOLVABLE_JOIN_URL_MESSAGE = "Microsoft Graph did not resolve that join URL, and the URL carries no meeting thread ID and organizer to derive an ID from. Short teams.microsoft.com/meet links omit both; look the meeting up with graph_list_online_meetings using the numeric join_meeting_id from the invite instead.";
+var UNKNOWN_ORGANIZER_MESSAGE = "Could not resolve the signed-in user to use as the meeting organizer. Pass organizer_id explicitly.";
+var MEETING_LOOKUP_MISS_STATUSES = /* @__PURE__ */ new Set([400, 404]);
+var MAX_JOIN_URL_DECODE_ROUNDS = 2;
+var MEETING_ID_ARGS_DOC = "    meeting_id: The online meeting ID, from graph_get_meeting_id or the id\n        field of graph_list_online_meetings.";
 function isNonArrayObject8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -38715,31 +38743,264 @@ function requireGraphString2(response) {
 function meetingPath(meetingId) {
   return `/me/onlineMeetings/${encodeURIComponent(meetingId)}`;
 }
+function escapeODataLiteral(value) {
+  return value.replaceAll("'", "''");
+}
+function meetingLookupFilter(joinUrl, joinMeetingId) {
+  return joinUrl === "" ? `joinMeetingIdSettings/joinMeetingId eq '${escapeODataLiteral(joinMeetingId)}'` : `JoinWebUrl eq '${escapeODataLiteral(joinUrl)}'`;
+}
+function optionalGraphString(source, key) {
+  const value = source[key];
+  return typeof value === "string" ? value : "";
+}
+function nestedObject(source, ...keys) {
+  let current = source;
+  for (const key of keys) {
+    const next = current[key];
+    if (!isNonArrayObject8(next)) {
+      return void 0;
+    }
+    current = next;
+  }
+  return current;
+}
+function composeMeetingId(organizerId, threadId) {
+  return Buffer.from(`1*${organizerId}*0**${threadId}`, "utf8").toString("base64");
+}
+function organizerIdFromContext(url2) {
+  const context = url2.searchParams.get("context");
+  if (context === null) {
+    return "";
+  }
+  for (const candidate of [context, decodeOnce(context)]) {
+    let parsed;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (!isNonArrayObject8(parsed)) {
+      continue;
+    }
+    const organizerId = parsed.Oid;
+    if (typeof organizerId === "string" && ORGANIZER_ID_PATTERN.test(organizerId)) {
+      return organizerId;
+    }
+  }
+  return "";
+}
+function decodeOnce(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+function threadIdFromSegment(segment) {
+  let candidate = segment;
+  for (let round = 0; round <= MAX_JOIN_URL_DECODE_ROUNDS; round += 1) {
+    if (THREAD_ID_PATTERN.test(candidate)) {
+      return candidate;
+    }
+    const decoded = decodeOnce(candidate);
+    if (decoded === candidate) {
+      return "";
+    }
+    candidate = decoded;
+  }
+  return "";
+}
+function parseJoinUrl(joinUrl) {
+  let url2;
+  try {
+    url2 = new URL(joinUrl);
+  } catch {
+    return { threadId: "", organizerId: "" };
+  }
+  let threadId = "";
+  for (const segment of url2.pathname.split("/")) {
+    threadId = threadIdFromSegment(segment);
+    if (threadId !== "") {
+      break;
+    }
+  }
+  return { threadId, organizerId: organizerIdFromContext(url2) };
+}
+function resolvedMeetingFrom(meeting) {
+  const id = optionalGraphString(meeting, "id");
+  if (id === "") {
+    return void 0;
+  }
+  const chatInfo = nestedObject(meeting, "chatInfo");
+  const organizer = nestedObject(meeting, "participants", "organizer", "identity", "user");
+  return {
+    id,
+    threadId: chatInfo === void 0 ? "" : optionalGraphString(chatInfo, "threadId"),
+    organizerId: organizer === void 0 ? "" : optionalGraphString(organizer, "id"),
+    joinWebUrl: optionalGraphString(meeting, "joinWebUrl")
+  };
+}
+async function lookupMeetingByJoinUrl(graphClient, joinWebUrl) {
+  let response;
+  try {
+    response = await graphClient.get("/me/onlineMeetings", {
+      $filter: meetingLookupFilter(joinWebUrl, "")
+    });
+  } catch (error51) {
+    if (error51 instanceof GraphApiError && error51.statusCode !== void 0 && MEETING_LOOKUP_MISS_STATUSES.has(error51.statusCode)) {
+      return void 0;
+    }
+    throw error51;
+  }
+  const [first] = collectionValue6(response);
+  return isNonArrayObject8(first) ? resolvedMeetingFrom(first) : void 0;
+}
+async function eventJoinUrl(graphClient, eventId) {
+  const event = requireGraphObject7(
+    await graphClient.get(`/me/events/${encodeURIComponent(eventId)}`, {
+      $select: EVENT_MEETING_FIELDS
+    })
+  );
+  const onlineMeeting = nestedObject(event, "onlineMeeting");
+  return onlineMeeting === void 0 ? "" : optionalGraphString(onlineMeeting, "joinUrl");
+}
+async function signedInUserId(graphClient) {
+  const profile = requireGraphObject7(await graphClient.get("/me", { $select: "id" }));
+  return optionalGraphString(profile, "id");
+}
+function resolvedMeetingResponse(resolved, source) {
+  return successResponse({
+    meeting_id: resolved.id,
+    thread_id: resolved.threadId,
+    organizer_id: resolved.organizerId,
+    join_web_url: resolved.joinWebUrl,
+    source
+  });
+}
 function registerMeetingTools(server, dependencies) {
   registerAuthenticatedTool(
     server,
     "graph_list_online_meetings",
     {
-      description: `List online meetings. Filter by join URL to find a specific meeting.
+      description: `Look up an online meeting by join URL or by the numeric meeting ID.
+
+Microsoft Graph has no unfiltered list of online meetings, so exactly one of
+join_url or join_meeting_id is required; without one the request fails with "One
+of the required parameters to lookup meeting by QueryOptions is null or empty".
+Either lookup returns a collection holding at most one meeting. When you only
+have a calendar event or a meeting chat thread, call graph_get_meeting_id.
 
 Args:
-    join_url: Teams meeting join URL to look up a specific meeting.
-              If empty, returns recent meetings.
+    join_url: Teams meeting join URL, passed exactly as Graph reports it in
+        onlineMeeting.joinUrl. Empty to look up by join_meeting_id.
+    join_meeting_id: The numeric meeting ID printed in the invite, with or
+        without spaces (for example "359 232 213 325 013"). Empty to look up by
+        join_url.
 ${PAGING_ARGS_DOC}`,
       inputSchema: {
-        join_url: external_exports.string().default(""),
+        join_url: JOIN_URL_SCHEMA,
+        join_meeting_id: JOIN_MEETING_ID_SCHEMA,
         next_link: NEXT_LINK_SCHEMA,
         include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
     },
-    async ({ join_url, next_link, include_next_link }) => {
-      const params = {};
-      if (join_url !== "") {
-        const escapedJoinUrl = join_url.replaceAll("'", "''");
-        params.$filter = `JoinWebUrl eq '${encodeURIComponent(escapedJoinUrl)}'`;
+    async ({ join_url, join_meeting_id, next_link, include_next_link }) => {
+      const joinMeetingId = join_meeting_id.replaceAll(" ", "");
+      if (next_link === "") {
+        if (join_url !== "" && joinMeetingId !== "") {
+          return successResponse({ error: AMBIGUOUS_MEETING_LOOKUP_MESSAGE }, "error");
+        }
+        if (join_url === "" && joinMeetingId === "") {
+          return successResponse({ error: MISSING_MEETING_LOOKUP_MESSAGE }, "error");
+        }
       }
-      const result = next_link === "" ? await dependencies.graphClient.get("/me/onlineMeetings", params) : await dependencies.graphClient.get(next_link);
+      const result = next_link === "" ? await dependencies.graphClient.get("/me/onlineMeetings", {
+        $filter: meetingLookupFilter(join_url, joinMeetingId)
+      }) : await dependencies.graphClient.get(next_link);
       return successResponse(collectionResult(collectionValue6(result), result, include_next_link));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_get_meeting_id",
+    {
+      description: `Resolve the online meeting ID that the other meeting tools require.
+
+Takes a calendar event, a Teams join URL, or a meeting chat thread and returns
+the ID used by graph_get_online_meeting, graph_list_meeting_transcripts,
+graph_get_transcript_content, graph_list_meeting_recordings,
+graph_get_meeting_recording_url and graph_get_meeting_attendance. It prefers the
+join URL lookup Graph documents and, when that finds nothing, derives the ID
+from the meeting thread and organizer instead, so it still answers for meetings
+the lookup misses. The returned "source" says which route produced the ID.
+
+Only meetings the signed-in user organized are reachable through the delegated
+meeting tools, whoever owns the calendar item.
+
+Args:
+    event_id: Calendar event ID to resolve. Empty to use join_url or thread_id.
+    join_url: Teams meeting join URL to resolve. Empty to use event_id or
+        thread_id.
+    thread_id: Meeting chat thread ID such as "19:meeting_<id>@thread.v2".
+        Empty to use event_id or join_url.
+    organizer_id: The organizer's Microsoft Entra object ID. Used only with
+        thread_id; empty resolves the signed-in user.`,
+      inputSchema: {
+        event_id: OPTIONAL_RESOURCE_ID_SCHEMA7,
+        join_url: JOIN_URL_SCHEMA,
+        thread_id: THREAD_ID_SCHEMA,
+        organizer_id: ORGANIZER_ID_SCHEMA
+      }
+    },
+    async ({ event_id, join_url, thread_id, organizer_id }) => {
+      const sources = [event_id, join_url, thread_id].filter((value) => value !== "");
+      if (sources.length !== 1) {
+        return successResponse({ error: MISSING_MEETING_SOURCE_MESSAGE }, "error");
+      }
+      if (thread_id !== "") {
+        const organizerId = organizer_id === "" ? await signedInUserId(dependencies.graphClient) : organizer_id;
+        if (organizerId === "") {
+          return successResponse({ error: UNKNOWN_ORGANIZER_MESSAGE }, "error");
+        }
+        return resolvedMeetingResponse(
+          {
+            id: composeMeetingId(organizerId, thread_id),
+            threadId: thread_id,
+            organizerId,
+            joinWebUrl: ""
+          },
+          "derived"
+        );
+      }
+      const joinWebUrl = event_id === "" ? join_url : await eventJoinUrl(dependencies.graphClient, event_id);
+      if (joinWebUrl === "") {
+        return successResponse({ error: EVENT_WITHOUT_MEETING_MESSAGE }, "error");
+      }
+      const parts = parseJoinUrl(joinWebUrl);
+      const looked = await lookupMeetingByJoinUrl(dependencies.graphClient, joinWebUrl);
+      if (looked !== void 0) {
+        return resolvedMeetingResponse(
+          {
+            id: looked.id,
+            threadId: looked.threadId === "" ? parts.threadId : looked.threadId,
+            organizerId: looked.organizerId === "" ? parts.organizerId : looked.organizerId,
+            joinWebUrl: looked.joinWebUrl === "" ? joinWebUrl : looked.joinWebUrl
+          },
+          "joinWebUrl"
+        );
+      }
+      if (parts.threadId === "" || parts.organizerId === "") {
+        return successResponse({ error: UNRESOLVABLE_JOIN_URL_MESSAGE }, "error");
+      }
+      return resolvedMeetingResponse(
+        {
+          id: composeMeetingId(parts.organizerId, parts.threadId),
+          threadId: parts.threadId,
+          organizerId: parts.organizerId,
+          joinWebUrl
+        },
+        "derived"
+      );
     }
   );
   registerAuthenticatedTool(
@@ -38749,7 +39010,7 @@ ${PAGING_ARGS_DOC}`,
       description: `List available transcripts for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).
+${MEETING_ID_ARGS_DOC}
 ${PAGING_ARGS_DOC}`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA6,
@@ -38766,7 +39027,7 @@ ${PAGING_ARGS_DOC}`,
   );
   registerAuthenticatedTool(
     server,
-    "graph_get_meeting_transcript_content",
+    "graph_get_transcript_content",
     {
       description: `Get the text content of a meeting transcript.
 
@@ -38774,7 +39035,7 @@ Returns the transcript in VTT (Web Video Text Tracks) format,
 which includes timestamps and speaker attribution.
 
 Args:
-    meeting_id: The online meeting ID.
+${MEETING_ID_ARGS_DOC}
     transcript_id: The transcript ID (from graph_list_meeting_transcripts).`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA6,
@@ -38796,7 +39057,7 @@ Args:
       description: `List available recordings for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).
+${MEETING_ID_ARGS_DOC}
 ${PAGING_ARGS_DOC}`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA6,
@@ -38821,7 +39082,7 @@ Returns recording metadata including a temporary download URL.
 The recording content itself is binary video and is not returned inline.
 
 Args:
-    meeting_id: The online meeting ID.
+${MEETING_ID_ARGS_DOC}
     recording_id: The recording ID (from graph_list_meeting_recordings).`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA6,
@@ -38887,7 +39148,7 @@ Args:
       description: `Get a single online meeting, including its join link and settings.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+${MEETING_ID_ARGS_DOC}`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA6
       }
@@ -38909,14 +39170,12 @@ times, and the paging arguments do not apply. Needs the
 OnlineMeetingArtifact.Read.All permission, which requires admin consent.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).
+${MEETING_ID_ARGS_DOC}
     report_id: Attendance report ID. Empty lists the available reports.
 ${PAGING_ARGS_DOC}`,
       inputSchema: {
         meeting_id: RESOURCE_ID_SCHEMA6,
-        report_id: external_exports.string().refine((value) => value !== "." && value !== "..", {
-          message: "Resource IDs must not be '.' or '..'."
-        }).default(""),
+        report_id: OPTIONAL_RESOURCE_ID_SCHEMA7,
         next_link: NEXT_LINK_SCHEMA,
         include_next_link: INCLUDE_NEXT_LINK_SCHEMA
       }
@@ -40008,7 +40267,7 @@ Args:
 
 // src/tools/user-tools.ts
 var INVALID_GRAPH_RESPONSE_MESSAGE13 = "Invalid Microsoft Graph response.";
-var OPTIONAL_RESOURCE_ID_SCHEMA7 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
+var OPTIONAL_RESOURCE_ID_SCHEMA8 = external_exports.string().refine((value) => value === "" || value !== "." && value !== "..", {
   message: "Resource IDs must not be '.' or '..'."
 }).default("");
 function escapeKqlStringToken(value) {
@@ -40093,7 +40352,7 @@ Reading someone else's manager requires the User.Read.All permission.
 Args:
     user_id: User ID or email address. Empty targets the signed-in user.`,
       inputSchema: {
-        user_id: OPTIONAL_RESOURCE_ID_SCHEMA7
+        user_id: OPTIONAL_RESOURCE_ID_SCHEMA8
       }
     },
     async ({ user_id }) => {
@@ -40118,7 +40377,7 @@ ${SKIP_ARGS_DOC}
 ${COMPACT_ARGS_DOC}
 ${PAGING_ARGS_DOC}`,
       inputSchema: {
-        user_id: OPTIONAL_RESOURCE_ID_SCHEMA7,
+        user_id: OPTIONAL_RESOURCE_ID_SCHEMA8,
         top: external_exports.number().int().default(50),
         skip: SKIP_SCHEMA,
         compact: COMPACT_SCHEMA,
@@ -40216,7 +40475,7 @@ async function createServer2(dependencies) {
     ownedAuthManager = defaults.authManager;
   }
   const server = new McpServer(
-    { name: "Graph MCP", version: "0.9.0" },
+    { name: "Graph MCP", version: "0.10.0" },
     { instructions: SERVER_INSTRUCTIONS }
   );
   registerAllTools(server, resolvedDependencies);
@@ -40253,7 +40512,7 @@ async function createServer2(dependencies) {
 }
 
 // src/cli.ts
-var VERSION = "0.9.0";
+var VERSION = "0.10.0";
 var PROTOCOL_ERROR_MESSAGE = "Graph MCP protocol error.";
 var HELP = `Graph MCP ${VERSION}
 

@@ -45,36 +45,71 @@ const MEETING_METADATA_FIELDS = "id,meetingId,createdDateTime,meetingOrganizer";
 const EXPECTED_MEETING_TOOLS = [
   {
     name: "graph_list_online_meetings",
-    description: `List online meetings. Filter by join URL to find a specific meeting.
+    description: `Look up an online meeting by join URL or by the numeric meeting ID.
+
+Microsoft Graph has no unfiltered list of online meetings, so exactly one of
+join_url or join_meeting_id is required; without one the request fails with "One
+of the required parameters to lookup meeting by QueryOptions is null or empty".
+Either lookup returns a collection holding at most one meeting. When you only
+have a calendar event or a meeting chat thread, call graph_get_meeting_id.
 
 Args:
-    join_url: Teams meeting join URL to look up a specific meeting.
-              If empty, returns recent meetings.
+    join_url: Teams meeting join URL, passed exactly as Graph reports it in
+        onlineMeeting.joinUrl. Empty to look up by join_meeting_id.
+    join_meeting_id: The numeric meeting ID printed in the invite, with or
+        without spaces (for example "359 232 213 325 013"). Empty to look up by
+        join_url.
     next_link: Opaque nextLink URL from a previous call, used to fetch the next
         page. Overrides the other paging arguments when supplied.
     include_next_link: Whether to wrap the result as {items, next_link} so paging
         can continue (default false, which returns a bare list).`,
+  },
+  {
+    name: "graph_get_meeting_id",
+    description: `Resolve the online meeting ID that the other meeting tools require.
+
+Takes a calendar event, a Teams join URL, or a meeting chat thread and returns
+the ID used by graph_get_online_meeting, graph_list_meeting_transcripts,
+graph_get_transcript_content, graph_list_meeting_recordings,
+graph_get_meeting_recording_url and graph_get_meeting_attendance. It prefers the
+join URL lookup Graph documents and, when that finds nothing, derives the ID
+from the meeting thread and organizer instead, so it still answers for meetings
+the lookup misses. The returned "source" says which route produced the ID.
+
+Only meetings the signed-in user organized are reachable through the delegated
+meeting tools, whoever owns the calendar item.
+
+Args:
+    event_id: Calendar event ID to resolve. Empty to use join_url or thread_id.
+    join_url: Teams meeting join URL to resolve. Empty to use event_id or
+        thread_id.
+    thread_id: Meeting chat thread ID such as "19:meeting_<id>@thread.v2".
+        Empty to use event_id or join_url.
+    organizer_id: The organizer's Microsoft Entra object ID. Used only with
+        thread_id; empty resolves the signed-in user.`,
   },
   {
     name: "graph_list_meeting_transcripts",
     description: `List available transcripts for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).
+    meeting_id: The online meeting ID, from graph_get_meeting_id or the id
+        field of graph_list_online_meetings.
     next_link: Opaque nextLink URL from a previous call, used to fetch the next
         page. Overrides the other paging arguments when supplied.
     include_next_link: Whether to wrap the result as {items, next_link} so paging
         can continue (default false, which returns a bare list).`,
   },
   {
-    name: "graph_get_meeting_transcript_content",
+    name: "graph_get_transcript_content",
     description: `Get the text content of a meeting transcript.
 
 Returns the transcript in VTT (Web Video Text Tracks) format,
 which includes timestamps and speaker attribution.
 
 Args:
-    meeting_id: The online meeting ID.
+    meeting_id: The online meeting ID, from graph_get_meeting_id or the id
+        field of graph_list_online_meetings.
     transcript_id: The transcript ID (from graph_list_meeting_transcripts).`,
   },
   {
@@ -82,7 +117,8 @@ Args:
     description: `List available recordings for an online meeting.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).
+    meeting_id: The online meeting ID, from graph_get_meeting_id or the id
+        field of graph_list_online_meetings.
     next_link: Opaque nextLink URL from a previous call, used to fetch the next
         page. Overrides the other paging arguments when supplied.
     include_next_link: Whether to wrap the result as {items, next_link} so paging
@@ -96,7 +132,8 @@ Returns recording metadata including a temporary download URL.
 The recording content itself is binary video and is not returned inline.
 
 Args:
-    meeting_id: The online meeting ID.
+    meeting_id: The online meeting ID, from graph_get_meeting_id or the id
+        field of graph_list_online_meetings.
     recording_id: The recording ID (from graph_list_meeting_recordings).`,
   },
   {
@@ -122,7 +159,8 @@ Args:
     description: `Get a single online meeting, including its join link and settings.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).`,
+    meeting_id: The online meeting ID, from graph_get_meeting_id or the id
+        field of graph_list_online_meetings.`,
   },
   {
     name: "graph_get_meeting_attendance",
@@ -134,7 +172,8 @@ times, and the paging arguments do not apply. Needs the
 OnlineMeetingArtifact.Read.All permission, which requires admin consent.
 
 Args:
-    meeting_id: The online meeting ID (from graph_list_online_meetings).
+    meeting_id: The online meeting ID, from graph_get_meeting_id or the id
+        field of graph_list_online_meetings.
     report_id: Attendance report ID. Empty lists the available reports.
     next_link: Opaque nextLink URL from a previous call, used to fetch the next
         page. Overrides the other paging arguments when supplied.
@@ -325,7 +364,7 @@ function registerMeetingHarness(graphResponses: readonly unknown[] = []): {
 }
 
 describe("meeting tool registration", () => {
-  test("registers exactly the eight meeting names and complete descriptions", () => {
+  test("registers exactly the nine meeting names and complete descriptions", () => {
     const { harness } = registerMeetingHarness();
 
     expect(
@@ -340,12 +379,25 @@ describe("meeting tool registration", () => {
     const { harness } = registerMeetingHarness();
 
     const listShape = schemaFor(harness, "graph_list_online_meetings");
-    expect(Object.keys(listShape)).toEqual(["join_url", "next_link", "include_next_link"]);
+    expect(Object.keys(listShape)).toEqual([
+      "join_url",
+      "join_meeting_id",
+      "next_link",
+      "include_next_link",
+    ]);
     expect(z.object(listShape).parse({})).toEqual({
       join_url: "",
+      join_meeting_id: "",
       next_link: "",
       include_next_link: false,
     });
+    for (const join_url of ["teams.example/join", "http://teams.example/join"]) {
+      expect(z.object(listShape).safeParse({ join_url }).success).toBe(false);
+    }
+    for (const join_meeting_id of ["359 232 213 325 013", "359232213325013"]) {
+      expect(z.object(listShape).safeParse({ join_meeting_id }).success).toBe(true);
+    }
+    expect(z.object(listShape).safeParse({ join_meeting_id: "359-232" }).success).toBe(false);
 
     const transcriptsShape = schemaFor(harness, "graph_list_meeting_transcripts");
     expect(Object.keys(transcriptsShape)).toEqual(["meeting_id", "next_link", "include_next_link"]);
@@ -356,9 +408,37 @@ describe("meeting tool registration", () => {
       include_next_link: false,
     });
 
-    const contentShape = schemaFor(harness, "graph_get_meeting_transcript_content");
+    const contentShape = schemaFor(harness, "graph_get_transcript_content");
     expect(Object.keys(contentShape)).toEqual(["meeting_id", "transcript_id"]);
     expect(z.object(contentShape).safeParse({ meeting_id: "meeting-1" }).success).toBe(false);
+
+    const resolveShape = schemaFor(harness, "graph_get_meeting_id");
+    expect(Object.keys(resolveShape)).toEqual([
+      "event_id",
+      "join_url",
+      "thread_id",
+      "organizer_id",
+    ]);
+    const resolveSchema = z.object(resolveShape);
+    expect(resolveSchema.parse({})).toEqual({
+      event_id: "",
+      join_url: "",
+      thread_id: "",
+      organizer_id: "",
+    });
+    for (const thread_id of ["19:meeting_abc@thread.v2", "19:meeting_a-b_c=@thread.v2"]) {
+      expect(resolveSchema.safeParse({ thread_id }).success).toBe(true);
+    }
+    for (const thread_id of ["19:meeting_abc@thread.skype", "meeting_abc", "19:abc@thread.v2"]) {
+      expect(resolveSchema.safeParse({ thread_id }).success).toBe(false);
+    }
+    expect(
+      resolveSchema.safeParse({ organizer_id: "a322b5f4-8a0a-4ca0-a507-4517dcfffa11" }).success,
+    ).toBe(true);
+    expect(resolveSchema.safeParse({ organizer_id: "not-a-guid" }).success).toBe(false);
+    for (const event_id of [".", ".."]) {
+      expect(resolveSchema.safeParse({ event_id }).success).toBe(false);
+    }
 
     const recordingsShape = schemaFor(harness, "graph_list_meeting_recordings");
     expect(Object.keys(recordingsShape)).toEqual(["meeting_id", "next_link", "include_next_link"]);
@@ -379,12 +459,12 @@ describe("meeting tool registration", () => {
     const cases = [
       { name: "graph_list_meeting_transcripts", key: "meeting_id", base: {} },
       {
-        name: "graph_get_meeting_transcript_content",
+        name: "graph_get_transcript_content",
         key: "meeting_id",
         base: { transcript_id: "transcript-1" },
       },
       {
-        name: "graph_get_meeting_transcript_content",
+        name: "graph_get_transcript_content",
         key: "transcript_id",
         base: { meeting_id: "meeting-1" },
       },
@@ -411,34 +491,68 @@ describe("meeting tool registration", () => {
 });
 
 describe("meeting list operations", () => {
-  test("lists meetings with exact empty params and encodes a join URL inside the filter", async () => {
-    const joinUrl = "https://teams.example/join/abc?tenant=bp&name=R&D#agenda";
-    const { harness, graph } = registerMeetingHarness([
-      { value: [{ id: "meeting-1" }] },
-      { value: [{ id: "meeting-2" }] },
-    ]);
+  test("filters on the join URL verbatim so Graph can match what it stores", async () => {
+    const joinUrl =
+      "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=%7b%22Tid%22%3a%22t%22%7d";
+    const { harness, graph } = registerMeetingHarness([{ value: [{ id: "meeting-1" }] }]);
 
-    expect(dataFrom(await harness.invoke("graph_list_online_meetings"))).toEqual([
-      { id: "meeting-1" },
-    ]);
     expect(
       dataFrom(await harness.invoke("graph_list_online_meetings", { join_url: joinUrl })),
-    ).toEqual([{ id: "meeting-2" }]);
+    ).toEqual([{ id: "meeting-1" }]);
     expect(graph.calls).toEqual([
       {
         method: "GET",
         path: "/me/onlineMeetings",
-        params: {},
+        params: { $filter: `JoinWebUrl eq '${joinUrl}'` },
       },
+    ]);
+    // Encoding the value here as well as in the transport layer is what made every
+    // joinWebUrl lookup answer 404 3004 "Specified meeting is not found".
+    expect(graph.calls[0]?.params).not.toEqual({
+      $filter: `JoinWebUrl eq '${encodeURIComponent(joinUrl)}'`,
+    });
+  });
+
+  test("filters on joinMeetingId and drops the spaces the invite prints", async () => {
+    const { harness, graph } = registerMeetingHarness([{ value: [{ id: "meeting-1" }] }]);
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_list_online_meetings", {
+          join_meeting_id: "359 232 213 325 013",
+        }),
+      ),
+    ).toEqual([{ id: "meeting-1" }]);
+    expect(graph.calls).toEqual([
       {
         method: "GET",
         path: "/me/onlineMeetings",
-        params: { $filter: `JoinWebUrl eq '${encodeURIComponent(joinUrl)}'` },
+        params: { $filter: "joinMeetingIdSettings/joinMeetingId eq '359232213325013'" },
       },
     ]);
   });
 
-  test("keeps apostrophes and an injected OR inside one encoded OData string literal", async () => {
+  test("refuses a lookup with no filter or with two, without calling Graph", async () => {
+    const missing = registerMeetingHarness();
+    expect(dataFrom(await missing.harness.invoke("graph_list_online_meetings"))).toEqual({
+      error:
+        "One of join_url or join_meeting_id is required. Microsoft Graph cannot list online meetings without a lookup filter; call graph_get_meeting_id to resolve a calendar event or a meeting chat thread.",
+    });
+    expect(missing.graph.calls).toEqual([]);
+
+    const ambiguous = registerMeetingHarness();
+    expect(
+      dataFrom(
+        await ambiguous.harness.invoke("graph_list_online_meetings", {
+          join_url: "https://teams.example/join/abc",
+          join_meeting_id: "359232213325013",
+        }),
+      ),
+    ).toEqual({ error: "Pass only one of join_url or join_meeting_id." });
+    expect(ambiguous.graph.calls).toEqual([]);
+  });
+
+  test("keeps apostrophes and an injected OR inside one OData string literal", async () => {
     const joinUrl = "https://teams.example/join/x' OR JoinWebUrl ne 'https://evil.example/";
     const escapedJoinUrl = joinUrl.replaceAll("'", "''");
     const { harness, graph } = registerMeetingHarness([{ value: [] }]);
@@ -446,7 +560,7 @@ describe("meeting list operations", () => {
     await harness.invoke("graph_list_online_meetings", { join_url: joinUrl });
 
     const filter = (graph.calls[0]?.params as Record<string, unknown> | undefined)?.$filter;
-    expect(filter).toBe(`JoinWebUrl eq '${encodeURIComponent(escapedJoinUrl)}'`);
+    expect(filter).toBe(`JoinWebUrl eq '${escapedJoinUrl}'`);
     expect(typeof filter).toBe("string");
     expect(countODataStringLiterals(filter as string)).toBe(1);
   });
@@ -484,7 +598,7 @@ describe("meeting list operations", () => {
   });
 
   test.each([
-    { name: "graph_list_online_meetings", args: {} },
+    { name: "graph_list_online_meetings", args: { join_url: "https://teams.example/meet" } },
     { name: "graph_list_meeting_transcripts", args: { meeting_id: "meeting-1" } },
     { name: "graph_list_meeting_recordings", args: { meeting_id: "meeting-1" } },
   ])("$name treats a missing value property as an empty list", async ({ name, args }) => {
@@ -496,7 +610,9 @@ describe("meeting list operations", () => {
     "rejects malformed meeting collection response %# without leakage",
     async (response) => {
       const { harness } = registerMeetingHarness([response]);
-      const result = await harness.invoke("graph_list_online_meetings");
+      const result = await harness.invoke("graph_list_online_meetings", {
+        join_url: "https://teams.example/meet",
+      });
 
       expect(result).toEqual(INVALID_GRAPH_RESPONSE_RESULT);
       expect(JSON.stringify(result)).not.toContain("payload-secret");
@@ -514,7 +630,7 @@ describe("meeting transcript and recording operations", () => {
 
     expect(
       dataFrom(
-        await harness.invoke("graph_get_meeting_transcript_content", {
+        await harness.invoke("graph_get_transcript_content", {
           meeting_id: meetingId,
           transcript_id: transcriptId,
         }),
@@ -533,7 +649,7 @@ describe("meeting transcript and recording operations", () => {
     "rejects malformed transcript content %# without leakage",
     async (response) => {
       const { harness } = registerMeetingHarness([response]);
-      const result = await harness.invoke("graph_get_meeting_transcript_content", {
+      const result = await harness.invoke("graph_get_transcript_content", {
         meeting_id: "meeting-1",
         transcript_id: "transcript-1",
       });
@@ -591,7 +707,7 @@ describe("meeting transcript and recording operations", () => {
     const recordingId = "../recording/path\\name#fragment?query=:value%";
     const { harness, graph } = registerMeetingHarness(["WEBVTT", { id: recordingId }]);
 
-    await harness.invoke("graph_get_meeting_transcript_content", {
+    await harness.invoke("graph_get_transcript_content", {
       meeting_id: meetingId,
       transcript_id: transcriptId,
     });
@@ -609,10 +725,11 @@ describe("meeting transcript and recording operations", () => {
 
 describe("meeting authenticated wrapper errors", () => {
   test.each([
-    { name: "graph_list_online_meetings", args: {} },
+    { name: "graph_list_online_meetings", args: { join_url: "https://teams.example/meet" } },
+    { name: "graph_get_meeting_id", args: { join_url: "https://teams.example/meet" } },
     { name: "graph_list_meeting_transcripts", args: { meeting_id: "meeting-1" } },
     {
-      name: "graph_get_meeting_transcript_content",
+      name: "graph_get_transcript_content",
       args: { meeting_id: "meeting-1", transcript_id: "transcript-1" },
     },
     { name: "graph_list_meeting_recordings", args: { meeting_id: "meeting-1" } },
@@ -887,6 +1004,199 @@ describe("online meeting creation and lookup", () => {
           text: '{"error":"Graph API error: 403: Access denied"}',
         },
       ],
+    });
+  });
+});
+
+describe("meeting id resolution", () => {
+  const ORGANIZER_ID = "11111111-2222-3333-4444-555555555555";
+  const THREAD_ID = "19:meeting_ZmFrZS10aHJlYWQ@thread.v2";
+  /** base64("1*<organizer>*0**<thread>"), the shape Graph reports as onlineMeeting.id. */
+  const DERIVED_MEETING_ID =
+    "MSoxMTExMTExMS0yMjIyLTMzMzMtNDQ0NC01NTU1NTU1NTU1NTUqMCoqMTk6bWVldGluZ19abUZyWlMxMGFISmxZV1FAdGhyZWFkLnYy";
+  const JOIN_URL =
+    "https://teams.microsoft.com/l/meetup-join/19%3ameeting_ZmFrZS10aHJlYWQ%40thread.v2/0?context=%7b%22Tid%22%3a%22aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee%22%2c%22Oid%22%3a%2211111111-2222-3333-4444-555555555555%22%7d";
+  const LOOKUP_FILTER = `JoinWebUrl eq '${JOIN_URL}'`;
+
+  test("prefers the join URL lookup and reports Graph's own id", async () => {
+    const { harness, graph } = registerMeetingHarness([
+      {
+        value: [
+          {
+            id: "graph-supplied-id",
+            joinWebUrl: "https://teams.microsoft.com/canonical",
+            chatInfo: { threadId: THREAD_ID, messageId: "0" },
+            participants: {
+              organizer: { identity: { user: { id: ORGANIZER_ID } } },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_get_meeting_id", { join_url: JOIN_URL }))).toEqual({
+      meeting_id: "graph-supplied-id",
+      thread_id: THREAD_ID,
+      organizer_id: ORGANIZER_ID,
+      join_web_url: "https://teams.microsoft.com/canonical",
+      source: "joinWebUrl",
+    });
+    expect(graph.calls).toEqual([
+      { method: "GET", path: "/me/onlineMeetings", params: { $filter: LOOKUP_FILTER } },
+    ]);
+  });
+
+  test.each([
+    {
+      label: "404 3004",
+      error: new GraphApiError("404: 3004: Specified meeting is not found", 404),
+    },
+    { label: "400 1026", error: new GraphApiError("400: 1026: An error has occurred.", 400) },
+    { label: "an empty collection", error: { value: [] } },
+    { label: "a meeting without an id", error: { value: [{ subject: "Sync" }] } },
+  ])("derives the id from the join URL when the lookup answers $label", async ({ error }) => {
+    const { harness, graph } = registerMeetingHarness([error]);
+
+    expect(dataFrom(await harness.invoke("graph_get_meeting_id", { join_url: JOIN_URL }))).toEqual({
+      meeting_id: DERIVED_MEETING_ID,
+      thread_id: THREAD_ID,
+      organizer_id: ORGANIZER_ID,
+      join_web_url: JOIN_URL,
+      source: "derived",
+    });
+    expect(graph.calls).toEqual([
+      { method: "GET", path: "/me/onlineMeetings", params: { $filter: LOOKUP_FILTER } },
+    ]);
+  });
+
+  test("still reports a Graph error the lookup miss statuses do not cover", async () => {
+    const { harness } = registerMeetingHarness([new GraphApiError("403: Access denied", 403)]);
+
+    await expect(harness.invoke("graph_get_meeting_id", { join_url: JOIN_URL })).resolves.toEqual({
+      content: [{ type: "text", text: '{"error":"Graph API error: 403: Access denied"}' }],
+    });
+  });
+
+  test("reads the join URL off an event before looking it up", async () => {
+    const eventId = "event/../id#fragment";
+    const { harness, graph } = registerMeetingHarness([
+      { id: "event-1", isOnlineMeeting: true, onlineMeeting: { joinUrl: JOIN_URL } },
+      { value: [{ id: "graph-supplied-id" }] },
+    ]);
+
+    expect(dataFrom(await harness.invoke("graph_get_meeting_id", { event_id: eventId }))).toEqual({
+      meeting_id: "graph-supplied-id",
+      thread_id: THREAD_ID,
+      organizer_id: ORGANIZER_ID,
+      join_web_url: JOIN_URL,
+      source: "joinWebUrl",
+    });
+    expect(graph.calls).toEqual([
+      {
+        method: "GET",
+        path: `/me/events/${encodeURIComponent(eventId)}`,
+        params: { $select: "id,subject,isOnlineMeeting,onlineMeeting" },
+      },
+      { method: "GET", path: "/me/onlineMeetings", params: { $filter: LOOKUP_FILTER } },
+    ]);
+  });
+
+  test("reports an event with no online meeting without attempting a lookup", async () => {
+    const { harness, graph } = registerMeetingHarness([{ id: "event-1", isOnlineMeeting: false }]);
+
+    expect(dataFrom(await harness.invoke("graph_get_meeting_id", { event_id: "event-1" }))).toEqual(
+      {
+        error:
+          "That event has no online meeting. Only events whose onlineMeeting.joinUrl is set have a meeting ID.",
+      },
+    );
+    expect(graph.calls).toHaveLength(1);
+  });
+
+  test("derives the id from a thread and an explicit organizer without calling Graph", async () => {
+    const { harness, graph } = registerMeetingHarness();
+
+    expect(
+      dataFrom(
+        await harness.invoke("graph_get_meeting_id", {
+          thread_id: THREAD_ID,
+          organizer_id: ORGANIZER_ID,
+        }),
+      ),
+    ).toEqual({
+      meeting_id: DERIVED_MEETING_ID,
+      thread_id: THREAD_ID,
+      organizer_id: ORGANIZER_ID,
+      join_web_url: "",
+      source: "derived",
+    });
+    expect(graph.calls).toEqual([]);
+  });
+
+  test("falls back to the signed-in user as the thread's organizer", async () => {
+    const { harness, graph } = registerMeetingHarness([{ id: ORGANIZER_ID }]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_get_meeting_id", { thread_id: THREAD_ID })),
+    ).toEqual({
+      meeting_id: DERIVED_MEETING_ID,
+      thread_id: THREAD_ID,
+      organizer_id: ORGANIZER_ID,
+      join_web_url: "",
+      source: "derived",
+    });
+    expect(graph.calls).toEqual([{ method: "GET", path: "/me", params: { $select: "id" } }]);
+  });
+
+  test("reports an unidentifiable signed-in user instead of a malformed id", async () => {
+    const { harness } = registerMeetingHarness([{ displayName: "Ada" }]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_get_meeting_id", { thread_id: THREAD_ID })),
+    ).toEqual({
+      error:
+        "Could not resolve the signed-in user to use as the meeting organizer. Pass organizer_id explicitly.",
+    });
+  });
+
+  test.each([
+    { label: "no source", args: {} },
+    { label: "two sources", args: { event_id: "event-1", thread_id: THREAD_ID } },
+    { label: "three sources", args: { event_id: "e", join_url: JOIN_URL, thread_id: THREAD_ID } },
+  ])("refuses $label without calling Graph", async ({ args }) => {
+    const { harness, graph } = registerMeetingHarness();
+
+    expect(dataFrom(await harness.invoke("graph_get_meeting_id", args))).toEqual({
+      error: "Pass exactly one of event_id, join_url or thread_id.",
+    });
+    expect(graph.calls).toEqual([]);
+  });
+
+  test("explains that a short meet link carries nothing to derive an id from", async () => {
+    const shortLink = "https://teams.microsoft.com/meet/359232213325013?p=secret";
+    const { harness } = registerMeetingHarness([{ value: [] }]);
+
+    expect(dataFrom(await harness.invoke("graph_get_meeting_id", { join_url: shortLink }))).toEqual(
+      {
+        error:
+          "Microsoft Graph did not resolve that join URL, and the URL carries no meeting thread ID and organizer to derive an ID from. Short teams.microsoft.com/meet links omit both; look the meeting up with graph_list_online_meetings using the numeric join_meeting_id from the invite instead.",
+      },
+    );
+  });
+
+  test("reads a double-encoded context parameter", async () => {
+    const doubleEncoded =
+      "https://teams.microsoft.com/l/meetup-join/19%253ameeting_ZmFrZS10aHJlYWQ%2540thread.v2/0?context=%257b%2522Oid%2522%253a%252211111111-2222-3333-4444-555555555555%2522%257d";
+    const { harness } = registerMeetingHarness([{ value: [] }]);
+
+    expect(
+      dataFrom(await harness.invoke("graph_get_meeting_id", { join_url: doubleEncoded })),
+    ).toEqual({
+      meeting_id: DERIVED_MEETING_ID,
+      thread_id: THREAD_ID,
+      organizer_id: ORGANIZER_ID,
+      join_web_url: doubleEncoded,
+      source: "derived",
     });
   });
 });

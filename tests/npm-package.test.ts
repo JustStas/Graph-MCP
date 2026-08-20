@@ -66,7 +66,7 @@ describe("npm package contents", () => {
     const paths = files.map((file) => file.path.replaceAll("\\", "/")).sort();
 
     expect(packResult.name).toBe("@juststas/graph-mcp");
-    expect(packResult.version).toBe("0.9.0");
+    expect(packResult.version).toBe("0.10.0");
     expect(paths).toEqual([...allowedPackagePaths].sort());
     expect(files.find((file) => file.path === "dist/cli.js")?.mode).toBe(0o755);
   }, 30_000);
@@ -92,7 +92,7 @@ describe("npm package contents", () => {
         cwd: repositoryRoot,
       });
 
-      expect(stdout).toBe("0.9.0\n");
+      expect(stdout).toBe("0.10.0\n");
       expect(stderr).toBe("");
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
@@ -104,7 +104,7 @@ describe("npm package contents", () => {
       cwd: repositoryRoot,
     });
 
-    expect(stdout).toBe("0.9.0\n");
+    expect(stdout).toBe("0.10.0\n");
     expect(stderr).toBe("");
   });
 
@@ -123,7 +123,7 @@ describe("npm package contents", () => {
         },
       );
 
-      expect(stdout).toBe("0.9.0\n");
+      expect(stdout).toBe("0.10.0\n");
       expect(stderr).toBe("");
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
@@ -135,7 +135,7 @@ describe("npm package contents", () => {
     const args = process.platform === "win32" ? [bundlePath, "--version"] : ["--version"];
     const { stdout, stderr } = await execFileAsync(command, args, { cwd: repositoryRoot });
 
-    expect(stdout).toBe("0.9.0\n");
+    expect(stdout).toBe("0.10.0\n");
     expect(stderr).toBe("");
   });
 

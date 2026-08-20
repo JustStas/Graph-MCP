@@ -53,8 +53,8 @@ export const EXPECTED_TOOL_NAMES = [
   "graph_get_mailbox_settings",
   "graph_get_manager",
   "graph_get_meeting_attendance",
+  "graph_get_meeting_id",
   "graph_get_meeting_recording_url",
-  "graph_get_meeting_transcript_content",
   "graph_get_my_presence",
   "graph_get_online_meeting",
   "graph_get_presences_by_user_ids",
@@ -62,6 +62,7 @@ export const EXPECTED_TOOL_NAMES = [
   "graph_get_profile",
   "graph_get_schedule",
   "graph_get_team",
+  "graph_get_transcript_content",
   "graph_get_user_presence",
   "graph_get_worksheet_range",
   "graph_invite_to_file",
@@ -175,8 +176,26 @@ function requireSchemaProperty(tool: Tool, propertyName: string): Record<string,
   return properties[propertyName];
 }
 
+/**
+ * A plugin install prefixes every tool with `mcp__plugin_<plugin>_<server>__`, and MCP caps a
+ * prefixed tool name at 64 characters. Past that the client rewrites the name to a truncated
+ * hashed alias that does not route, so the tool is simply unreachable — which is how
+ * `graph_get_meeting_transcript_content` (65) silently disappeared from plugin installs while
+ * standalone installs, prefixed with only `mcp__graph__`, kept working.
+ */
+const PLUGIN_TOOL_NAME_PREFIX = "mcp__plugin_graph-mcp_graph__";
+const MAX_PREFIXED_TOOL_NAME_LENGTH = 64;
+
 describe("Graph MCP tool contract", () => {
-  test("exposes the exact 126-tool inventory and representative input schemas", async () => {
+  test("keeps every tool name reachable under the plugin prefix", () => {
+    const overLimit = EXPECTED_TOOL_NAMES.filter(
+      (name) => PLUGIN_TOOL_NAME_PREFIX.length + name.length > MAX_PREFIXED_TOOL_NAME_LENGTH,
+    ).map((name) => `${name} (${PLUGIN_TOOL_NAME_PREFIX.length + name.length})`);
+
+    expect(overLimit).toEqual([]);
+  });
+
+  test("exposes the exact 127-tool inventory and representative input schemas", async () => {
     const server = await createServer(createDependencies());
     const client = new Client({ name: "tool-contract-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -185,14 +204,14 @@ describe("Graph MCP tool contract", () => {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
 
-      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.9.0" });
+      expect(client.getServerVersion()).toEqual({ name: "Graph MCP", version: "0.10.0" });
       expect(client.getInstructions()).toBe(
         "Microsoft Teams, Outlook Calendar, Mail, meetings, users, presence, and OneDrive integration via Microsoft Graph API",
       );
 
       const result = await client.listTools();
       expect(result.tools.map((tool) => tool.name).sort()).toEqual(EXPECTED_TOOL_NAMES);
-      expect(result.tools).toHaveLength(126);
+      expect(result.tools).toHaveLength(127);
 
       expect(requireTool(result.tools, "graph_get_profile").inputSchema).toMatchObject({
         type: "object",

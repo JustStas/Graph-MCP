@@ -6,7 +6,7 @@ Microsoft Graph. It runs locally over stdio and requires Node.js 22 or newer.
 
 ## What it does
 
-Graph MCP exposes exactly 126 tools:
+Graph MCP exposes exactly 127 tools:
 
 | Category | Tools |
 | --- | --- |
@@ -19,7 +19,7 @@ Graph MCP exposes exactly 126 tools:
 | **Calendar** | List calendars and events, get, create, update, cancel, or delete events, recurrence, RSVP, free/busy, suggested meeting times, series occurrences, bookable rooms, shared calendars |
 | **Mail** | List, read, search, or delta-sync mail, send, reply, or forward with drafts, bcc, importance, and attachments, move and archive, delete, mark read, flag, categorize, manage folders and inbox rules, mail tips, shared mailboxes |
 | **Mailbox settings** | Read mailbox settings, set automatic replies, set time zone and working hours |
-| **Meetings** | List, create, or get online meetings with join links, attendance reports, transcripts and recordings |
+| **Meetings** | Resolve a meeting ID from a calendar event, join URL, or meeting chat, look a meeting up by join URL or the numeric invite ID, create or get online meetings with join links, attendance reports, transcripts and recordings |
 | **Presence** | Read your own, another user's, or a whole team's presence, set availability or a status message, clear presence |
 | **Tasks** | List To Do lists and tasks, create, update, complete, or delete tasks, list assigned Planner tasks |
 | **Files** | Browse, search, or resolve links to OneDrive and SharePoint content, upload, download as text or base64 bytes, copy, move, delete, version, and share files, manage permissions, read recent and shared items, read and write Excel ranges |
@@ -273,7 +273,7 @@ npm pack --json --dry-run
 The Codex validator is release tooling supplied by Codex's `plugin-creator` skill; Python is
 not required to build, test, or run Graph MCP itself. Before publishing, verify that package,
 Claude manifest, and Codex manifest versions match the target release, the committed plugin
-bundle is current, both installed plugins expose exactly 126 tools, and the working tree is clean.
+bundle is current, both installed plugins expose exactly 127 tools, and the working tree is clean.
 
 ### Release procedure
 
@@ -299,7 +299,7 @@ package. Version 0.6.1 is the first scoped npm release.
    out its trusted helper at `github.workflow_sha`, binds the expected tag directly to the
    release event, validates npm's JSON dry-run manifest for the exact private snapshot, and
    uses npm Trusted Publishing. It has no `NODE_AUTH_TOKEN` or npm secret.
-7. Verify the workflow, npm version, `dist.integrity`, installed CLI version, and 126-tool MCP
+7. Verify the workflow, npm version, `dist.integrity`, installed CLI version, and 127-tool MCP
    inventory.
 
 Workflow reruns are idempotent. If the version already exists, the workflow succeeds only
