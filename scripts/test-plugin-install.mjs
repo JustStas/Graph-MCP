@@ -181,6 +181,7 @@ const expectedToolNames = [
   "graph_react_to_message",
   "graph_read_mail",
   "graph_remove_chat_member",
+  "graph_remove_mail_attachment",
   "graph_reply_mail",
   "graph_reply_to_channel_message",
   "graph_resolve_share_link",
@@ -206,6 +207,7 @@ const expectedToolNames = [
   "graph_update_chat_topic",
   "graph_update_contact",
   "graph_update_event",
+  "graph_update_mail_draft",
   "graph_update_mailbox_settings",
   "graph_update_todo_task",
   "graph_update_worksheet_range",
@@ -859,7 +861,7 @@ async function runMcpSmoke({ label, pluginRoot, server, environment }) {
       .map((tool) => requireString(tool.name, "tool name", `${label} MCP tools/list`))
       .sort();
     const names = [...expectedToolNames].sort();
-    if (actualNames.length !== 127 || actualNames.some((name, index) => name !== names[index])) {
+    if (actualNames.length !== 129 || actualNames.some((name, index) => name !== names[index])) {
       throw new Error(`${label} MCP tools mismatch: got ${actualNames.length} names.`);
     }
     result = {
@@ -1101,7 +1103,7 @@ async function main() {
       process.stdout.write(
         `CLAUDE_PLUGIN_INSTALL_PATH ${await relativeToTempRoot(tempRoot, claudeInstalled.installedPluginRoot)}\n`,
       );
-      process.stdout.write("CLAUDE_PLUGIN_INSTALL_OK 127\n");
+      process.stdout.write("CLAUDE_PLUGIN_INSTALL_OK 129\n");
 
       const codexEnvironment = environmentFor({ home, claudeConfigDir, codexHome, tempRoot });
       const expectedCodexInstall = join(
@@ -1189,7 +1191,7 @@ async function main() {
       process.stdout.write(
         `CODEX_PLUGIN_INSTALL_PATH ${await relativeToTempRoot(tempRoot, codexInstalled.installedPluginRoot)}\n`,
       );
-      process.stdout.write("CODEX_PLUGIN_INSTALL_OK 127\n");
+      process.stdout.write("CODEX_PLUGIN_INSTALL_OK 129\n");
     });
   });
 }

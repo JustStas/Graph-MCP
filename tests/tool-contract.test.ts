@@ -105,6 +105,7 @@ export const EXPECTED_TOOL_NAMES = [
   "graph_react_to_message",
   "graph_read_mail",
   "graph_remove_chat_member",
+  "graph_remove_mail_attachment",
   "graph_reply_mail",
   "graph_reply_to_channel_message",
   "graph_resolve_share_link",
@@ -130,6 +131,7 @@ export const EXPECTED_TOOL_NAMES = [
   "graph_update_chat_topic",
   "graph_update_contact",
   "graph_update_event",
+  "graph_update_mail_draft",
   "graph_update_mailbox_settings",
   "graph_update_todo_task",
   "graph_update_worksheet_range",
@@ -195,7 +197,7 @@ describe("Graph MCP tool contract", () => {
     expect(overLimit).toEqual([]);
   });
 
-  test("exposes the exact 127-tool inventory and representative input schemas", async () => {
+  test("exposes the exact 129-tool inventory and representative input schemas", async () => {
     const server = await createServer(createDependencies());
     const client = new Client({ name: "tool-contract-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -211,7 +213,7 @@ describe("Graph MCP tool contract", () => {
 
       const result = await client.listTools();
       expect(result.tools.map((tool) => tool.name).sort()).toEqual(EXPECTED_TOOL_NAMES);
-      expect(result.tools).toHaveLength(127);
+      expect(result.tools).toHaveLength(129);
 
       expect(requireTool(result.tools, "graph_get_profile").inputSchema).toMatchObject({
         type: "object",
