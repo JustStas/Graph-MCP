@@ -40475,7 +40475,7 @@ async function createServer2(dependencies) {
     ownedAuthManager = defaults.authManager;
   }
   const server = new McpServer(
-    { name: "Graph MCP", version: "0.9.0" },
+    { name: "Graph MCP", version: "0.10.0" },
     { instructions: SERVER_INSTRUCTIONS }
   );
   registerAllTools(server, resolvedDependencies);
@@ -40512,7 +40512,7 @@ async function createServer2(dependencies) {
 }
 
 // src/cli.ts
-var VERSION = "0.9.0";
+var VERSION = "0.10.0";
 var PROTOCOL_ERROR_MESSAGE = "Graph MCP protocol error.";
 var HELP = `Graph MCP ${VERSION}
 

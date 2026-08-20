@@ -852,8 +852,8 @@ async function runMcpSmoke({ label, pluginRoot, server, environment }) {
       requireRecord(tool, `${label} MCP tool`),
     );
     const serverVersion = client.getServerVersion();
-    if (serverVersion?.version !== "0.9.0" || serverVersion.name !== "Graph MCP") {
-      throw new Error(`${label} MCP server version was not Graph MCP 0.9.0.`);
+    if (serverVersion?.version !== "0.10.0" || serverVersion.name !== "Graph MCP") {
+      throw new Error(`${label} MCP server version was not Graph MCP 0.10.0.`);
     }
     const actualNames = tools
       .map((tool) => requireString(tool.name, "tool name", `${label} MCP tools/list`))

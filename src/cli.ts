@@ -8,7 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { persistSetupConfig } from "./config.js";
 import { createServer } from "./server.js";
 
-const VERSION = "0.9.0";
+const VERSION = "0.10.0";
 const PROTOCOL_ERROR_MESSAGE = "Graph MCP protocol error.";
 const HELP = `Graph MCP ${VERSION}
 
