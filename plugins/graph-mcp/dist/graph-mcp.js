@@ -38247,6 +38247,107 @@ ${MAILBOX_ARGS_DOC}`,
   );
   registerAuthenticatedTool(
     server,
+    "graph_update_mail_draft",
+    {
+      description: `Update an existing draft email message.
+
+All fields are optional except message_id. Only the fields you supply are
+changed; omitted fields keep their current value. To clear recipients from
+a field (e.g. remove all BCC), pass an empty array.
+
+Use graph_add_mail_attachment / graph_remove_mail_attachment to manage
+attachments on the draft.
+
+Args:
+    message_id: The draft message ID (from graph_create_mail_draft or
+        graph_list_mail with folder "drafts").
+    to: New list of To recipient email addresses. Replaces all current To
+        recipients when provided.
+    cc: New list of CC recipient email addresses. Replaces all current CC
+        recipients when provided.
+    bcc: New list of BCC recipient email addresses. Replaces all current BCC
+        recipients when provided.
+    subject: New email subject.
+    body: New email body content. When \`is_html\` is true, send explicit
+        HTML; markdown is not converted.
+    is_html: Whether the body is HTML content (default: True). Only used
+        when \`body\` is provided.
+    importance: Message importance: "low", "normal", or "high".
+    reply_to: New list of addresses that replies should be sent to.
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        message_id: RESOURCE_ID_SCHEMA5,
+        to: RECIPIENTS_SCHEMA.nullable().optional().default(null),
+        cc: CC_SCHEMA,
+        bcc: CC_SCHEMA,
+        subject: external_exports.string().nullable().optional().default(null),
+        body: external_exports.string().nullable().optional().default(null),
+        is_html: external_exports.boolean().default(true),
+        importance: IMPORTANCE_SCHEMA2.nullable().optional().default(null),
+        reply_to: CC_SCHEMA,
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({ message_id, to, cc, bcc, subject, body, is_html, importance, reply_to, mailbox }) => {
+      const updates = {};
+      if (to !== null && to !== void 0) {
+        updates.toRecipients = to.map(recipient);
+      }
+      if (cc !== null && cc !== void 0) {
+        updates.ccRecipients = cc.map(recipient);
+      }
+      if (bcc !== null && bcc !== void 0) {
+        updates.bccRecipients = bcc.map(recipient);
+      }
+      if (subject !== null && subject !== void 0) {
+        updates.subject = subject;
+      }
+      if (body !== null && body !== void 0) {
+        updates.body = buildRichTextBody(body, is_html, RICH_TEXT_OPTIONS);
+      }
+      if (importance !== null && importance !== void 0) {
+        updates.importance = importance;
+      }
+      if (reply_to !== null && reply_to !== void 0) {
+        updates.replyTo = reply_to.map(recipient);
+      }
+      if (Object.keys(updates).length === 0) {
+        return successResponse({ error: "No fields to update were provided." }, "error");
+      }
+      const result = await dependencies.graphClient.patch(
+        messagePath(mailbox, message_id),
+        updates
+      );
+      return successResponse(requireGraphObject5(result));
+    }
+  );
+  registerAuthenticatedTool(
+    server,
+    "graph_remove_mail_attachment",
+    {
+      description: `Remove an attachment from a draft message.
+
+Use graph_list_mail_attachments to find the attachment ID.
+
+Args:
+    message_id: The draft message ID.
+    attachment_id: The attachment ID to remove (from graph_list_mail_attachments).
+${MAILBOX_ARGS_DOC}`,
+      inputSchema: {
+        message_id: RESOURCE_ID_SCHEMA5,
+        attachment_id: RESOURCE_ID_SCHEMA5,
+        mailbox: MAILBOX_SCHEMA
+      }
+    },
+    async ({ message_id, attachment_id, mailbox }) => {
+      await dependencies.graphClient.delete(
+        `${messagePath(mailbox, message_id)}/attachments/${encodeURIComponent(attachment_id)}`
+      );
+      return successResponse({ status: "Attachment removed" });
+    }
+  );
+  registerAuthenticatedTool(
+    server,
     "graph_list_message_rules",
     {
       description: `List the inbox rules, including their conditions, actions, and order.

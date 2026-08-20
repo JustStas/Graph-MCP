@@ -310,6 +310,48 @@ Args:
         mailbox. Requires the delegated Mail.*.Shared permissions.`,
   },
   {
+    name: "graph_update_mail_draft",
+    description: `Update an existing draft email message.
+
+All fields are optional except message_id. Only the fields you supply are
+changed; omitted fields keep their current value. To clear recipients from
+a field (e.g. remove all BCC), pass an empty array.
+
+Use graph_add_mail_attachment / graph_remove_mail_attachment to manage
+attachments on the draft.
+
+Args:
+    message_id: The draft message ID (from graph_create_mail_draft or
+        graph_list_mail with folder "drafts").
+    to: New list of To recipient email addresses. Replaces all current To
+        recipients when provided.
+    cc: New list of CC recipient email addresses. Replaces all current CC
+        recipients when provided.
+    bcc: New list of BCC recipient email addresses. Replaces all current BCC
+        recipients when provided.
+    subject: New email subject.
+    body: New email body content. When \`is_html\` is true, send explicit
+        HTML; markdown is not converted.
+    is_html: Whether the body is HTML content (default: True). Only used
+        when \`body\` is provided.
+    importance: Message importance: "low", "normal", or "high".
+    reply_to: New list of addresses that replies should be sent to.
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
+    name: "graph_remove_mail_attachment",
+    description: `Remove an attachment from a draft message.
+
+Use graph_list_mail_attachments to find the attachment ID.
+
+Args:
+    message_id: The draft message ID.
+    attachment_id: The attachment ID to remove (from graph_list_mail_attachments).
+    mailbox: Shared mailbox address or user ID to act on. Empty targets your own
+        mailbox. Requires the delegated Mail.*.Shared permissions.`,
+  },
+  {
     name: "graph_list_message_rules",
     description: `List the inbox rules, including their conditions, actions, and order.
 
@@ -603,7 +645,7 @@ function messageIds(count: number): string[] {
 }
 
 describe("mail tool registration", () => {
-  test("registers exactly the twenty-five mail names and complete descriptions", () => {
+  test("registers exactly the twenty-seven mail names and complete descriptions", () => {
     const { harness } = registerMailHarness();
 
     expect(
@@ -2265,6 +2307,20 @@ const MAILBOX_ROUTING_CASES: readonly MailboxRoutingCase[] = [
     responses: [{}],
     ownPaths: ["/me/messages/draft-1/send"],
     sharedPaths: [`${SHARED_ROOT}/messages/draft-1/send`],
+  },
+  {
+    name: "graph_update_mail_draft",
+    args: { message_id: "draft-1", subject: "Updated subject" },
+    responses: [{ id: "draft-1", subject: "Updated subject" }],
+    ownPaths: ["/me/messages/draft-1"],
+    sharedPaths: [`${SHARED_ROOT}/messages/draft-1`],
+  },
+  {
+    name: "graph_remove_mail_attachment",
+    args: { message_id: "draft-1", attachment_id: "attach-1" },
+    responses: [null],
+    ownPaths: ["/me/messages/draft-1/attachments/attach-1"],
+    sharedPaths: [`${SHARED_ROOT}/messages/draft-1/attachments/attach-1`],
   },
   {
     name: "graph_list_message_rules",
